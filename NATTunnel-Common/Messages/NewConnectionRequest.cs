@@ -31,8 +31,8 @@ namespace NATTunnel.Common.Messages
 
         public NewConnectionRequest(int id, string endpoint)
         {
-            this.Id = id;
-            this.Endpoint = endpoint;
+            Id = id;
+            Endpoint = endpoint;
         }
         
         public override void Serialize(BinaryWriter writer)

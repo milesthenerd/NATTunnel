@@ -188,7 +188,6 @@ namespace NATTunnel
                     else
                         client = clientMapping[request.Id];
 
-                    //TODO: is this necessary down here?
                     NewConnectionReply connectionReply = new NewConnectionReply(request.Id, $"end{client.localTCPEndpoint}");
                     connection.Send(connectionReply, endpoint);
                     //Clamp to the clients download speed

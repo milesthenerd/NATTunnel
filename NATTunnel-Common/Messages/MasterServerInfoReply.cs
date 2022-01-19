@@ -28,7 +28,7 @@ namespace NATTunnel.Common.Messages
         /// <summary>
         /// The list of <see cref="IPEndPoint"/>s for this reply.
         /// </summary>
-        public List<IPEndPoint> Endpoints { get; private set; }
+        public List<IPEndPoint> Endpoints { get; }
 
         public MasterServerInfoReply()
         {

@@ -18,9 +18,9 @@ namespace NATTunnel.Common.Messages
 
         public MasterServerPublishReply(int id, bool status, string message)
         {
-            this.Id = id;
-            this.Status = status;
-            this.Message = message;
+            Id = id;
+            Status = status;
+            Message = message;
         }
 
         public override void Serialize(BinaryWriter writer)

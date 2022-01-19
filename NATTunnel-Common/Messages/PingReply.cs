@@ -27,9 +27,9 @@ namespace NATTunnel.Common.Messages
 
         public PingReply(int id, long sendTime, string endpoint)
         {
-            this.Id = id;
-            this.SendTime = sendTime;
-            this.Endpoint = endpoint;
+            Id = id;
+            SendTime = sendTime;
+            Endpoint = endpoint;
         }
 
         public override void Serialize(BinaryWriter writer)

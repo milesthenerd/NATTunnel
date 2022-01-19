@@ -18,9 +18,9 @@ namespace NATTunnel.Common.Messages
 
         public MasterServerPublishRequest(int id, int secret, int localPort)
         {
-            this.Id = id;
-            this.Secret = secret;
-            this.LocalPort = localPort;
+            Id = id;
+            Secret = secret;
+            LocalPort = localPort;
         }
 
         public override void Serialize(BinaryWriter writer)

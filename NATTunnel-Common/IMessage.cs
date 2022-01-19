@@ -7,6 +7,9 @@ namespace NATTunnel.Common
     /// </summary>
     public interface IMessage
     {
+        //TODO: one case where something tried to call default constructor which is the reason why everything inherited from this
+        // has a default constructor. Investigate what it was and get rid of the unused ones.
+
         /// <summary>
         /// Sends all data from this object to the given <paramref name="writer"/>.
         /// </summary>
