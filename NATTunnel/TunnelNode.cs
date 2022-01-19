@@ -329,7 +329,7 @@ namespace NATTunnel
                     {
                         Client client = clientMapping[disconnect.Id];
                         client.Disconnect("Remote side requested a disconnect");
-                        Console.WriteLine($"Stream {disconnect.Id} remotely disconnected because: {disconnect.reason}");
+                        Console.WriteLine($"Stream {disconnect.Id} remotely disconnected because: {disconnect.Reason}");
                     }
                     break;
                 }
