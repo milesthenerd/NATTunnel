@@ -7,11 +7,6 @@ namespace NATTunnel.Common.Messages
     {
         public string message;
 
-        public int GetID()
-        {
-            return Id;
-        }
-
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);

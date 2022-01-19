@@ -25,12 +25,6 @@ namespace NATTunnel.Common.Messages
             this.downloadRate = downloadRate;
             this.ep = ep;
         }
-
-        public int GetID()
-        {
-            return Id;
-        }
-
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
