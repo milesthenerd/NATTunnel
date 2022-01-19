@@ -18,7 +18,7 @@ namespace NATTunnel
         //TODO: entire class should get reviewed and eventually split up into smaller classes
 
         private static readonly TcpClient tcpClient = new TcpClient();
-        private static readonly UdpClient udpClient;
+        private static readonly UdpClient udpClient; // set in constructor
         private static NetworkStream tcpClientStream;
         private static Thread tcpClientThread;
         private static Thread udpClientThread;
@@ -36,7 +36,7 @@ namespace NATTunnel
         private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
         private static readonly Dictionary<IPEndPoint, IPEndPoint> mapping = new Dictionary<IPEndPoint, IPEndPoint>();
         private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
-        private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 65535);
+        private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
 
         static MediationClient()
         {
@@ -44,15 +44,12 @@ namespace NATTunnel
             if (!File.Exists("config.txt") && !TryCreateNewConfig())
                 Environment.Exit(-1);
 
-            using (StreamReader sr = new StreamReader("config.txt"))
+            if (!NodeOptions.TryLoadConfig())
             {
-                if (!NodeOptions.Load(sr))
-                {
-                    Console.WriteLine("Failed to load config.txt");
-                    Console.WriteLine("Press any key to exit...");
-                    Console.ReadKey();
-                    Environment.Exit(-1);
-                }
+                Console.WriteLine("Failed to load config.txt");
+                Console.WriteLine("Press any key to exit...");
+                Console.ReadKey();
+                Environment.Exit(-1);
             }
 
             udpClient = new UdpClient(NodeOptions.mediationClientPort);
@@ -65,7 +62,7 @@ namespace NATTunnel
             }
 
             endpoint = NodeOptions.mediationIP;
-            programEndpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), NodeOptions.localPort);
+            programEndpoint = new IPEndPoint(IPAddress.Loopback, NodeOptions.localPort);
             remoteIp = NodeOptions.remoteIP;
             mediationClientPort = NodeOptions.mediationClientPort;
             isServer = NodeOptions.isServer;
@@ -211,7 +208,7 @@ namespace NATTunnel
 
                 Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
-                if (listenEndpoint.Address.ToString() == "127.0.0.1" && listenEndpoint.Port != mediationClientPort)
+                if (Equals(listenEndpoint.Address, IPAddress.Loopback) && listenEndpoint.Port != mediationClientPort)
                 {
                     localAppPort = listenEndpoint.Port;
                 }
@@ -266,7 +263,6 @@ namespace NATTunnel
                 if (connected && receivedIp.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 {
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
-                    Console.WriteLine("huh");
                 }
 
                 if (!connected || receivedIp.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
@@ -274,14 +270,12 @@ namespace NATTunnel
 
                 try
                 {
-                    udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Parse("127.0.0.1"), localAppPort));
+                    udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
                 }
                 catch (Exception e)
                 {
                     Console.WriteLine(e);
                 }
-
-                Console.WriteLine("huh 2");
             }
         }
 
@@ -314,7 +308,7 @@ namespace NATTunnel
                 Console.WriteLine($"length {timeoutClients.Count} and {connectedClients.Count}");
                 Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
-                if (listenEndpoint.Address.ToString() != "127.0.0.1" && listenEndpoint.Port != mediationClientPort)
+                if (!Equals(listenEndpoint.Address, IPAddress.Loopback) && listenEndpoint.Port != mediationClientPort)
                     localAppPort = listenEndpoint.Port;
 
 
@@ -369,7 +363,7 @@ namespace NATTunnel
                     }
                 }
 
-                if (connected && receivedIp.ToString() != "hi" && listenEndpoint.Address.ToString() == "127.0.0.1")
+                if (connected && receivedIp.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 {
                     string receiveString = Encoding.ASCII.GetString(receiveBuffer);
                     int splitPos = receiveString.IndexOf("end", StringComparison.Ordinal);
@@ -387,6 +381,8 @@ namespace NATTunnel
                                 bool checkMap = true;
                                 try
                                 {
+                                    //TODO: this is basically just checking if the address is actually a valid ip address. Surely there's a better way for this?
+                                    //Same with port below
                                     IPAddress.Parse(address);
                                 }
                                 catch

@@ -23,10 +23,16 @@ namespace NATTunnel.Common
         public static int masterServerID = r.Next();
         public static int masterServerSecret = r.Next();
 
-        public static bool Load(StreamReader sr)
+        /// <summary>
+        /// Tries to load the config file.
+        /// </summary>
+        /// <returns>Returns <see langword="true"/> if loading was successful, <see langword="false"/> if it wasn't.</returns>
+        public static bool TryLoadConfig()
         {
+            //TODO: this currently hardcodes the config file to $PWD/config.txt. Bad idea.
+            using StreamReader streamReader = new StreamReader("config.txt");
             string currentLine;
-            while ((currentLine = sr.ReadLine()) != null)
+            while ((currentLine = streamReader.ReadLine()) != null)
             {
                 int splitIndex = currentLine.IndexOf("=", StringComparison.Ordinal);
                 if (splitIndex <= 0) continue;
@@ -110,7 +116,7 @@ namespace NATTunnel.Common
         private static void ResolveAddress()
         {
             endpoints.Clear();
-            int splitIndex = endpoint.LastIndexOf(":");
+            int splitIndex = endpoint.LastIndexOf(":", StringComparison.Ordinal);
             string lhs = endpoint.Substring(0, splitIndex);
             string rhs = endpoint.Substring(splitIndex + 1);
             int port = Int32.Parse(rhs);
