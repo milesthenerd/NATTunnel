@@ -1,4 +1,5 @@
-﻿using System;
+﻿using NATTunnel.Common;
+using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;

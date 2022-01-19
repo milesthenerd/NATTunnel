@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 
-namespace NATTunnel
+namespace NATTunnel.Common
 {
     public static class NodeOptions
     {

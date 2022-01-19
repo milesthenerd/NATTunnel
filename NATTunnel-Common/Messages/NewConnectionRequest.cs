@@ -13,7 +13,7 @@ namespace NATTunnel.Common.Messages
         /// <summary>
         /// The maximum acceptable download rate in kB per second.
         /// </summary>
-        public int DownloadRate { get; private set; } // TODO: Load directly from config instead of waiting for instantiation?
+        public int DownloadRate { get; private set; } = NodeOptions.downloadSpeed; // TODO: Load directly from config instead of waiting for instantiation?
 
         /// <summary>
         /// The endpoint of this <see cref="NewConnectionRequest"/>.
