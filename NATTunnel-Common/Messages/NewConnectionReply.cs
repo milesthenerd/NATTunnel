@@ -29,7 +29,7 @@ namespace NATTunnel.Common.Messages
             Endpoint = "";
         }
 
-        public NewConnectionReply(int id, string endpoint = "")
+        public NewConnectionReply(int id, string endpoint)
         {
             this.Id = id;
             this.Endpoint = endpoint;

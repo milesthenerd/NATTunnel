@@ -157,22 +157,21 @@ namespace NATTunnel
 
             switch (message)
             {
-                case NewConnectionRequest nc:
+                case NewConnectionRequest request:
                 {
                     if (!NodeOptions.isServer) break;
 
-                    NewConnectionReply ncr = new NewConnectionReply(nc.Id);
                     //Do not connect protocol-incompatible clients.
-                    if (nc.ProtocolVersion != Header.PROTOCOL_VERSION) return;
+                    if (request.ProtocolVersion != Header.PROTOCOL_VERSION) return;
 
                     Client client = null;
-                    if (!clientMapping.ContainsKey(ncr.Id))
+                    if (!clientMapping.ContainsKey(request.Id))
                     {
                         TcpClient tcp = new TcpClient(AddressFamily.InterNetwork);
                         try
                         {
                             tcp.Connect(NodeOptions.endpoints[0]);
-                            client = new Client(nc.Id, connection, tcp, connectionBucket);
+                            client = new Client(request.Id, connection, tcp, connectionBucket);
                             //add mapping for local tcp client and remote IP
                             clients.Add(client);
                             clientMapping.Add(client.id, client);
@@ -181,22 +180,22 @@ namespace NATTunnel
                         catch
                         {
                             //TODO do something about this null bandaid
-                            Disconnect dis = new Disconnect(nc.Id, "TCP server is currently not running", $"end{client?.localTCPEndpoint}");
+                            Disconnect dis = new Disconnect(request.Id, "TCP server is currently not running", $"end{client?.localTCPEndpoint}");
                             connection.Send(dis, endpoint);
                             return;
                         }
                     }
                     else
-                        client = clientMapping[nc.Id];
+                        client = clientMapping[request.Id];
 
                     //TODO: is this necessary down here?
-                    ncr.Endpoint = $"end{client.localTCPEndpoint}";
-                    connection.Send(ncr, endpoint);
+                    NewConnectionReply connectionReply = new NewConnectionReply(request.Id, $"end{client.localTCPEndpoint}");
+                    connection.Send(connectionReply, endpoint);
                     //Clamp to the clients download speed
-                    Console.WriteLine($"Client {nc.Id} download rate is {nc.DownloadRate}KB/s");
-                    if (nc.DownloadRate < NodeOptions.uploadSpeed)
+                    Console.WriteLine($"Client {request.Id} download rate is {request.DownloadRate}KB/s");
+                    if (request.DownloadRate < NodeOptions.uploadSpeed)
                     {
-                        client.bucket.rateBytesPerSecond = nc.DownloadRate * 1024;
+                        client.bucket.rateBytesPerSecond = request.DownloadRate * 1024;
                         client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
                     }
                     //Prefer IPv6
