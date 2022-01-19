@@ -10,6 +10,10 @@ namespace NATTunnel.Common.Messages
         public long StreamPos { get; private set; }
         public long StreamAck { get; private set; }
         public byte[] TCPData { get; private set; }
+
+        /// <summary>
+        /// The endpoint.
+        /// </summary>
         public string Endpoint { get; private set; }
 
         public Data()

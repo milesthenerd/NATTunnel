@@ -102,10 +102,10 @@ namespace NATTunnel
 
         public void ReceiveAck(Ack ack)
         {
-            if (ack.streamAck <= ackSafe) return;
+            if (ack.StreamAck <= ackSafe) return;
 
             lastUdpRecvAckTime = DateTime.UtcNow.Ticks;
-            ackSafe = ack.streamAck;
+            ackSafe = ack.StreamAck;
         }
 
         private void SendData()

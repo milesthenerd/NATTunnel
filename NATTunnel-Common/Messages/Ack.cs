@@ -2,37 +2,45 @@ using System.IO;
 
 namespace NATTunnel.Common.Messages
 {
+    /// <summary>
+    /// Class for data acknowledgement.
+    /// </summary>
     [MessageTypeAttribute(MessageType.ACK)]
     public class Ack : NodeMessage
     {
-        public long streamAck;
-        public string ep;
+        public long StreamAck { get; private set; }
+
+        /// <summary>
+        /// The endpoint.
+        /// </summary>
+        public string Endpoint { get; private set; }
 
         public Ack()
         {
             Id = 0;
-            streamAck = 0;
-            ep = "";
+            StreamAck = 0;
+            Endpoint = "";
         }
 
-        public Ack(int id, long streamAck, string ep)
+        public Ack(int id, long streamAck, string endpoint)
         {
-            this.Id = id;
-            this.streamAck = streamAck;
-            this.ep = ep;
+            Id = id;
+            StreamAck = streamAck;
+            Endpoint = endpoint;
         }
 
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
-            writer.Write(streamAck);
-            writer.Write(ep);
+            writer.Write(StreamAck);
+            writer.Write(Endpoint);
         }
+
         public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();
-            streamAck = reader.ReadInt64();
-            ep = reader.ReadString();
+            StreamAck = reader.ReadInt64();
+            Endpoint = reader.ReadString();
         }
     }
 }
