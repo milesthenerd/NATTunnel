@@ -125,7 +125,7 @@ namespace NATTunnel
                 {
                     for (int i = 0; i < 4; i++)
                     {
-                        NewConnectionRequest ncr = new NewConnectionRequest(client.id, NodeOptions.downloadSpeed, $"end{client.localTCPEndpoint}");
+                        NewConnectionRequest ncr = new NewConnectionRequest(client.id, $"end{client.localTCPEndpoint}");
                         connection.Send(ncr, endpoint);
                     }
                 }
@@ -261,7 +261,7 @@ namespace NATTunnel
                     {
                         for (int i = 0; i < 4; i++)
                         {
-                            NewConnectionRequest ncr = new NewConnectionRequest(msir.client, NodeOptions.downloadSpeed, $"end{client.localTCPEndpoint}");
+                            NewConnectionRequest ncr = new NewConnectionRequest(msir.client, $"end{client.localTCPEndpoint}");
                             Console.WriteLine($"MSIR connect: {msirEndpoint}");
                             connection.Send(ncr, msirEndpoint);
                         }
