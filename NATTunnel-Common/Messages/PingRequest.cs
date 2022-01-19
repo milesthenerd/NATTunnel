@@ -3,40 +3,39 @@ using System.IO;
 namespace NATTunnel.Common.Messages
 {
     [MessageTypeAttribute(MessageType.PING_REQUEST)]
-    public class PingRequest : INodeMessage
+    public class PingRequest : NodeMessage
     {
-        public int id;
         public long sendTime;
         public string ep;
 
         public PingRequest()
         {
-            id = 0;
+            Id = 0;
             sendTime = 0;
             ep = "";
         }
 
         public PingRequest(int id, long sendTime, string ep)
         {
-            this.id = id;
+            this.Id = id;
             this.sendTime = sendTime;
             this.ep = ep;
         }
 
         public int GetID()
         {
-            return id;
+            return Id;
         }
 
-        public void Serialize(BinaryWriter writer)
+        public override void Serialize(BinaryWriter writer)
         {
-            writer.Write(id);
+            writer.Write(Id);
             writer.Write(sendTime);
             writer.Write(ep);
         }
-        public void Deserialize(BinaryReader reader)
+        public override void Deserialize(BinaryReader reader)
         {
-            id = reader.ReadInt32();
+            Id = reader.ReadInt32();
             sendTime = reader.ReadInt64();
             ep = reader.ReadString();
         }

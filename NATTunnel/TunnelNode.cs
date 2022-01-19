@@ -147,9 +147,9 @@ namespace NATTunnel
 
         private void ReceiveCallback(IMessage message, IPEndPoint endpoint)
         {
-            if (message is INodeMessage nodeMessage)
+            if (message is NodeMessage nodeMessage)
             {
-                int clientID = nodeMessage.GetID();
+                int clientID = nodeMessage.Id;
                 if (clientMapping.ContainsKey(clientID))
                 {
                     Client client = clientMapping[clientID];
@@ -163,18 +163,18 @@ namespace NATTunnel
                 {
                     if (!options.isServer) break;
 
-                    NewConnectionReply ncr = new NewConnectionReply(nc.id, Header.PROTOCOL_VERSION, options.downloadSpeed);
+                    NewConnectionReply ncr = new NewConnectionReply(nc.Id, Header.PROTOCOL_VERSION, options.downloadSpeed);
                     //Do not connect protocol-incompatible clients.
                     if (nc.protocol_version != Header.PROTOCOL_VERSION) return;
 
                     Client client = null;
-                    if (!clientMapping.ContainsKey(ncr.id))
+                    if (!clientMapping.ContainsKey(ncr.Id))
                     {
                         TcpClient tcp = new TcpClient(AddressFamily.InterNetwork);
                         try
                         {
                             tcp.Connect(options.endpoints[0]);
-                            client = new Client(options, nc.id, connection, tcp, connectionBucket);
+                            client = new Client(options, nc.Id, connection, tcp, connectionBucket);
                             //add mapping for local tcp client and remote IP
                             clients.Add(client);
                             clientMapping.Add(client.id, client);
@@ -183,19 +183,19 @@ namespace NATTunnel
                         catch
                         {
                             //TODO do something about this null bandaid
-                            Disconnect dis = new Disconnect(nc.id, "TCP server is currently not running", $"end{client?.localTCPEndpoint}");
+                            Disconnect dis = new Disconnect(nc.Id, "TCP server is currently not running", $"end{client?.localTCPEndpoint}");
                             connection.Send(dis, endpoint);
                             return;
                         }
                     }
                     else
-                        client = clientMapping[nc.id];
+                        client = clientMapping[nc.Id];
 
                     //TODO: is this necessary down here?
                     ncr.ep = $"end{client.localTCPEndpoint}";
                     connection.Send(ncr, endpoint);
                     //Clamp to the clients download speed
-                    Console.WriteLine($"Client {nc.id} download rate is {nc.downloadRate}KB/s");
+                    Console.WriteLine($"Client {nc.Id} download rate is {nc.downloadRate}KB/s");
                     if (nc.downloadRate < options.uploadSpeed)
                     {
                         client.bucket.rateBytesPerSecond = nc.downloadRate * 1024;
@@ -221,9 +221,9 @@ namespace NATTunnel
                         return;
                     }
 
-                    if (clientMapping.ContainsKey(ncr.id))
+                    if (clientMapping.ContainsKey(ncr.Id))
                     {
-                        Client c = clientMapping[ncr.id];
+                        Client c = clientMapping[ncr.Id];
                         //Prefer IPv6
                         //TODO: whats the order hre
                         if (c.udpEndpoint == null || c.udpEndpoint.AddressFamily == AddressFamily.InterNetwork && endpoint.AddressFamily == AddressFamily.InterNetworkV6)
@@ -279,9 +279,9 @@ namespace NATTunnel
 
                 case Data data:
                 {
-                    if (clientMapping.ContainsKey(data.id))
+                    if (clientMapping.ContainsKey(data.Id))
                     {
-                        Client client = clientMapping[data.id];
+                        Client client = clientMapping[data.Id];
                         //TODO: WHY IS THIS NECESSARY!?!?!?
                         client.udpEndpoint = endpoint;
                         if (client.tcp != null) client.ReceiveData(data, true);
@@ -291,9 +291,9 @@ namespace NATTunnel
 
                 case Ack ack:
                 {
-                    if (clientMapping.ContainsKey(ack.id))
+                    if (clientMapping.ContainsKey(ack.Id))
                     {
-                        Client client = clientMapping[ack.id];
+                        Client client = clientMapping[ack.Id];
                         client.ReceiveAck(ack);
                     }
                     break;
@@ -301,10 +301,10 @@ namespace NATTunnel
 
                 case PingRequest pingRequest:
                 {
-                    if (clientMapping.ContainsKey(pingRequest.id))
+                    if (clientMapping.ContainsKey(pingRequest.Id))
                     {
-                        Client client = clientMapping[pingRequest.id];
-                        PingReply preply = new PingReply(pingRequest.id, pingRequest.sendTime, $"end{client.localTCPEndpoint}");
+                        Client client = clientMapping[pingRequest.Id];
+                        PingReply preply = new PingReply(pingRequest.Id, pingRequest.sendTime, $"end{client.localTCPEndpoint}");
                         connection.Send(preply, endpoint);
                     }
                     break;
@@ -314,9 +314,9 @@ namespace NATTunnel
                     long currentTime = DateTime.UtcNow.Ticks;
                     long timeDelta = currentTime - pingReply.sendTime;
                     int timeMs = (int)(timeDelta / TimeSpan.TicksPerMillisecond);
-                    if (clientMapping.ContainsKey(pingReply.id))
+                    if (clientMapping.ContainsKey(pingReply.Id))
                     {
-                        Client client = clientMapping[pingReply.id];
+                        Client client = clientMapping[pingReply.Id];
                         client.latency = timeMs;
                     }
                     break;
@@ -328,11 +328,11 @@ namespace NATTunnel
                 }
                 case Disconnect disconnect:
                 {
-                    if (clientMapping.ContainsKey(disconnect.id))
+                    if (clientMapping.ContainsKey(disconnect.Id))
                     {
-                        Client client = clientMapping[disconnect.id];
+                        Client client = clientMapping[disconnect.Id];
                         client.Disconnect("Remote side requested a disconnect");
-                        Console.WriteLine($"Stream {disconnect.id} remotely disconnected because: {disconnect.reason}");
+                        Console.WriteLine($"Stream {disconnect.Id} remotely disconnected because: {disconnect.reason}");
                     }
                     break;
                 }

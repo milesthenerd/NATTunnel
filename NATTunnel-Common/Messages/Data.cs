@@ -3,9 +3,8 @@ using System.IO;
 namespace NATTunnel.Common.Messages
 {
     [MessageTypeAttribute(MessageType.DATA)]
-    public class Data : INodeMessage
+    public class Data : NodeMessage
     {
-        public int id;
         public long streamPos;
         public long streamAck;
         public byte[] tcpData;
@@ -13,14 +12,14 @@ namespace NATTunnel.Common.Messages
 
         public Data()
         {
-            id = 0;
+            Id = 0;
             streamAck = 0;
             ep = "";
         }
 
         public Data(int id, long streamPos, long streamAck, byte[] tcpData, string ep)
         {
-            this.id = id;
+            this.Id = id;
             this.streamPos = streamPos;
             this.streamAck = streamAck;
             this.tcpData = tcpData;
@@ -29,21 +28,21 @@ namespace NATTunnel.Common.Messages
 
         public int GetID()
         {
-            return id;
+            return Id;
         }
 
-        public void Serialize(BinaryWriter writer)
+        public override void Serialize(BinaryWriter writer)
         {
-            writer.Write(id);
+            writer.Write(Id);
             writer.Write(streamPos);
             writer.Write(streamAck);
             writer.Write((short)tcpData.Length);
             writer.Write(tcpData);
             writer.Write(ep);
         }
-        public void Deserialize(BinaryReader reader)
+        public override void Deserialize(BinaryReader reader)
         {
-            id = reader.ReadInt32();
+            Id = reader.ReadInt32();
             streamPos = reader.ReadInt64();
             streamAck = reader.ReadInt64();
             int length = reader.ReadInt16();

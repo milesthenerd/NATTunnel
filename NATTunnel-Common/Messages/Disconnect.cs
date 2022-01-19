@@ -4,40 +4,39 @@ using System.IO;
 namespace NATTunnel.Common.Messages
 {
     [MessageTypeAttribute(MessageType.DISCONNECT)]
-    public class Disconnect : INodeMessage
+    public class Disconnect : NodeMessage
     {
-        public int id;
         public string reason;
         public string ep;
 
         public Disconnect()
         {
-            id = 0;
+            Id = 0;
             reason = "";
             ep = "";
         }
 
         public Disconnect(int id, string reason, string ep)
         {
-            this.id = id;
+            this.Id = id;
             this.reason = reason;
             this.ep = ep;
         }
 
         public int GetID()
         {
-            return id;
+            return Id;
         }
 
-        public void Serialize(BinaryWriter writer)
+        public override void Serialize(BinaryWriter writer)
         {
-            writer.Write(id);
+            writer.Write(Id);
             writer.Write(reason);
             writer.Write(ep);
         }
-        public void Deserialize(BinaryReader reader)
+        public override void Deserialize(BinaryReader reader)
         {
-            id = reader.ReadInt32();
+            Id = reader.ReadInt32();
             reason = reader.ReadString();
             ep = reader.ReadString();
         }
