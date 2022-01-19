@@ -261,9 +261,7 @@ namespace NATTunnel
 
                 //TODO: pretty sure this is not necessary / can be condensed
                 if (connected && receivedIp.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
-                {
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
-                }
 
                 if (!connected || receivedIp.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
                     continue;
@@ -289,10 +287,9 @@ namespace NATTunnel
 
                 mostRecentEndPoint = listenEndpoint;
 
-                foreach ((var key, int value) in timeoutClients)
+                foreach ((var key, int _) in timeoutClients)
                 {
-                    //TODO: do you want same reference, or same values?
-                    bool exists = connectedClients.Any(value2 => key == value2);
+                    bool exists = connectedClients.Any(value2 => Equals(key, value2));
 
                     if (!exists)
                     {
@@ -349,7 +346,6 @@ namespace NATTunnel
                     }
                 }
 
-
                 if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
                 {
                     intendedPort = receivedPort;
@@ -376,38 +372,31 @@ namespace NATTunnel
                             string[] endpointSplit = endpointStr.Split(":");
                             if (endpointSplit.Length > 1)
                             {
-                                string address = endpointSplit[0];
-                                int port = 65535;
+                                IPAddress address;
+                                int port;
                                 bool checkMap = true;
-                                try
+
+                                if (!IPAddress.TryParse(endpointSplit[0], out address))
                                 {
-                                    //TODO: this is basically just checking if the address is actually a valid ip address. Surely there's a better way for this?
-                                    //Same with port below
-                                    IPAddress.Parse(address);
-                                }
-                                catch
-                                {
-                                    address = "127.0.0.1";
+                                    address = IPAddress.Loopback;
                                     checkMap = false;
                                 }
 
-                                try
+                                if (!Int32.TryParse(endpointSplit[1], out port))
                                 {
-                                    port = Int32.Parse(endpointSplit[1]);
-                                }
-                                catch
-                                {
+                                    port = 65535;
                                     checkMap = false;
                                 }
+
                                 Console.WriteLine($"{address}:{port}");
 
-                                IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Parse(address), port);
+                                IPEndPoint destEndpoint = new IPEndPoint(address, port);
 
                                 if (checkMap)
                                 {
                                     try
                                     {
-                                        destEndpoint = mapping[new IPEndPoint(IPAddress.Parse(address), port)];
+                                        destEndpoint = mapping[new IPEndPoint(address, port)];
                                     }
                                     catch (Exception e)
                                     {
