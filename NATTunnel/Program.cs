@@ -11,6 +11,8 @@ namespace NATTunnel
 
             //TODO: the port endpoint has to be the same as the mediationclientport, as otherwise this is handled weirdly somewhere in this mess
 
+            //TODO: theres a weird bug where sometimes the server needs to be restarted for whatever reason
+
             // NodeOptions / config file loading is done in the MediationClient constructor
             // as it is the first thing we call and the class that relies most upon the settings.
             MediationClient.TrackedClient();

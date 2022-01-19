@@ -261,6 +261,8 @@ namespace NATTunnel
 
                 //TODO: pretty sure this is not necessary / can be condensed
                 if (connected && receivedIp?.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
+                    //TODO: weird consistent way to crash here because intendedPort is 0, because it didnt into the if holepunchcount < 5 from above, because receivedIP is null
+                    // because buffer is fucked. https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
 
                 if (!connected || receivedIp?.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
@@ -268,6 +270,7 @@ namespace NATTunnel
 
                 try
                 {
+                    //TODO: sometimes fails here for whatever reason
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
                 }
                 catch (Exception e)
@@ -427,6 +430,7 @@ namespace NATTunnel
                 try
                 {
                     byte[] receiveBuffer = new byte[tcpClient.ReceiveBufferSize];
+                    //TODO: sometimes fails here
                     int bytesRead = tcpClientStream.Read(receiveBuffer, 0, tcpClient.ReceiveBufferSize);
                     Console.WriteLine("Received: " + Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead));
                 }
