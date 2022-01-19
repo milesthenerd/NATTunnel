@@ -34,9 +34,9 @@ namespace NATTunnel
         private static readonly int mediationClientPort;
         private static readonly bool isServer;
         private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
-        private static readonly Dictionary<IPEndPoint, IPEndPoint> Mapping = new Dictionary<IPEndPoint, IPEndPoint>();
-        private static readonly Dictionary<IPEndPoint, int> TimeoutClients = new Dictionary<IPEndPoint, int>();
-        private static IPEndPoint MostRecentEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 65535);
+        private static readonly Dictionary<IPEndPoint, IPEndPoint> mapping = new Dictionary<IPEndPoint, IPEndPoint>();
+        private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
+        private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 65535);
 
         static MediationClient()
         {
@@ -44,7 +44,6 @@ namespace NATTunnel
             if (!File.Exists("config.txt") && !TryCreateNewConfig())
                 Environment.Exit(-1);
 
-            
             using (StreamReader sr = new StreamReader("config.txt"))
             {
                 if (!NodeOptions.Load(sr))
@@ -74,12 +73,12 @@ namespace NATTunnel
 
         public static void Add(IPEndPoint localEndpoint)
         {
-            Mapping.Add(localEndpoint, MostRecentEndPoint);
+            mapping.Add(localEndpoint, mostRecentEndPoint);
         }
 
         public static void Remove(IPEndPoint localEndpoint)
         {
-            Mapping.Remove(localEndpoint);
+            mapping.Remove(localEndpoint);
         }
 
         private static void OnTimedEvent(object source, ElapsedEventArgs e)
@@ -109,20 +108,20 @@ namespace NATTunnel
                 Console.WriteLine("Keep alive");
             }
 
-            foreach ((var key, int value) in TimeoutClients)
+            foreach ((var key, int value) in timeoutClients)
             {
                 Console.WriteLine($"time left: {value}");
                 if (value >= 1)
                 {
                     int timeRemaining = value;
                     timeRemaining--;
-                    TimeoutClients[key] = timeRemaining;
+                    timeoutClients[key] = timeRemaining;
                 }
                 else
                 {
                     Console.WriteLine($"timed out {key}");
                     connectedClients.Remove(key);
-                    TimeoutClients.Remove(key);
+                    timeoutClients.Remove(key);
                 }
             }
         }
@@ -291,12 +290,12 @@ namespace NATTunnel
             IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
             while (true)
             {
-                Console.WriteLine(Mapping.Count);
+                Console.WriteLine(mapping.Count);
                 byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
 
-                MostRecentEndPoint = listenEndpoint;
+                mostRecentEndPoint = listenEndpoint;
 
-                foreach ((var key, int value) in TimeoutClients)
+                foreach ((var key, int value) in timeoutClients)
                 {
                     //TODO: do you want same reference, or same values?
                     bool exists = connectedClients.Any(value2 => key == value2);
@@ -304,15 +303,15 @@ namespace NATTunnel
                     if (!exists)
                     {
                         Console.WriteLine($"removing {key}");
-                        TimeoutClients.Remove(key);
+                        timeoutClients.Remove(key);
                     }
 
                     Console.WriteLine($"{key} and {listenEndpoint}");
                     if (key.Address.ToString() == listenEndpoint.Address.ToString())
-                        TimeoutClients[key] = 5;
+                        timeoutClients[key] = 5;
                 }
 
-                Console.WriteLine($"length {TimeoutClients.Count} and {connectedClients.Count}");
+                Console.WriteLine($"length {timeoutClients.Count} and {connectedClients.Count}");
                 Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
                 if (listenEndpoint.Address.ToString() != "127.0.0.1" && listenEndpoint.Port != mediationClientPort)
@@ -322,7 +321,7 @@ namespace NATTunnel
                 if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && Equals(listenEndpoint.Address, intendedIp))
                 {
                     connectedClients.Add(listenEndpoint);
-                    TimeoutClients.Add(listenEndpoint, 5);
+                    timeoutClients.Add(listenEndpoint, 5);
                     Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
                 }
 
@@ -412,7 +411,7 @@ namespace NATTunnel
                                 {
                                     try
                                     {
-                                        destEndpoint = Mapping[new IPEndPoint(IPAddress.Parse(address), port)];
+                                        destEndpoint = mapping[new IPEndPoint(IPAddress.Parse(address), port)];
                                     }
                                     catch (Exception e)
                                     {
