@@ -22,13 +22,13 @@ namespace NATTunnel.Common.Messages
             this.localPort = localPort;
         }
 
-        public void Serialize(BinaryWriter writer)
+        public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
             writer.Write(secret);
             writer.Write(localPort);
         }
-        public void Deserialize(BinaryReader reader)
+        public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();
             secret = reader.ReadInt32();
