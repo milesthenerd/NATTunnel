@@ -25,13 +25,12 @@ namespace NATTunnel
         private static Thread udpServerThread;
         private static readonly IPEndPoint endpoint;
         private static readonly IPEndPoint programEndpoint;
-        //TODO: consider using address for this?
-        private static string intendedIp;
+        private static IPAddress intendedIp;
         private static int intendedPort;
         private static int localAppPort;
         private static int holePunchReceivedCount;
         private static bool connected;
-        private static readonly string remoteIp;
+        private static readonly IPAddress remoteIp;
         private static readonly int mediationClientPort;
         private static readonly bool isServer;
         private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
@@ -88,7 +87,7 @@ namespace NATTunnel
             //If not connected to remote endpoint, send remote IP to mediator
             if (!connected || isServer)
             {
-                byte[] sendBuffer = Encoding.ASCII.GetBytes(intendedIp);
+                byte[] sendBuffer = Encoding.ASCII.GetBytes(intendedIp.ToString());
                 udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
                 Console.WriteLine("Sent");
             }
@@ -105,7 +104,7 @@ namespace NATTunnel
                 }
                 else
                 {
-                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(IPAddress.Parse(intendedIp), intendedPort));
+                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
                 }
                 Console.WriteLine("Keep alive");
             }
@@ -179,7 +178,8 @@ namespace NATTunnel
         public static void UdpServer()
         {
             //Set client intendedIP to something no client will have
-            intendedIp = "0.0.0.0";
+            //TODO: double check that this (255.255.255.255) works the same 0.0.0.0
+            intendedIp = IPAddress.None;
             //Try to send initial msg to mediator
             try
             {
@@ -217,7 +217,7 @@ namespace NATTunnel
                     localAppPort = listenEndpoint.Port;
                 }
 
-                if (listenEndpoint.Address.ToString() == intendedIp)
+                if (Equals(listenEndpoint.Address, intendedIp))
                 {
                     Console.WriteLine("pog");
                     holePunchReceivedCount++;
@@ -237,20 +237,20 @@ namespace NATTunnel
                     }
                 }
 
-                string receivedIp = "";
+                IPAddress receivedIp = null;
                 int receivedPort = 0;
 
-                if (listenEndpoint.Address.ToString() == endpoint.Address.ToString())
+                if (Equals(listenEndpoint.Address, endpoint.Address))
                 {
                     string[] msgArray = Encoding.ASCII.GetString(receiveBuffer).Split(":");
 
-                    receivedIp = msgArray[0];
+                    receivedIp = IPAddress.Parse(msgArray[0]);
                     receivedPort = 0;
                     if (msgArray.Length > 1)
                         receivedPort = Int32.Parse(msgArray[1]);
                 }
 
-                if (receivedIp == intendedIp && holePunchReceivedCount < 5)
+                if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
                 {
                     intendedPort = receivedPort;
                     Console.WriteLine(intendedIp);
@@ -258,19 +258,19 @@ namespace NATTunnel
                     if (intendedPort != 0)
                     {
                         byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(IPAddress.Parse(intendedIp), intendedPort));
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
                         Console.WriteLine("punching");
                     }
                 }
 
                 //TODO: pretty sure this is not necessary / can be condensed
-                if (connected && receivedIp != "hi" && listenEndpoint.Address.ToString() == "127.0.0.1")
+                if (connected && receivedIp.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 {
-                    udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Parse(intendedIp), intendedPort));
+                    udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
                     Console.WriteLine("huh");
                 }
 
-                if (!connected || receivedIp == "hi" || listenEndpoint.Address.ToString() != intendedIp)
+                if (!connected || receivedIp.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
                     continue;
 
                 try
@@ -319,35 +319,35 @@ namespace NATTunnel
                     localAppPort = listenEndpoint.Port;
 
 
-                if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && listenEndpoint.Address.ToString() == intendedIp)
+                if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && Equals(listenEndpoint.Address, intendedIp))
                 {
                     connectedClients.Add(listenEndpoint);
                     TimeoutClients.Add(listenEndpoint, 5);
                     Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
                 }
 
-                if (listenEndpoint.Address.ToString() == intendedIp)
+                if (Equals(listenEndpoint.Address, intendedIp))
                 {
                     Console.WriteLine("pog");
                     holePunchReceivedCount++;
                     if (holePunchReceivedCount >= 5 && !connected) connected = true;
                 }
 
-                string receivedIp = "";
+                IPAddress receivedIp = null;
                 int receivedPort = 0;
 
                 if (listenEndpoint.Address.ToString() == endpoint.Address.ToString())
                 {
                     string[] msgArray = Encoding.ASCII.GetString(receiveBuffer).Split(":");
 
-                    receivedIp = msgArray[0];
+                    receivedIp = IPAddress.Parse(msgArray[0]);
                     receivedPort = 0;
                     if (msgArray.Length > 1) receivedPort = Int32.Parse(msgArray[1]);
 
                     if (msgArray.Length > 2)
                     {
                         string type = msgArray[2];
-                        if (type == "clientreq" && intendedIp != receivedIp && intendedPort != receivedPort)
+                        if (type == "clientreq" && !Equals(intendedIp, receivedIp) && intendedPort != receivedPort)
                         {
                             intendedIp = receivedIp;
                             intendedPort = receivedPort;
@@ -357,7 +357,7 @@ namespace NATTunnel
                 }
 
 
-                if (receivedIp == intendedIp && holePunchReceivedCount < 5)
+                if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
                 {
                     intendedPort = receivedPort;
                     Console.WriteLine(intendedIp);
@@ -365,12 +365,12 @@ namespace NATTunnel
                     if (intendedPort != 0)
                     {
                         byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(IPAddress.Parse(intendedIp), intendedPort));
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
                         Console.WriteLine("punching");
                     }
                 }
 
-                if (connected && receivedIp != "hi" && listenEndpoint.Address.ToString() == "127.0.0.1")
+                if (connected && receivedIp.ToString() != "hi" && listenEndpoint.Address.ToString() == "127.0.0.1")
                 {
                     string receiveString = Encoding.ASCII.GetString(receiveBuffer);
                     int splitPos = receiveString.IndexOf("end", StringComparison.Ordinal);
@@ -428,7 +428,7 @@ namespace NATTunnel
 
                 foreach (var client in connectedClients)
                 {
-                    if (!connected || receivedIp == "hi" || listenEndpoint.Address.ToString() != client.Address.ToString())
+                    if (!connected || receivedIp.ToString() == "hi" || listenEndpoint.Address.ToString() != client.Address.ToString())
                         continue;
 
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, programEndpoint);

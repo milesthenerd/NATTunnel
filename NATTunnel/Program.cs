@@ -1,13 +1,9 @@
 ﻿using NATTunnel.Common;
 using System;
-using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Runtime.InteropServices;
 
 namespace NATTunnel
 {
-    static class Program
+    internal static class Program
     {
         public static void Main(string[] args)
         {

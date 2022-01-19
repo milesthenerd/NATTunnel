@@ -10,7 +10,7 @@ namespace NATTunnel.Common
         public static bool isServer = false;
         public static string endpoint = "serverhost.address.example.com:26702";
         public static IPEndPoint mediationIP = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
-        public static string remoteIP = "127.0.0.1";
+        public static IPAddress remoteIP = IPAddress.Loopback;
         public static List<IPEndPoint> endpoints = new List<IPEndPoint>();
         public static int localPort = 0;
         public static int mediationClientPort = 5000;
@@ -28,7 +28,7 @@ namespace NATTunnel.Common
             string currentLine;
             while ((currentLine = sr.ReadLine()) != null)
             {
-                int splitIndex = currentLine.IndexOf("=");
+                int splitIndex = currentLine.IndexOf("=", StringComparison.Ordinal);
                 if (splitIndex <= 0) continue;
 
                 string lhs = currentLine.Substring(0, splitIndex);
@@ -46,7 +46,7 @@ namespace NATTunnel.Common
                         mediationIP = IPEndPoint.Parse(rhs);
                         break;
                     case "remoteIP":
-                        remoteIP = rhs;
+                        remoteIP = IPAddress.Parse(rhs);
                         break;
                     case "localPort":
                         localPort = Int32.Parse(rhs);
@@ -77,7 +77,7 @@ namespace NATTunnel.Common
         public static void Save(StreamWriter sw)
         {
             sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP");
-            sw.WriteLine(isServer ? "mode=server" : "mode=client");
+            sw.WriteLine($"mode={(isServer ? "server" : "client")}");
             sw.WriteLine();
             sw.WriteLine("#endpoint, servers: The TCP server to connect to for forwarding over UDP. Client: The UDP server to connect to (not used when masterServerID is set)");
             sw.WriteLine($"endpoint={endpoint}");
