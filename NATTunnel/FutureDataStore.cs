@@ -9,15 +9,15 @@ namespace NATTunnel
 
         public void StoreData(Data d)
         {
-            if (!futureData.ContainsKey(d.streamPos))
+            if (!futureData.ContainsKey(d.StreamPos))
             {
-                futureData.Add(d.streamPos, d);
+                futureData.Add(d.StreamPos, d);
             }
             else
             {
-                Data test = futureData[d.streamPos];
-                if (d.tcpData.Length > test.tcpData.Length)
-                    futureData[d.streamPos] = d;
+                Data test = futureData[d.StreamPos];
+                if (d.TCPData.Length > test.TCPData.Length)
+                    futureData[d.StreamPos] = d;
             }
         }
 
@@ -29,10 +29,10 @@ namespace NATTunnel
             if (futureData.Count <= 0) return null;
 
             Data candidate = futureData.Values[0];
-            if (candidate.streamPos > currentRecvPos) return null;
+            if (candidate.StreamPos > currentRecvPos) return null;
 
             //We have current data!
-            futureData.Remove(candidate.streamPos);
+            futureData.Remove(candidate.StreamPos);
             return candidate;
         }
 
@@ -41,8 +41,8 @@ namespace NATTunnel
             while (futureData.Count > 0)
             {
                 Data d = futureData.Values[0];
-                if ((d.streamPos + d.tcpData.Length) <= currentRecvPos)
-                    futureData.Remove(d.streamPos);
+                if ((d.StreamPos + d.TCPData.Length) <= currentRecvPos)
+                    futureData.Remove(d.StreamPos);
                 else
                     return;
             }

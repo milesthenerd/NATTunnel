@@ -161,7 +161,7 @@ namespace NATTunnel
 
             //Send data
             Data data = new Data(id, currentSendPos, currentRecvPos, new byte[bytesToWrite], $"end{localTCPEndpoint}");
-            txQueue.Read(data.tcpData, 0, currentSendPos, (int)bytesToWrite);
+            txQueue.Read(data.TCPData, 0, currentSendPos, (int)bytesToWrite);
             lastUdpSendAckTime = currentTime;
             lastUdpSendTime = currentTime;
             connection.Send(data, udpEndpoint);
@@ -172,40 +172,40 @@ namespace NATTunnel
         //TODO: fromUDP is unused
         public void ReceiveData(Data data, bool fromUDP)
         {
-            if (data.streamAck > ackSafe)
+            if (data.StreamAck > ackSafe)
             {
                 lastUdpRecvAckTime = DateTime.UtcNow.Ticks;
-                ackSafe = data.streamAck;
+                ackSafe = data.StreamAck;
             }
 
             //Data from the past
-            if ((data.streamPos + data.tcpData.Length) <= currentRecvPos)
+            if ((data.StreamPos + data.TCPData.Length) <= currentRecvPos)
             {
-                if ((data.streamPos + data.tcpData.Length) == currentRecvPos)
+                if ((data.StreamPos + data.TCPData.Length) == currentRecvPos)
                     SendAck(true);
 
                 return;
             }
 
             //Data in the future
-            if (data.streamPos > currentRecvPos)
+            if (data.StreamPos > currentRecvPos)
             {
                 futureDataStore.StoreData(data);
                 return;
             }
 
             //Exact packet we need, include partial matches
-            int offset = (int)(currentRecvPos - data.streamPos);
-            tcp.GetStream().Write(data.tcpData, offset, data.tcpData.Length - offset);
-            currentRecvPos += data.tcpData.Length - offset;
+            int offset = (int)(currentRecvPos - data.StreamPos);
+            tcp.GetStream().Write(data.TCPData, offset, data.TCPData.Length - offset);
+            currentRecvPos += data.TCPData.Length - offset;
 
             //Handle out of order data
             Data future;
             while ((future = futureDataStore.GetData(currentRecvPos)) != null)
             {
-                offset = (int)(currentRecvPos - future.streamPos);
-                tcp.GetStream().Write(future.tcpData, offset, future.tcpData.Length - offset);
-                currentRecvPos += future.tcpData.Length - offset;
+                offset = (int)(currentRecvPos - future.StreamPos);
+                tcp.GetStream().Write(future.TCPData, offset, future.TCPData.Length - offset);
+                currentRecvPos += future.TCPData.Length - offset;
             }
             SendAck(false);
         }

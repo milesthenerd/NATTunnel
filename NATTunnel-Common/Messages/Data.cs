@@ -1,48 +1,52 @@
+using System;
 using System.IO;
 
 namespace NATTunnel.Common.Messages
 {
+    // TODO: documentation
     [MessageTypeAttribute(MessageType.DATA)]
     public class Data : NodeMessage
     {
-        public long streamPos;
-        public long streamAck;
-        public byte[] tcpData;
-        public string ep;
+        public long StreamPos { get; private set; }
+        public long StreamAck { get; private set; }
+        public byte[] TCPData { get; private set; }
+        public string Endpoint { get; private set; }
 
         public Data()
         {
             Id = 0;
-            streamAck = 0;
-            ep = "";
+            StreamPos = 0;
+            StreamAck = 0;
+            TCPData = Array.Empty<byte>();
+            Endpoint = "";
         }
 
-        public Data(int id, long streamPos, long streamAck, byte[] tcpData, string ep)
+        public Data(int id, long streamPos, long streamAck, byte[] TCPData, string endpoint)
         {
-            this.Id = id;
-            this.streamPos = streamPos;
-            this.streamAck = streamAck;
-            this.tcpData = tcpData;
-            this.ep = ep;
+            Id = id;
+            StreamPos = streamPos;
+            StreamAck = streamAck;
+            this.TCPData = TCPData;
+            Endpoint = endpoint;
         }
 
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
-            writer.Write(streamPos);
-            writer.Write(streamAck);
-            writer.Write((short)tcpData.Length);
-            writer.Write(tcpData);
-            writer.Write(ep);
+            writer.Write(StreamPos);
+            writer.Write(StreamAck);
+            writer.Write((short)TCPData.Length);
+            writer.Write(TCPData);
+            writer.Write(Endpoint);
         }
         public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();
-            streamPos = reader.ReadInt64();
-            streamAck = reader.ReadInt64();
+            StreamPos = reader.ReadInt64();
+            StreamAck = reader.ReadInt64();
             int length = reader.ReadInt16();
-            tcpData = reader.ReadBytes(length);
-            ep = reader.ReadString();
+            TCPData = reader.ReadBytes(length);
+            Endpoint = reader.ReadString();
         }
     }
 }
