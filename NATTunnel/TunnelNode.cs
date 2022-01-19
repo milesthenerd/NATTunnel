@@ -242,25 +242,25 @@ namespace NATTunnel
                 case MasterServerInfoReply msir:
                 {
                     Client client = null;
-                    if (clientMapping.ContainsKey(msir.client))
-                        client = clientMapping[msir.client];
+                    if (clientMapping.ContainsKey(msir.Client))
+                        client = clientMapping[msir.Client];
                     
                     if (client == null) return;
 
                     //Shouldn't happen but we should probably check this.
-                    if (msir.server != NodeOptions.masterServerID) return;
+                    if (msir.Server != NodeOptions.masterServerID) return;
                     
-                    if (!msir.status)
+                    if (!msir.Status)
                     {
-                        Console.WriteLine($"Cannot connect: {msir.message}");
+                        Console.WriteLine($"Cannot connect: {msir.Message}");
                         return;
                     }
 
-                    foreach (IPEndPoint msirEndpoint in msir.endpoints)
+                    foreach (IPEndPoint msirEndpoint in msir.Endpoints)
                     {
                         for (int i = 0; i < 4; i++)
                         {
-                            NewConnectionRequest ncr = new NewConnectionRequest(msir.client, $"end{client.localTCPEndpoint}");
+                            NewConnectionRequest ncr = new NewConnectionRequest(msir.Client, $"end{client.localTCPEndpoint}");
                             Console.WriteLine($"MSIR connect: {msirEndpoint}");
                             connection.Send(ncr, msirEndpoint);
                         }

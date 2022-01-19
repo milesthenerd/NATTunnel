@@ -2,33 +2,42 @@ using System.IO;
 
 namespace NATTunnel.Common.Messages
 {
+    // TODO: Documentation
     [MessageTypeAttribute(MessageType.MASTER_SERVER_INFO_REQUEST)]
     public class MasterServerInfoRequest : IMessage
     {
-        public int server;
-        public int client;
+        /// <summary>
+        /// The ID of the server for this request.
+        /// </summary>
+        public int Server { get; private set; }
+
+        /// <summary>
+        /// The ID of the client for this request.
+        /// </summary>
+        public int Client { get; private set; }
 
         public MasterServerInfoRequest()
         {
-            server = 0;
-            client = 0;
+            Server = 0;
+            Client = 0;
         }
 
         public MasterServerInfoRequest(int server = 0, int client = 0)
         {
-            this.server = server;
-            this.client = client;
+            Server = server;
+            Client = client;
         }
 
         public void Serialize(BinaryWriter writer)
         {
-            writer.Write(server);
-            writer.Write(client);
+            writer.Write(Server);
+            writer.Write(Client);
         }
+
         public void Deserialize(BinaryReader reader)
         {
-            server = reader.ReadInt32();
-            client = reader.ReadInt32();
+            Server = reader.ReadInt32();
+            Client = reader.ReadInt32();
         }
     }
 }

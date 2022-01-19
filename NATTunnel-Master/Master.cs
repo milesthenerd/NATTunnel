@@ -38,20 +38,13 @@ namespace NATTunnel.Master
             {
                 case MasterServerInfoRequest msi:
                 {
-                    MasterServerInfoReply msir = new MasterServerInfoReply
-                    {
-                        server = msi.server,
-                        client = msi.client,
-                        status = false,
-                        message = "ID not found"
-                    };
-                    if (published.TryGetValue(msi.server, out PublishEntry entry))
-                    {
-                        msir.status = true;
-                        msir.message = "OK";
-                        msir.endpoints = entry.endpoints;
-                    }
-                    Console.WriteLine($"MSIR: {msir.client} connecting to {msi.server}, status: {msir.message}");
+
+                    MasterServerInfoReply msir = new MasterServerInfoReply(msi.Server, msi.Client, false, "ID not found");
+
+                    if (published.TryGetValue(msi.Server, out PublishEntry entry))
+                        msir = new MasterServerInfoReply(msi.Server, msi.Client, true, "OK", entry.endpoints);
+                    
+                    Console.WriteLine($"MSIR: {msir.Client} connecting to {msi.Server}, status: {msir.Message}");
                     connection.Send(msi, endpoint);
                     break;
                 }
@@ -62,7 +55,8 @@ namespace NATTunnel.Master
                     {
                         if (msp.Secret == entry.secret)
                         {
-                            if (!entry.endpoints.Contains(endpoint)) entry.endpoints.Add(endpoint);
+                            if (!entry.endpoints.Contains(endpoint))
+                                entry.endpoints.Add(endpoint);
 
                             entry.lastPublishTime = DateTime.UtcNow.Ticks;
                             mspr = new MasterServerPublishReply(msp.Id, true, "Updated OK");
