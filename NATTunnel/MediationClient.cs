@@ -52,7 +52,7 @@ namespace NATTunnel
                 Environment.Exit(-1);
             }
 
-            udpClient = new UdpClient(NodeOptions.mediationClientPort);
+            udpClient = new UdpClient(NodeOptions.MediationClientPort);
 
             // Windows-specific udpClient switch
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -61,11 +61,11 @@ namespace NATTunnel
                 udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
             }
 
-            endpoint = NodeOptions.mediationIP;
-            programEndpoint = new IPEndPoint(IPAddress.Loopback, NodeOptions.localPort);
-            remoteIp = NodeOptions.remoteIP;
-            mediationClientPort = NodeOptions.mediationClientPort;
-            isServer = NodeOptions.isServer;
+            endpoint = NodeOptions.MediationIp;
+            programEndpoint = new IPEndPoint(IPAddress.Loopback, NodeOptions.LocalPort);
+            remoteIp = NodeOptions.RemoteIp;
+            mediationClientPort = NodeOptions.MediationClientPort;
+            isServer = NodeOptions.IsServer;
         }
 
         public static void Add(IPEndPoint localEndpoint)
@@ -453,20 +453,18 @@ namespace NATTunnel
             {
                 case 'c':
                 {
-                    NodeOptions.isServer = false;
-                    NodeOptions.masterServerID = 0;
-                    NodeOptions.localPort = 5001;
-                    using StreamWriter sw = new StreamWriter("config.txt");
-                    NodeOptions.Save(sw);
+                    NodeOptions.IsServer = false;
+                    NodeOptions.MasterServerId = 0;
+                    NodeOptions.LocalPort = 5001;
+                    NodeOptions.CreateNewConfig();
                     return true;
                 }
                 case 's':
                 {
-                    NodeOptions.isServer = true;
-                    NodeOptions.endpoint = "127.0.0.1:25565";
-                    NodeOptions.localPort = 5001;
-                    using StreamWriter sw = new StreamWriter("config.txt");
-                    NodeOptions.Save(sw);
+                    NodeOptions.IsServer = true;
+                    NodeOptions.Endpoint = "127.0.0.1:25565";
+                    NodeOptions.LocalPort = 5001;
+                    NodeOptions.CreateNewConfig();
                     return true;
                 }
                 default:

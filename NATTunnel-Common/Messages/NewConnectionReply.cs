@@ -16,7 +16,7 @@ namespace NATTunnel.Common.Messages
         /// <summary>
         /// The maximum acceptable download rate in kB per second.
         /// </summary>
-        public int DownloadRate { get; private set; } = NodeOptions.downloadSpeed;
+        public int DownloadRate { get; private set; } = NodeOptions.DownloadSpeed;
 
         /// <summary>
         /// The endpoint.

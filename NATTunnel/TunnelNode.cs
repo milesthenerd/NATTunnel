@@ -27,12 +27,12 @@ namespace NATTunnel
 
         public TunnelNode()
         {
-            int rateBytesPerSecond = NodeOptions.uploadSpeed * 1024;
+            int rateBytesPerSecond = NodeOptions.UploadSpeed * 1024;
             this.connectionBucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond);
             //1 second connnection buffer
-            if (NodeOptions.isServer)
+            if (NodeOptions.IsServer)
             {
-                SetupUDPSocket(NodeOptions.localPort);
+                SetupUDPSocket(NodeOptions.LocalPort);
             }
             else
             {
@@ -59,7 +59,7 @@ namespace NATTunnel
 
         private void SetupTCPServer()
         {
-            tcpServer = new TcpListener(new IPEndPoint(IPAddress.Any, NodeOptions.localPort));
+            tcpServer = new TcpListener(new IPEndPoint(IPAddress.Any, NodeOptions.LocalPort));
             tcpServer.Start();
             tcpServer.BeginAcceptTcpClient(ConnectCallback, null);
         }
@@ -85,11 +85,11 @@ namespace NATTunnel
                     clients.Remove(client);
                 }
 
-                if (NodeOptions.isServer && (NodeOptions.masterServerID != 0) && (currentTime > nextMasterTime))
+                if (NodeOptions.IsServer && (NodeOptions.MasterServerId != 0) && (currentTime > nextMasterTime))
                 {
                     //Send master registers every minute
                     nextMasterTime = currentTime + DateTime.UtcNow.Ticks + TimeSpan.TicksPerMinute;
-                    MasterServerPublishRequest mspr = new MasterServerPublishRequest(NodeOptions.masterServerID, NodeOptions.masterServerSecret, NodeOptions.localPort);
+                    MasterServerPublishRequest mspr = new MasterServerPublishRequest(NodeOptions.MasterServerId, NodeOptions.MasterServerSecret, NodeOptions.LocalPort);
                     foreach (IPAddress masterAddr in masterServerAddresses)
                         connection.Send(mspr, new IPEndPoint(masterAddr, 16702));
                 }
@@ -119,9 +119,9 @@ namespace NATTunnel
         private void ConnectUDPClient(Client client)
         {
             //TODO: why 4?
-            if (NodeOptions.masterServerID == 0)
+            if (NodeOptions.MasterServerId == 0)
             {
-                foreach (IPEndPoint endpoint in NodeOptions.endpoints)
+                foreach (IPEndPoint endpoint in NodeOptions.Endpoints)
                 {
                     for (int i = 0; i < 4; i++)
                     {
@@ -159,7 +159,7 @@ namespace NATTunnel
             {
                 case NewConnectionRequest request:
                 {
-                    if (!NodeOptions.isServer) break;
+                    if (!NodeOptions.IsServer) break;
 
                     //Do not connect protocol-incompatible clients.
                     if (request.ProtocolVersion != Header.PROTOCOL_VERSION) return;
@@ -170,7 +170,7 @@ namespace NATTunnel
                         TcpClient tcp = new TcpClient(AddressFamily.InterNetwork);
                         try
                         {
-                            tcp.Connect(NodeOptions.endpoints[0]);
+                            tcp.Connect(NodeOptions.Endpoints[0]);
                             client = new Client(request.Id, connection, tcp, connectionBucket);
                             //add mapping for local tcp client and remote IP
                             clients.Add(client);
@@ -192,14 +192,13 @@ namespace NATTunnel
                     connection.Send(connectionReply, endpoint);
                     //Clamp to the clients download speed
                     Console.WriteLine($"Client {request.Id} download rate is {request.DownloadRate}KB/s");
-                    if (request.DownloadRate < NodeOptions.uploadSpeed)
+                    if (request.DownloadRate < NodeOptions.UploadSpeed)
                     {
                         client.bucket.rateBytesPerSecond = request.DownloadRate * 1024;
                         client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
                     }
                     //Prefer IPv6
-                    //TODO: whats the order here?
-                    if (client.udpEndpoint == null || (client.udpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6))
+                    if ((client.udpEndpoint == null) || ((client.udpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6)))
                     {
                         Console.WriteLine($"Client endpoint {client.id} set to: {endpoint}");
                         client.udpEndpoint = endpoint;
@@ -209,7 +208,7 @@ namespace NATTunnel
 
                 case NewConnectionReply ncr:
                 {
-                    if (!NodeOptions.isServer) break;
+                    if (!NodeOptions.IsServer) break;
 
                     if (ncr.ProtocolVersion != Header.PROTOCOL_VERSION)
                     {
@@ -219,20 +218,19 @@ namespace NATTunnel
 
                     if (clientMapping.ContainsKey(ncr.Id))
                     {
-                        Client c = clientMapping[ncr.Id];
+                        Client client = clientMapping[ncr.Id];
                         //Prefer IPv6
-                        //TODO: whats the order hre
-                        if (c.udpEndpoint == null || c.udpEndpoint.AddressFamily == AddressFamily.InterNetwork && endpoint.AddressFamily == AddressFamily.InterNetworkV6)
+                        if ((client.udpEndpoint == null) || ((client.udpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6)))
                         {
-                            Console.WriteLine($"Server endpoint {c.id} set to: {endpoint}");
-                            c.udpEndpoint = endpoint;
+                            Console.WriteLine($"Server endpoint {client.id} set to: {endpoint}");
+                            client.udpEndpoint = endpoint;
                         }
                         //Clamp to the servers download speed
                         Console.WriteLine($"Servers download rate is {ncr.DownloadRate}KB/s");
-                        if (ncr.DownloadRate < NodeOptions.uploadSpeed)
+                        if (ncr.DownloadRate < NodeOptions.UploadSpeed)
                         {
-                            c.bucket.rateBytesPerSecond = ncr.DownloadRate * 1024;
-                            c.bucket.totalBytes = c.bucket.rateBytesPerSecond;
+                            client.bucket.rateBytesPerSecond = ncr.DownloadRate * 1024;
+                            client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
                         }
                     }
                     break;
@@ -247,7 +245,7 @@ namespace NATTunnel
                     if (client == null) return;
 
                     //Shouldn't happen but we should probably check this.
-                    if (msir.Server != NodeOptions.masterServerID) return;
+                    if (msir.Server != NodeOptions.MasterServerId) return;
                     
                     if (!msir.Status)
                     {

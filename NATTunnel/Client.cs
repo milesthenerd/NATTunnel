@@ -45,7 +45,7 @@ namespace NATTunnel
             tcp.NoDelay = true;
             tcp.GetStream().BeginRead(buffer, 0, buffer.Length, TCPReceiveCallback, null);
 
-            int rateBytesPerSecond = NodeOptions.uploadSpeed * 1024;
+            int rateBytesPerSecond = NodeOptions.UploadSpeed * 1024;
             bucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond, parentBucket);
 
             clientThread = new Thread(Loop);
@@ -126,9 +126,9 @@ namespace NATTunnel
 
             //If we don't have much data to send let's jump back to the unack'd position to send earlier than the RTT
             float dataToSend = txQueue.AvailableRead / (float)(bucket.rateBytesPerSecond);
-            if (dataToSend < 0.2f || (latency < NodeOptions.minRetransmitTime))
+            if (dataToSend < 0.2f || (latency < NodeOptions.MinRetransmitTime))
             {
-                if ((currentTime - lastWriteResetTime) > (NodeOptions.minRetransmitTime * TimeSpan.TicksPerMillisecond))
+                if ((currentTime - lastWriteResetTime) > (NodeOptions.MinRetransmitTime * TimeSpan.TicksPerMillisecond))
                 {
                     lastWriteResetTime = currentTime;
                     currentSendPos = txQueue.StreamReadPos;
