@@ -60,8 +60,7 @@ namespace NATTunnel.Common
 
             long newBytes = (rateBytesPerSecond * timeDelta) / TimeSpan.TicksPerSecond;
             currentBytesPrivate += (int)newBytes;
-            if (currentBytesPrivate > totalBytes)
-                currentBytesPrivate = totalBytes;
+            currentBytesPrivate = currentBytesPrivate.LimitTo(totalBytes);
 
             if (newBytes > 0)
                 lastUpdateTime = currentTime;

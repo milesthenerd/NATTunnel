@@ -154,10 +154,9 @@ namespace NATTunnel
                 return;
             }
 
-            //Clamp to 500 byte packets
+            //Clamp to 1250 byte packets
             const int upperLimit = 1250;
-            if (bytesToWrite > upperLimit)
-                bytesToWrite = upperLimit;
+            bytesToWrite = bytesToWrite.LimitTo(upperLimit);
 
             //Send data
             Data data = new Data(id, currentSendPos, currentRecvPos, new byte[bytesToWrite], $"end{localTCPEndpoint}");

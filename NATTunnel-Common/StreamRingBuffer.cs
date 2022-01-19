@@ -49,8 +49,7 @@ namespace NATTunnel.Common
 
             //Because this is a ring buffer we have to "wrap around", so two writes.
             int firstWriteLength = internalBuffer.Length - (int)(StreamWritePos % internalBuffer.Length);
-            if (firstWriteLength > size)
-                firstWriteLength = size;
+            firstWriteLength = firstWriteLength.LimitTo(size);
 
             Array.Copy(source, offset, internalBuffer, StreamWritePos % internalBuffer.Length, firstWriteLength);
 
@@ -69,8 +68,7 @@ namespace NATTunnel.Common
                 throw new ArgumentOutOfRangeException(nameof(readDelta),"Stream trying to read from a non-written area.");
 
             int firstRead = internalBuffer.Length - (int)(readPos % internalBuffer.Length);
-            if (firstRead > size)
-                firstRead = size;
+            firstRead = firstRead.LimitTo(size);
 
             int secondRead = size - firstRead;
             Array.Copy(internalBuffer, readPos % internalBuffer.Length, dest, offset, firstRead);
