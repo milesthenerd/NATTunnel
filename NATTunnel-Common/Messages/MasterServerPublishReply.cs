@@ -2,24 +2,39 @@ using System.IO;
 
 namespace NATTunnel.Common.Messages
 {
+    // TODO: Documentation
     [MessageTypeAttribute(MessageType.MASTER_SERVER_PUBLISH_REPLY)]
-    public class MasterServerPublishReply : IMessage
+    public class MasterServerPublishReply : NodeMessage
     {
-        public int id;
-        public bool status;
-        public string message;
+        public bool Status { get; private set; }
+        public string Message { get; private set; }
 
-        public void Serialize(BinaryWriter writer)
+        public MasterServerPublishReply()
         {
-            writer.Write(id);
-            writer.Write(status);
-            writer.Write(message);
+            Id = 0;
+            Status = false;
+            Message = "";
         }
-        public void Deserialize(BinaryReader reader)
+
+        public MasterServerPublishReply(int id, bool status, string message)
         {
-            id = reader.ReadInt32();
-            status = reader.ReadBoolean();
-            message = reader.ReadString();
+            this.Id = id;
+            this.Status = status;
+            this.Message = message;
+        }
+
+        public override void Serialize(BinaryWriter writer)
+        {
+            writer.Write(Id);
+            writer.Write(Status);
+            writer.Write(Message);
+        }
+
+        public override void Deserialize(BinaryReader reader)
+        {
+            Id = reader.ReadInt32();
+            Status = reader.ReadBoolean();
+            Message = reader.ReadString();
         }
     }
 }

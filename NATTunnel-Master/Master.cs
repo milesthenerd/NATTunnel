@@ -57,39 +57,35 @@ namespace NATTunnel.Master
                 }
                 case MasterServerPublishRequest msp:
                 {
-                    MasterServerPublishReply mspr = new MasterServerPublishReply
+                    MasterServerPublishReply mspr;
+                    if (published.TryGetValue(msp.Id, out PublishEntry entry))
                     {
-                        id = msp.Id,
-                        status = false,
-                        message = "ID already registered to another server"
-                    };
-                    if (published.TryGetValue(mspr.id, out PublishEntry entry))
-                    {
-                        if (msp.secret == entry.secret)
+                        if (msp.Secret == entry.secret)
                         {
-                            if (!entry.endpoints.Contains(endpoint))
-                                entry.endpoints.Add(endpoint);
+                            if (!entry.endpoints.Contains(endpoint)) entry.endpoints.Add(endpoint);
 
                             entry.lastPublishTime = DateTime.UtcNow.Ticks;
-                            mspr.status = true;
-                            mspr.message = "Updated OK";
+                            mspr = new MasterServerPublishReply(msp.Id, true, "Updated OK");
+                        }
+                        else
+                        {
+                            mspr = new MasterServerPublishReply(msp.Id, false, "ID already registered to another server");
                         }
                     }
                     else
                     {
                         PublishEntry entry2 = new PublishEntry
                         {
-                            secret = msp.secret,
+                            secret = msp.Secret,
                             lastPublishTime = DateTime.UtcNow.Ticks
                         };
-                        if (!entry2.endpoints.Contains(endpoint))
-                            entry2.endpoints.Add(endpoint);
+                        if (!entry2.endpoints.Contains(endpoint)) entry2.endpoints.Add(endpoint);
 
                         published.TryAdd(msp.Id, entry2);
-                        mspr.status = true;
-                        mspr.message = "Registered OK";
+                        mspr = new MasterServerPublishReply(msp.Id, true, "Updated OK");
                     }
-                    Console.WriteLine($"MSPR: {mspr.id} status {mspr.message}");
+
+                    Console.WriteLine($"MSPR: {mspr.Id} status {mspr.Message}");
                     connection.Send(mspr, endpoint);
                     break;
                 }

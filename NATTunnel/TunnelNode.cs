@@ -270,7 +270,7 @@ namespace NATTunnel
 
                 case MasterServerPublishReply mspr:
                 {
-                    Console.WriteLine($"Publish Reply for {mspr.id}, registered {mspr.status}, {mspr.message}");
+                    Console.WriteLine($"Publish Reply for {mspr.Id}, registered {mspr.Status}, {mspr.Message}");
                     break;
                 }
 
