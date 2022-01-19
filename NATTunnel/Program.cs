@@ -90,6 +90,7 @@ namespace NATTunnel
             Console.WriteLine("s) Create a server config file");
             Console.WriteLine("Any other key: Quit");
             ConsoleKeyInfo cki = Console.ReadKey();
+            Console.WriteLine();
             switch (cki.KeyChar)
             {
                 case 'c':
