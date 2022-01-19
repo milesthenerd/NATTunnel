@@ -8,6 +8,7 @@ namespace NATTunnel.Common.Messages
     [MessageTypeAttribute(MessageType.ACK)]
     public class Ack : NodeMessage
     {
+        // TODO: Documentation
         public long StreamAck { get; private set; }
 
         /// <summary>
