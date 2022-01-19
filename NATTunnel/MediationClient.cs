@@ -260,10 +260,10 @@ namespace NATTunnel
                 }
 
                 //TODO: pretty sure this is not necessary / can be condensed
-                if (connected && receivedIp.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
+                if (connected && receivedIp?.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
 
-                if (!connected || receivedIp.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
+                if (!connected || receivedIp?.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
                     continue;
 
                 try
