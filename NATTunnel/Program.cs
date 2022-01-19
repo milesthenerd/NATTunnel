@@ -8,7 +8,6 @@ namespace NATTunnel
 {
     static class Program
     {
-        private static NodeOptions options = new NodeOptions();
         public static void Main(string[] args)
         {
             //TODO: this whole project has a bunch of obsolete console.writelines
@@ -19,7 +18,7 @@ namespace NATTunnel
 
             using (StreamReader sr = new StreamReader("config.txt"))
             {
-                if (!options.Load(sr))
+                if (!NodeOptions.Load(sr))
                 {
                     Console.WriteLine("Failed to load config.txt");
                     return;
@@ -27,7 +26,7 @@ namespace NATTunnel
             }
 
             TcpClient tcpClient = new TcpClient();
-            UdpClient udpClient = new UdpClient(options.mediationClientPort);
+            UdpClient udpClient = new UdpClient(NodeOptions.mediationClientPort);
 
             if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
             {
@@ -35,24 +34,24 @@ namespace NATTunnel
                 udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
             }
 
-            IPEndPoint endpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), options.localPort);
-            MediationClient mediationClient = new MediationClient(tcpClient, udpClient, options.mediationIP, options.remoteIP, options.mediationClientPort, endpoint, options.isServer);
+            IPEndPoint endpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), NodeOptions.localPort);
+            MediationClient mediationClient = new MediationClient(tcpClient, udpClient, NodeOptions.mediationIP, NodeOptions.remoteIP, NodeOptions.mediationClientPort, endpoint, NodeOptions.isServer);
 
             mediationClient.TrackedClient();
 
-            TunnelNode tn = new TunnelNode(options);
+            TunnelNode tn = new TunnelNode();
 
-            if (options.isServer)
+            if (NodeOptions.isServer)
             {
                 mediationClient.UdpServer();
-                Console.WriteLine($"Server forwarding {options.endpoints[0]} to UDP port {options.localPort}");
-                if (options.masterServerID != 0)
-                    Console.WriteLine($"Server registering with master ID {options.masterServerID}");
+                Console.WriteLine($"Server forwarding {NodeOptions.endpoints[0]} to UDP port {NodeOptions.localPort}");
+                if (NodeOptions.masterServerID != 0)
+                    Console.WriteLine($"Server registering with master ID {NodeOptions.masterServerID}");
             }
             else
             {
                 mediationClient.UdpClient();
-                Console.WriteLine($"Client forwarding TCP port {options.localPort} to UDP server {(options.masterServerID != 0 ? options.masterServerID : options.endpoints[0])}");
+                Console.WriteLine($"Client forwarding TCP port {NodeOptions.localPort} to UDP server {(NodeOptions.masterServerID != 0 ? NodeOptions.masterServerID : NodeOptions.endpoints[0])}");
             }
 
             Console.WriteLine("Press q or ctrl+c to quit.");
@@ -94,20 +93,20 @@ namespace NATTunnel
             {
                 case 'c':
                 {
-                    options.isServer = false;
-                    options.masterServerID = 0;
-                    options.localPort = 5001;
+                    NodeOptions.isServer = false;
+                    NodeOptions.masterServerID = 0;
+                    NodeOptions.localPort = 5001;
                     using StreamWriter sw = new StreamWriter("config.txt");
-                    options.Save(sw);
+                    NodeOptions.Save(sw);
                     return true;
                 }
                 case 's':
                 {
-                    options.isServer = true;
-                    options.endpoint = "127.0.0.1:25565";
-                    options.localPort = 5001;
+                    NodeOptions.isServer = true;
+                    NodeOptions.endpoint = "127.0.0.1:25565";
+                    NodeOptions.localPort = 5001;
                     using StreamWriter sw = new StreamWriter("config.txt");
-                    options.Save(sw);
+                    NodeOptions.Save(sw);
                     return true;
                 }
                 default:

@@ -5,30 +5,25 @@ using System.Net;
 
 namespace NATTunnel
 {
-    public class NodeOptions
+    static public class NodeOptions
     {
-        public bool isServer = false;
-        public string endpoint = "serverhost.address.example.com:26702";
-        public IPEndPoint mediationIP = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
-        public string remoteIP = "127.0.0.1";
-        public List<IPEndPoint> endpoints = new List<IPEndPoint>();
-        public int localPort = 0;
-        public int mediationClientPort = 5000;
-        public int uploadSpeed = 512;
-        public int downloadSpeed = 512;
-        public int minRetransmitTime = 100;
-        public int masterServerID = 0;
-        public int masterServerSecret = 0;
+        static public bool isServer = false;
+        static public string endpoint = "serverhost.address.example.com:26702";
+        static public IPEndPoint mediationIP = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
+        static public string remoteIP = "127.0.0.1";
+        static public List<IPEndPoint> endpoints = new List<IPEndPoint>();
+        static public int localPort = 0;
+        static public int mediationClientPort = 5000;
+        static public int uploadSpeed = 512;
+        static public int downloadSpeed = 512;
+        static public int minRetransmitTime = 100;
+        static Random r = new Random();
+        //Make sure masterServerID is random
+        // TODO: Double-check how this value is used CAREFULLY for security purposes.
+        static public int masterServerID = r.Next();
+        static public int masterServerSecret = r.Next();
 
-        public NodeOptions()
-        {
-            //Make sure masterServerID is random
-            Random r = new Random();
-            masterServerID = r.Next();
-            masterServerSecret = r.Next();
-        }
-
-        public bool Load(StreamReader sr)
+        static public bool Load(StreamReader sr)
         {
             string currentLine;
             while ((currentLine = sr.ReadLine()) != null)
@@ -79,7 +74,7 @@ namespace NATTunnel
             return true;
         }
 
-        public void Save(StreamWriter sw)
+        static public void Save(StreamWriter sw)
         {
             sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP");
             sw.WriteLine(isServer ? "mode=server" : "mode=client");
@@ -112,7 +107,7 @@ namespace NATTunnel
             sw.WriteLine($"masterServerSecret={masterServerSecret}");
         }
 
-        private void ResolveAddress()
+        static private void ResolveAddress()
         {
             endpoints.Clear();
             int splitIndex = endpoint.LastIndexOf(":");

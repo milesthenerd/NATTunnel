@@ -29,25 +29,23 @@ namespace NATTunnel
         private const long PING = 2 * TimeSpan.TicksPerSecond;
         private const long ACK_TIME = 10 * TimeSpan.TicksPerMillisecond;
         private UdpConnection connection;
-        private NodeOptions options;
         private long ackSafe;
         private Thread clientThread;
         public AutoResetEvent sendEvent = new AutoResetEvent(false);
         public int latency;
         public IPEndPoint localTCPEndpoint;
 
-        public Client(NodeOptions options, int clientID, UdpConnection connection, TcpClient tcp, TokenBucket parentBucket)
+        public Client(int clientID, UdpConnection connection, TcpClient tcp, TokenBucket parentBucket)
         {
             this.id = clientID;
             this.tcp = tcp;
             this.connection = connection;
-            this.options = options;
             this.localTCPEndpoint = (IPEndPoint)tcp.Client.LocalEndPoint;
 
             tcp.NoDelay = true;
             tcp.GetStream().BeginRead(buffer, 0, buffer.Length, TCPReceiveCallback, null);
 
-            int rateBytesPerSecond = options.uploadSpeed * 1024;
+            int rateBytesPerSecond = NodeOptions.uploadSpeed * 1024;
             bucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond, parentBucket);
 
             clientThread = new Thread(Loop);
@@ -128,9 +126,9 @@ namespace NATTunnel
 
             //If we don't have much data to send let's jump back to the unack'd position to send earlier than the RTT
             float dataToSend = txQueue.AvailableRead / (float)(bucket.rateBytesPerSecond);
-            if (dataToSend < 0.2f || (latency < options.minRetransmitTime))
+            if (dataToSend < 0.2f || (latency < NodeOptions.minRetransmitTime))
             {
-                if ((currentTime - lastWriteResetTime) > (options.minRetransmitTime * TimeSpan.TicksPerMillisecond))
+                if ((currentTime - lastWriteResetTime) > (NodeOptions.minRetransmitTime * TimeSpan.TicksPerMillisecond))
                 {
                     lastWriteResetTime = currentTime;
                     currentSendPos = txQueue.StreamReadPos;
