@@ -59,7 +59,7 @@ namespace NATTunnel.Master
                 {
                     MasterServerPublishReply mspr = new MasterServerPublishReply
                     {
-                        id = msp.id,
+                        id = msp.Id,
                         status = false,
                         message = "ID already registered to another server"
                     };
@@ -85,7 +85,7 @@ namespace NATTunnel.Master
                         if (!entry2.endpoints.Contains(endpoint))
                             entry2.endpoints.Add(endpoint);
 
-                        published.TryAdd(msp.id, entry2);
+                        published.TryAdd(msp.Id, entry2);
                         mspr.status = true;
                         mspr.message = "Registered OK";
                     }
