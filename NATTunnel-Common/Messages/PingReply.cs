@@ -17,7 +17,7 @@ namespace NATTunnel.Common.Messages
         /// <summary>
         /// The endpoint of this <see cref="PingReply"/>.
         /// </summary>
-        public string Endpoint { get; private set; } // TODO: Origin or target?
+        public string Endpoint { get; private set; } // TODO: Origin or target? Also TODO: Never used?
 
         public PingReply()
         {

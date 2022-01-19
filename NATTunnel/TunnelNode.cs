@@ -127,7 +127,7 @@ namespace NATTunnel
                 {
                     for (int i = 0; i < 4; i++)
                     {
-                        NewConnectionRequest ncr = new NewConnectionRequest(client.id, Header.PROTOCOL_VERSION, options.downloadSpeed, $"end{client.localTCPEndpoint}");
+                        NewConnectionRequest ncr = new NewConnectionRequest(client.id, options.downloadSpeed, $"end{client.localTCPEndpoint}");
                         connection.Send(ncr, endpoint);
                     }
                 }
@@ -165,7 +165,7 @@ namespace NATTunnel
 
                     NewConnectionReply ncr = new NewConnectionReply(nc.Id, Header.PROTOCOL_VERSION, options.downloadSpeed);
                     //Do not connect protocol-incompatible clients.
-                    if (nc.protocol_version != Header.PROTOCOL_VERSION) return;
+                    if (nc.ProtocolVersion != Header.PROTOCOL_VERSION) return;
 
                     Client client = null;
                     if (!clientMapping.ContainsKey(ncr.Id))
@@ -195,10 +195,10 @@ namespace NATTunnel
                     ncr.ep = $"end{client.localTCPEndpoint}";
                     connection.Send(ncr, endpoint);
                     //Clamp to the clients download speed
-                    Console.WriteLine($"Client {nc.Id} download rate is {nc.downloadRate}KB/s");
-                    if (nc.downloadRate < options.uploadSpeed)
+                    Console.WriteLine($"Client {nc.Id} download rate is {nc.DownloadRate}KB/s");
+                    if (nc.DownloadRate < options.uploadSpeed)
                     {
-                        client.bucket.rateBytesPerSecond = nc.downloadRate * 1024;
+                        client.bucket.rateBytesPerSecond = nc.DownloadRate * 1024;
                         client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
                     }
                     //Prefer IPv6
@@ -263,7 +263,7 @@ namespace NATTunnel
                     {
                         for (int i = 0; i < 4; i++)
                         {
-                            NewConnectionRequest ncr = new NewConnectionRequest(msir.client, Header.PROTOCOL_VERSION, options.downloadSpeed, $"end{client.localTCPEndpoint}");
+                            NewConnectionRequest ncr = new NewConnectionRequest(msir.client, options.downloadSpeed, $"end{client.localTCPEndpoint}");
                             Console.WriteLine($"MSIR connect: {msirEndpoint}");
                             connection.Send(ncr, msirEndpoint);
                         }

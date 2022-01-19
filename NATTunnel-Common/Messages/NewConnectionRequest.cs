@@ -1,4 +1,3 @@
-using System;
 using System.IO;
 
 namespace NATTunnel.Common.Messages
@@ -6,38 +5,49 @@ namespace NATTunnel.Common.Messages
     [MessageTypeAttribute(MessageType.NEW_CONNECTION_REQUEST)]
     public class NewConnectionRequest : NodeMessage
     {
-        public int protocol_version;
-        public int downloadRate;
-        public string ep;
+        /// <summary>
+        /// The protocol version of this <see cref="NewConnectionRequest"/>.
+        /// </summary>
+        public int ProtocolVersion { get; private set; } = Header.PROTOCOL_VERSION;
+
+        /// <summary>
+        /// The maximum acceptable download rate in kB per second.
+        /// </summary>
+        public int DownloadRate { get; private set; } // TODO: Load directly from config instead of waiting for instantiation?
+
+        /// <summary>
+        /// The endpoint of this <see cref="NewConnectionRequest"/>.
+        /// </summary>
+        public string Endpoint { get; private set; } // TODO: Source or destination?
 
         public NewConnectionRequest()
         {
             Id = 0;
-            protocol_version = 0;
-            downloadRate = 0;
-            ep = "";
+            DownloadRate = 0;
+            Endpoint = "";
         }
 
-        public NewConnectionRequest(int id, int protocol_version, int downloadRate, string ep)
+        public NewConnectionRequest(int id, int downloadRate, string ep)
         {
             this.Id = id;
-            this.protocol_version = protocol_version;
-            this.downloadRate = downloadRate;
-            this.ep = ep;
+            this.DownloadRate = downloadRate;
+            this.Endpoint = ep;
         }
+        
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
-            writer.Write(protocol_version);
-            writer.Write(downloadRate);
-            writer.Write(ep);
+            writer.Write(ProtocolVersion);
+            writer.Write(DownloadRate);
+            writer.Write(Endpoint);
         }
+        
         public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();
-            protocol_version = reader.ReadInt32();
-            downloadRate = reader.ReadInt32();
-            ep = reader.ReadString();
+            ProtocolVersion = reader.ReadInt32();
+            DownloadRate = reader.ReadInt32();
+            Endpoint = reader.ReadString();
         }
     }
 }
