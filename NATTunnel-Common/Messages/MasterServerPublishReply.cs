@@ -6,15 +6,12 @@ namespace NATTunnel.Common.Messages
     [MessageTypeAttribute(MessageType.MASTER_SERVER_PUBLISH_REPLY)]
     public class MasterServerPublishReply : NodeMessage
     {
+        // TODO: why is status a boolean!?
         public bool Status { get; private set; }
         public string Message { get; private set; }
 
-        public MasterServerPublishReply()
-        {
-            Id = 0;
-            Status = false;
-            Message = "";
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public MasterServerPublishReply() : this(0, false, "") { }
 
         public MasterServerPublishReply(int id, bool status, string message)
         {

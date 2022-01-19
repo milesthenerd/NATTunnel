@@ -19,12 +19,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public string Endpoint { get; private set; } // TODO: source or destination???
 
-        public Disconnect()
-        {
-            Id = 0;
-            Reason = "";
-            Endpoint = "";
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public Disconnect() : this(0, "", "") { }
 
         public Disconnect(int id, string reason, string endpoint)
         {

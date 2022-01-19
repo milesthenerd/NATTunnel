@@ -16,14 +16,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public string Endpoint { get; private set; }
 
-        public Data()
-        {
-            Id = 0;
-            StreamPos = 0;
-            StreamAck = 0;
-            TCPData = Array.Empty<byte>();
-            Endpoint = "";
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public Data() : this(0, 0, 0, Array.Empty<byte>(), "") { }
 
         public Data(int id, long streamPos, long streamAck, byte[] TCPData, string endpoint)
         {

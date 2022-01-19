@@ -57,7 +57,7 @@ namespace NATTunnel.Common
 
             Type messageType = mt2t[(MessageType)type];
             IMessage message = (IMessage)Activator.CreateInstance(messageType);
-            if (length > 0)
+            if (message != null && length > 0)
                 message.Deserialize(br);
 
             return message;

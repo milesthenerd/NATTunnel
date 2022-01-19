@@ -7,14 +7,10 @@ namespace NATTunnel.Common.Messages
     public class MasterServerPublishRequest : NodeMessage
     {
         public int Secret { get; private set; }
-        public int LocalPort { get; private set; }
+        public int LocalPort { get; private set; } //TODO: unused?
 
-        public MasterServerPublishRequest()
-        {
-            Id = 0;
-            Secret = 0;
-            LocalPort = 0;
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public MasterServerPublishRequest() : this(0, 0, 0) { }
 
         public MasterServerPublishRequest(int id, int secret, int localPort)
         {

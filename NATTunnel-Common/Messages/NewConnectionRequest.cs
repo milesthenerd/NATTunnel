@@ -23,11 +23,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public string Endpoint { get; private set; } // TODO: Source or destination? Also, unused?
 
-        public NewConnectionRequest()
-        {
-            Id = 0;
-            Endpoint = "";
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public NewConnectionRequest() : this(0, "") { }
 
         public NewConnectionRequest(int id, string endpoint)
         {

@@ -16,11 +16,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public int Client { get; private set; }
 
-        public MasterServerInfoRequest()
-        {
-            Server = 0;
-            Client = 0;
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public MasterServerInfoRequest() : this(0, 0) { }
 
         public MasterServerInfoRequest(int server = 0, int client = 0)
         {

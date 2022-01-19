@@ -18,12 +18,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public string Endpoint { get; private set; } // TODO: Origin or target? Also TODO: Never used?
 
-        public PingReply()
-        {
-            Id = 0;
-            SendTime = 0;
-            Endpoint = "";
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public PingReply() : this(0, 0, "") { }
 
         public PingReply(int id, long sendTime, string endpoint)
         {

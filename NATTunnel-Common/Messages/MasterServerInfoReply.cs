@@ -30,14 +30,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public List<IPEndPoint> Endpoints { get; }
 
-        public MasterServerInfoReply()
-        {
-            Server = 0;
-            Client = 0;
-            Status = false;
-            Message = "";
-            Endpoints = new List<IPEndPoint>();
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public MasterServerInfoReply() : this(0, 0, false, "") {}
 
         public MasterServerInfoReply(int server, int client, bool status, string message) : this(server, client, status, message, new List<IPEndPoint>()) { }
 

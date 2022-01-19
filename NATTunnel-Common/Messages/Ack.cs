@@ -16,12 +16,8 @@ namespace NATTunnel.Common.Messages
         /// </summary>
         public string Endpoint { get; private set; }
 
-        public Ack()
-        {
-            Id = 0;
-            StreamAck = 0;
-            Endpoint = "";
-        }
+        // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        public Ack() : this(0, 0, "") { }
 
         public Ack(int id, long streamAck, string endpoint)
         {
