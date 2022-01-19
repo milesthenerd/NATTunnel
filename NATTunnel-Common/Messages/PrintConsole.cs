@@ -11,16 +11,18 @@ namespace NATTunnel.Common.Messages
         /// <summary>
         /// The message to be sent/received.
         /// </summary>
-        public string message;
+        public string Message { get; private set; }
+        
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
-            writer.Write(message);
+            writer.Write(Message);
         }
+        
         public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();
-            message = reader.ReadString();
+            Message = reader.ReadString();
         }
     }
 }

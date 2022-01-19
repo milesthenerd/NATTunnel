@@ -304,7 +304,7 @@ namespace NATTunnel
                     if (clientMapping.ContainsKey(pingRequest.Id))
                     {
                         Client client = clientMapping[pingRequest.Id];
-                        PingReply preply = new PingReply(pingRequest.Id, pingRequest.sendTime, $"end{client.localTCPEndpoint}");
+                        PingReply preply = new PingReply(pingRequest.Id, pingRequest.SendTime, $"end{client.localTCPEndpoint}");
                         connection.Send(preply, endpoint);
                     }
                     break;
@@ -312,7 +312,7 @@ namespace NATTunnel
                 case PingReply pingReply:
                 {
                     long currentTime = DateTime.UtcNow.Ticks;
-                    long timeDelta = currentTime - pingReply.sendTime;
+                    long timeDelta = currentTime - pingReply.SendTime;
                     int timeMs = (int)(timeDelta / TimeSpan.TicksPerMillisecond);
                     if (clientMapping.ContainsKey(pingReply.Id))
                     {
@@ -323,7 +323,7 @@ namespace NATTunnel
                 }
                 case PrintConsole printConsole:
                 {
-                    Console.WriteLine($"Remote Message: {printConsole.message}");
+                    Console.WriteLine($"Remote Message: {printConsole.Message}");
                     break;
                 }
                 case Disconnect disconnect:
