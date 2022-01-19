@@ -15,10 +15,11 @@ namespace NATTunnel
 
             //TODO: the port endpoint has to be the same as the mediationclientport, as otherwise this is handled weirdly somewhere in this mess
 
-            // NodeOptions loading is done in the MediationClient constructor, as it is the first thing we call and the class that relies most upon the settings.
+            // NodeOptions / config file loading is done in the MediationClient constructor
+            // as it is the first thing we call and the class that relies most upon the settings.
             MediationClient.TrackedClient();
 
-            TunnelNode tn = new TunnelNode();
+            TunnelNode tunnelNode = new TunnelNode();
 
             if (NodeOptions.isServer)
             {
@@ -36,7 +37,7 @@ namespace NATTunnel
             Console.WriteLine("Press q or ctrl+c to quit.");
             bool hasConsole = true;
             bool running = true;
-            Console.CancelKeyPress += (s, e) => { running = false; tn.Stop(); };
+            Console.CancelKeyPress += (s, e) => { running = false; tunnelNode.Stop(); };
             while (running)
             {
                 if (!hasConsole)
