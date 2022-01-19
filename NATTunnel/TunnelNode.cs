@@ -161,7 +161,7 @@ namespace NATTunnel
                 {
                     if (!NodeOptions.isServer) break;
 
-                    NewConnectionReply ncr = new NewConnectionReply(nc.Id, Header.PROTOCOL_VERSION, NodeOptions.downloadSpeed);
+                    NewConnectionReply ncr = new NewConnectionReply(nc.Id);
                     //Do not connect protocol-incompatible clients.
                     if (nc.ProtocolVersion != Header.PROTOCOL_VERSION) return;
 
@@ -190,7 +190,7 @@ namespace NATTunnel
                         client = clientMapping[nc.Id];
 
                     //TODO: is this necessary down here?
-                    ncr.ep = $"end{client.localTCPEndpoint}";
+                    ncr.Endpoint = $"end{client.localTCPEndpoint}";
                     connection.Send(ncr, endpoint);
                     //Clamp to the clients download speed
                     Console.WriteLine($"Client {nc.Id} download rate is {nc.DownloadRate}KB/s");
@@ -213,9 +213,9 @@ namespace NATTunnel
                 {
                     if (!NodeOptions.isServer) break;
 
-                    if (ncr.protocol_version != Header.PROTOCOL_VERSION)
+                    if (ncr.ProtocolVersion != Header.PROTOCOL_VERSION)
                     {
-                        Console.WriteLine($"Unable to connect to incompatible server, our version: {Header.PROTOCOL_VERSION}, server: {ncr.protocol_version}");
+                        Console.WriteLine($"Unable to connect to incompatible server, our version: {Header.PROTOCOL_VERSION}, server: {ncr.ProtocolVersion}");
                         return;
                     }
 
@@ -230,10 +230,10 @@ namespace NATTunnel
                             c.udpEndpoint = endpoint;
                         }
                         //Clamp to the servers download speed
-                        Console.WriteLine($"Servers download rate is {ncr.downloadRate}KB/s");
-                        if (ncr.downloadRate < NodeOptions.uploadSpeed)
+                        Console.WriteLine($"Servers download rate is {ncr.DownloadRate}KB/s");
+                        if (ncr.DownloadRate < NodeOptions.uploadSpeed)
                         {
-                            c.bucket.rateBytesPerSecond = ncr.downloadRate * 1024;
+                            c.bucket.rateBytesPerSecond = ncr.DownloadRate * 1024;
                             c.bucket.totalBytes = c.bucket.rateBytesPerSecond;
                         }
                     }

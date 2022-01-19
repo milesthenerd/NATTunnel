@@ -3,7 +3,7 @@ using System.IO;
 namespace NATTunnel.Common.Messages
 {
     /// <summary>
-    /// A class for responding to a <see cref="PingRequest"/>.
+    /// Class for responding to a <see cref="PingRequest"/>.
     /// </summary>
     [MessageTypeAttribute(MessageType.PING_REPLY)]
     public class PingReply : NodeMessage

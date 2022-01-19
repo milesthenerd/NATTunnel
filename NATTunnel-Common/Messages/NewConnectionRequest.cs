@@ -2,11 +2,14 @@ using System.IO;
 
 namespace NATTunnel.Common.Messages
 {
+    /// <summary>
+    /// Class for requesting a <see cref="NewConnectionReply"/>.
+    /// </summary>
     [MessageTypeAttribute(MessageType.NEW_CONNECTION_REQUEST)]
     public class NewConnectionRequest : NodeMessage
     {
         /// <summary>
-        /// The protocol version of this <see cref="NewConnectionRequest"/>.
+        /// The protocol version.
         /// </summary>
         public int ProtocolVersion { get; private set; } = Header.PROTOCOL_VERSION;
 
@@ -16,9 +19,9 @@ namespace NATTunnel.Common.Messages
         public int DownloadRate { get; private set; } = NodeOptions.downloadSpeed;
 
         /// <summary>
-        /// The endpoint of this <see cref="NewConnectionRequest"/>.
+        /// The endpoint.
         /// </summary>
-        public string Endpoint { get; private set; } // TODO: Source or destination?
+        public string Endpoint { get; private set; } // TODO: Source or destination? Also, unused?
 
         public NewConnectionRequest()
         {
@@ -26,10 +29,10 @@ namespace NATTunnel.Common.Messages
             Endpoint = "";
         }
 
-        public NewConnectionRequest(int id, string ep)
+        public NewConnectionRequest(int id, string endpoint)
         {
             this.Id = id;
-            this.Endpoint = ep;
+            this.Endpoint = endpoint;
         }
         
         public override void Serialize(BinaryWriter writer)
