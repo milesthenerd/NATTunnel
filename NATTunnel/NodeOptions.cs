@@ -88,7 +88,7 @@ namespace NATTunnel
             sw.WriteLine($"endpoint={endpoint}");
             sw.WriteLine();
             sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
-            sw.WriteLine($"mediationIP={mediationIP.ToString()}");
+            sw.WriteLine($"mediationIP={mediationIP}");
             sw.WriteLine();
             sw.WriteLine("#remoteIP, clients: The public IP of the peer you want to connect to.");
             sw.WriteLine($"remoteIP={remoteIP}");
