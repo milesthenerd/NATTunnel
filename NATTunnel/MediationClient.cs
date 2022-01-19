@@ -7,42 +7,67 @@ using System.Text;
 using System.Threading;
 using System.Timers;
 using Timer = System.Timers.Timer;
+using NATTunnel.Common;
+using System.Runtime.InteropServices;
+using System.IO;
 
 namespace NATTunnel
 {
-    public class MediationClient
+    static public class MediationClient
     {
 
-        private TcpClient tcpClient;
-        private UdpClient udpClient;
-        private NetworkStream tcpClientStream;
-        private Thread tcpClientThread;
-        private Thread udpClientThread;
-        private Thread udpServerThread;
-        private IPEndPoint ep;
-        private IPEndPoint programEndpoint;
+        private static TcpClient tcpClient = new TcpClient();
+        private static UdpClient udpClient;
+        private static NetworkStream tcpClientStream;
+        private static Thread tcpClientThread;
+        private static Thread udpClientThread;
+        private static Thread udpServerThread;
+        private static IPEndPoint Endpoint;
+        private static IPEndPoint programEndpoint;
         //TODO: consider using address for this?
-        private string intendedIP;
-        private int intendedPort;
-        private int localAppPort;
-        private int holePunchReceivedCount;
-        private bool connected;
-        private string remoteIP;
-        private int mediationClientPort;
-        private bool isServer;
-        private List<IPEndPoint> connectedClients = new List<IPEndPoint>();
+        private static string intendedIP;
+        private static int intendedPort;
+        private static int localAppPort;
+        private static int holePunchReceivedCount;
+        private static bool connected;
+        private static string remoteIP;
+        private static int mediationClientPort;
+        private static bool isServer;
+        private static List<IPEndPoint> connectedClients = new List<IPEndPoint>();
         public static Dictionary<IPEndPoint, IPEndPoint> mapping = new Dictionary<IPEndPoint, IPEndPoint>();
         public static Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
         public static IPEndPoint mostRecentEP = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 65535);
-        public MediationClient(TcpClient tcpClient, UdpClient udpClient, IPEndPoint ep, string remoteIP, int mediationClientPort, IPEndPoint programEndpoint, bool isServer)
+
+        static MediationClient()
         {
-            this.tcpClient = tcpClient;
-            this.udpClient = udpClient;
-            this.ep = ep;
-            this.remoteIP = remoteIP;
-            this.mediationClientPort = mediationClientPort;
-            this.programEndpoint = programEndpoint;
-            this.isServer = isServer;
+            // NodeOptions loading is done here, as MediationClient is the first thing we call and the class that relies most upon the settings.
+            if (!File.Exists("config.txt") && !TryCreateNewConfig())
+                Environment.Exit(-1);
+
+            
+            using (StreamReader sr = new StreamReader("config.txt"))
+            {
+                if (!NodeOptions.Load(sr))
+                {
+                    Console.WriteLine("Failed to load config.txt");
+                    Environment.Exit(-1);
+                }
+            }
+
+            udpClient = new UdpClient(NodeOptions.mediationClientPort);
+
+            // Windows-specific udpClient switch
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                const int SIO_UDP_CONNRESET = -1744830452;
+                udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+            }
+
+            Endpoint = NodeOptions.mediationIP;
+            programEndpoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), NodeOptions.localPort);
+            remoteIP = NodeOptions.remoteIP;
+            mediationClientPort = NodeOptions.mediationClientPort;
+            isServer = NodeOptions.isServer;
         }
 
         public static void Add(IPEndPoint localEP)
@@ -55,13 +80,13 @@ namespace NATTunnel
             mapping.Remove(localEP);
         }
 
-        private void OnTimedEvent(object source, ElapsedEventArgs e)
+        private static void OnTimedEvent(object source, ElapsedEventArgs e)
         {
             //If not connected to remote endpoint, send remote IP to mediator
             if (!connected || isServer)
             {
                 byte[] sendBuffer = Encoding.ASCII.GetBytes(intendedIP);
-                udpClient.Send(sendBuffer, sendBuffer.Length, ep);
+                udpClient.Send(sendBuffer, sendBuffer.Length, Endpoint);
                 Console.WriteLine("Sent");
             }
             //If connected to remote endpoint, send keep alive message
@@ -100,12 +125,12 @@ namespace NATTunnel
             }
         }
 
-        public void TrackedClient()
+        public static void TrackedClient()
         {
             //Attempt to connect to mediator
             try
             {
-                tcpClient.Connect(ep);
+                tcpClient.Connect(Endpoint);
             }
             catch (Exception e)
             {
@@ -122,7 +147,7 @@ namespace NATTunnel
             tcpClientThread.Start();
         }
 
-        public void UdpClient()
+        public static void UdpClient()
         {
             //Set client intendedIP to remote endpoint IP
             intendedIP = remoteIP;
@@ -130,7 +155,7 @@ namespace NATTunnel
             try
             {
                 byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                udpClient.Send(sendBuffer, sendBuffer.Length, ep);
+                udpClient.Send(sendBuffer, sendBuffer.Length, Endpoint);
             }
             catch (Exception e)
             {
@@ -148,7 +173,7 @@ namespace NATTunnel
             timer.Elapsed += OnTimedEvent;
         }
 
-        public void UdpServer()
+        public static void UdpServer()
         {
             //Set client intendedIP to something no client will have
             intendedIP = "0.0.0.0";
@@ -156,7 +181,7 @@ namespace NATTunnel
             try
             {
                 byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                udpClient.Send(sendBuffer, sendBuffer.Length, ep);
+                udpClient.Send(sendBuffer, sendBuffer.Length, Endpoint);
             }
             catch (Exception e)
             {
@@ -174,7 +199,7 @@ namespace NATTunnel
             timer.Elapsed += OnTimedEvent;
         }
 
-        public void UdpClientListenLoop()
+        public static void UdpClientListenLoop()
         {
             //Init an IPEndPoint that will be populated with the sender's info
             IPEndPoint listenEP = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
@@ -212,7 +237,7 @@ namespace NATTunnel
                 string receivedIP = "";
                 int receivedPort = 0;
 
-                if (listenEP.Address.ToString() == ep.Address.ToString())
+                if (listenEP.Address.ToString() == Endpoint.Address.ToString())
                 {
                     string[] msgArray = Encoding.ASCII.GetString(recvBuffer).Split(":");
 
@@ -258,7 +283,7 @@ namespace NATTunnel
             }
         }
 
-        public void UdpServerListenLoop()
+        public static void UdpServerListenLoop()
         {
             IPEndPoint listenEP = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
             while (true)
@@ -308,7 +333,7 @@ namespace NATTunnel
                 string receivedIP = "";
                 int receivedPort = 0;
 
-                if (listenEP.Address.ToString() == ep.Address.ToString())
+                if (listenEP.Address.ToString() == Endpoint.Address.ToString())
                 {
                     string[] msgArray = Encoding.ASCII.GetString(recvBuffer).Split(":");
 
@@ -410,7 +435,7 @@ namespace NATTunnel
             }
         }
 
-        public void TcpListenLoop()
+        public static void TcpListenLoop()
         {
             while (tcpClient.Connected)
             {
@@ -424,6 +449,46 @@ namespace NATTunnel
                 {
                     Console.WriteLine(e);
                 }
+            }
+        }
+
+        /// <summary>
+        /// Creates a new config.
+        /// </summary>
+        /// <returns>Returns `true` if creation was successful, `false` if creation was cancelled.</returns>
+        private static bool TryCreateNewConfig()
+        {
+            Console.WriteLine("Unable to find config.txt");
+            Console.WriteLine("Creating a default:");
+            Console.WriteLine("c) Create a client config file");
+            Console.WriteLine("s) Create a server config file");
+            Console.WriteLine("Any other key: Quit");
+            ConsoleKeyInfo cki = Console.ReadKey();
+            switch (cki.KeyChar)
+            {
+                case 'c':
+                    {
+                        NodeOptions.isServer = false;
+                        NodeOptions.masterServerID = 0;
+                        NodeOptions.localPort = 5001;
+                        using StreamWriter sw = new StreamWriter("config.txt");
+                        NodeOptions.Save(sw);
+                        return true;
+                    }
+                case 's':
+                    {
+                        NodeOptions.isServer = true;
+                        NodeOptions.endpoint = "127.0.0.1:25565";
+                        NodeOptions.localPort = 5001;
+                        using StreamWriter sw = new StreamWriter("config.txt");
+                        NodeOptions.Save(sw);
+                        return true;
+                    }
+                default:
+                    {
+                        Console.WriteLine("Quitting...");
+                        return false;
+                    }
             }
         }
     }
