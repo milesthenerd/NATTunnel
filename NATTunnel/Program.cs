@@ -33,7 +33,7 @@ namespace NATTunnel
             Console.WriteLine("Press q or ctrl+c to quit.");
             bool hasConsole = true;
             bool running = true;
-            Console.CancelKeyPress += (s, e) => { running = false; tunnelNode.Stop(); };
+            Console.CancelKeyPress += (_, _) => { running = false; tunnelNode.Stop(); };
             while (running)
             {
                 if (!hasConsole)
