@@ -362,7 +362,7 @@ namespace NATTunnel
                     }
                 }
 
-                if (connected && receivedIp.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
+                if (connected && receivedIp?.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 {
                     string receiveString = Encoding.ASCII.GetString(receiveBuffer);
                     int splitPos = receiveString.IndexOf("end", StringComparison.Ordinal);
@@ -415,7 +415,7 @@ namespace NATTunnel
 
                 foreach (var client in connectedClients)
                 {
-                    if (!connected || receivedIp.ToString() == "hi" || listenEndpoint.Address.ToString() != client.Address.ToString())
+                    if (!connected || receivedIp?.ToString() == "hi" || listenEndpoint.Address.ToString() != client.Address.ToString())
                         continue;
 
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, programEndpoint);
