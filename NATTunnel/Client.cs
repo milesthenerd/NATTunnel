@@ -157,6 +157,7 @@ namespace NATTunnel
             }
 
             //Clamp to 1250 byte packets
+            //TODO: Look into changing this MTU to something that will fit more connections, like 500-1000
             const int upperLimit = 1250;
             bytesToWrite = bytesToWrite.LimitTo(upperLimit);
 
