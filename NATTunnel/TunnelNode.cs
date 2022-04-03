@@ -255,11 +255,6 @@ namespace NATTunnel
                     }
                     break;
                 }
-                case PrintConsole printConsole:
-                {
-                    Console.WriteLine($"Remote Message: {printConsole.Message}");
-                    break;
-                }
                 case Disconnect disconnect:
                 {
                     if (clientMapping.ContainsKey(disconnect.Id))
