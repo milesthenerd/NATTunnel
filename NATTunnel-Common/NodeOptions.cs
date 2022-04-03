@@ -14,7 +14,7 @@ namespace NATTunnel.Common
         public static bool IsServer = false;
         /// <summary>
         /// Servers: Indicates the TCP server to connect to for forwarding over UDP. <br/>
-        /// Clients: The UDP server to connect to (<b>unused if <see cref="MasterServerId"/> is set</b>).
+        /// Clients: The UDP server to connect to.
         /// </summary>
         public static string Endpoint = "serverhost.address.example.com:26702";
         /// <summary>
@@ -51,16 +51,10 @@ namespace NATTunnel.Common
         /// </summary>
         public static int MinRetransmitTime = 100;
         static readonly Random rng = new Random();
-        //Make sure masterServerID is random
         // TODO: Double-check how this value is used CAREFULLY for security purposes.
         /// <summary>
         ///
         /// </summary>
-        public static int MasterServerId = rng.Next();
-        /// <summary>
-        ///
-        /// </summary>
-        public static int MasterServerSecret = rng.Next();
 
         /// <summary>
         /// Tries to load the config file.
@@ -109,12 +103,6 @@ namespace NATTunnel.Common
                     case "minRetransmitTime":
                         MinRetransmitTime = Int32.Parse(rhs);
                         break;
-                    case "masterServerID":
-                        MasterServerId = Int32.Parse(rhs);
-                        break;
-                    case "masterServerSecret":
-                        MasterServerSecret = Int32.Parse(rhs);
-                        break;
                 }
             }
             return true;
@@ -130,7 +118,7 @@ namespace NATTunnel.Common
             sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP");
             sw.WriteLine($"mode={(IsServer ? "server" : "client")}");
             sw.WriteLine();
-            sw.WriteLine("#endpoint, servers: The TCP server to connect to for forwarding over UDP. Client: The UDP server to connect to (not used when masterServerID is set)");
+            sw.WriteLine("#endpoint, servers: The TCP server to connect to for forwarding over UDP. Client: The UDP server to connect to");
             sw.WriteLine($"endpoint={Endpoint}");
             sw.WriteLine();
             sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
@@ -151,11 +139,6 @@ namespace NATTunnel.Common
             sw.WriteLine();
             sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets");
             sw.WriteLine($"minRetransmitTime={MinRetransmitTime}");
-            sw.WriteLine();
-            sw.WriteLine("#masterServerID: Automatically register (server mode) or connect (client mode)");
-            sw.WriteLine("#masterServerSecret: Do not change this or you will have to change your server ID (server mode only)");
-            sw.WriteLine($"masterServerID={MasterServerId}");
-            sw.WriteLine($"masterServerSecret={MasterServerSecret}");
         }
 
         /// <summary>

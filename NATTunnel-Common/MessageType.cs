@@ -10,11 +10,6 @@ namespace NATTunnel.Common
         PING_REQUEST = 20,
         PING_REPLY = 21,
         DATA = 30,
-        ACK = 31,
-        MASTER_SERVER_INFO_REQUEST = 100,
-        MASTER_SERVER_INFO_REPLY = 101,
-        MASTER_SERVER_PUBLISH_REQUEST = 110,
-        MASTER_SERVER_PUBLISH_REPLY = 111,
-        MASTER_PRINT_CONSOLE = 120
+        ACK = 31
     }
 }

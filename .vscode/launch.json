@@ -37,16 +37,5 @@
             "console": "internalConsole",
             "stopAtEntry": false
         },
-        {
-            "name": "Master",
-            "type": "coreclr",
-            "request": "launch",
-            "preLaunchTask": "build",
-            "program": "${workspaceFolder}/NATTunnel-Master/bin/Debug/net5.0/NATTunnel-Master.dll",
-            "args": [],
-            "cwd": "${workspaceFolder}/NATTunnel-Master/bin/Debug/net5.0/",
-            "console": "internalConsole",
-            "stopAtEntry": false
-        },
     ]
 }

@@ -18,7 +18,7 @@ Here is an example config:
 #mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP
 mode=client
 
-#endpoint, servers: The TCP server to connect to for forwarding over UDP. Client: The UDP server to connect to (not used when masterServerID is set)
+#endpoint, servers: The TCP server to connect to for forwarding over UDP. Client: The UDP server to connect to
 endpoint=serverhost.address.example.com:26702
 
 #mediationIP: The public IP and port of the mediation server you are connecting to.
@@ -39,11 +39,6 @@ downloadSpeed=512
 
 #minRetransmitTime: How many milliseconds delay to send unacknowledged packets
 minRetransmitTime=100
-
-#masterServerID: Automatically register (server mode) or connect (client mode)
-#masterServerSecret: Do not change this or you will have to change your server ID (server mode only)
-masterServerID=0
-masterServerSecret=1983311291
 ```
 
 __mode__: should be set to "client" if you are a client, and "server" if you are running a game server
@@ -60,4 +55,4 @@ __mediationClientPort__: for the client and the server, this is the local UDP po
 
 __uploadSpeed__ and __downloadSpeed__: the fixed speed rates at which data will be sent and received; set if you are a client or server
 
-You can likely leave __localPort__, __mediationClientPort__, __minRetransmitTime__, and the __masterServer__ options as the defaults.
+You can likely leave __localPort__, __mediationClientPort__, and the __minRetransmitTime__ options as the defaults.

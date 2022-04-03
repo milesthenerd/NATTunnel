@@ -458,7 +458,6 @@ namespace NATTunnel
                 case 'c':
                 {
                     NodeOptions.IsServer = false;
-                    NodeOptions.MasterServerId = 0;
                     NodeOptions.LocalPort = 5001;
                     NodeOptions.CreateNewConfig();
                     return true;

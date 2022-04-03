@@ -23,13 +23,11 @@ namespace NATTunnel
             {
                 MediationClient.UdpServer();
                 Console.WriteLine($"Server forwarding {NodeOptions.Endpoints[0]} to UDP port {NodeOptions.LocalPort}");
-                if (NodeOptions.MasterServerId != 0)
-                    Console.WriteLine($"Server registering with master ID {NodeOptions.MasterServerId}");
             }
             else
             {
                 MediationClient.UdpClient();
-                Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {(NodeOptions.MasterServerId != 0 ? NodeOptions.MasterServerId : NodeOptions.Endpoints[0])}");
+                Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {(NodeOptions.Endpoints[0])}");
             }
 
             Console.WriteLine("Press q or ctrl+c to quit.");

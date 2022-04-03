@@ -9,8 +9,6 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NATTunnel-GUI", "NATTunnel-
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NATTunnel-Common", "NATTunnel-Common\NATTunnel-Common.csproj", "{8CF7F29A-4691-4EB5-BBB1-C20FFA06DA7C}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NATTunnel-Master", "NATTunnel-Master\NATTunnel-Master.csproj", "{DEA2FA24-752D-40B0-9621-3B82DE75DC43}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU

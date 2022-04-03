@@ -20,9 +20,6 @@ namespace NATTunnel
         private UdpConnection connection;
         private List<Client> clients = new List<Client>();
         private Dictionary<int, Client> clientMapping = new Dictionary<int, Client>();
-        private IPAddress[] masterServerAddresses = Dns.GetHostAddresses("DarkTunnel.godarklight.privatedns.org");
-        //Master state
-        private long nextMasterTime = 0;
         private TokenBucket connectionBucket;
 
         public TunnelNode()
@@ -85,14 +82,6 @@ namespace NATTunnel
                     clients.Remove(client);
                 }
 
-                if (NodeOptions.IsServer && (NodeOptions.MasterServerId != 0) && (currentTime > nextMasterTime))
-                {
-                    //Send master registers every minute
-                    nextMasterTime = currentTime + DateTime.UtcNow.Ticks + TimeSpan.TicksPerMinute;
-                    MasterServerPublishRequest mspr = new MasterServerPublishRequest(NodeOptions.MasterServerId, NodeOptions.MasterServerSecret, NodeOptions.LocalPort);
-                    foreach (IPAddress masterAddr in masterServerAddresses)
-                        connection.Send(mspr, new IPEndPoint(masterAddr, 16702));
-                }
                 Thread.Sleep(100);
             }
         }
@@ -119,26 +108,12 @@ namespace NATTunnel
         private void ConnectUDPClient(Client client)
         {
             //TODO: why 4?
-            if (NodeOptions.MasterServerId == 0)
+            foreach (IPEndPoint endpoint in NodeOptions.Endpoints)
             {
-                foreach (IPEndPoint endpoint in NodeOptions.Endpoints)
+                for (int i = 0; i < 4; i++)
                 {
-                    for (int i = 0; i < 4; i++)
-                    {
-                        NewConnectionRequest ncr = new NewConnectionRequest(client.id, $"end{client.localTCPEndpoint}");
-                        connection.Send(ncr, endpoint);
-                    }
-                }
-            }
-            else
-            {
-                foreach (IPAddress addr in masterServerAddresses)
-                {
-                    for (int i = 0; i < 4; i++)
-                    {
-                        MasterServerInfoRequest msir = new MasterServerInfoRequest(client.id);
-                        connection.Send(msir, new IPEndPoint(addr, 16702));
-                    }
+                    NewConnectionRequest ncr = new NewConnectionRequest(client.id, $"end{client.localTCPEndpoint}");
+                    connection.Send(ncr, endpoint);
                 }
             }
         }
@@ -233,41 +208,6 @@ namespace NATTunnel
                             client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
                         }
                     }
-                    break;
-                }
-
-                case MasterServerInfoReply msir:
-                {
-                    Client client = null;
-                    if (clientMapping.ContainsKey(msir.Client))
-                        client = clientMapping[msir.Client];
-                    
-                    if (client == null) return;
-
-                    //Shouldn't happen but we should probably check this.
-                    if (msir.Server != NodeOptions.MasterServerId) return;
-                    
-                    if (!msir.Status)
-                    {
-                        Console.WriteLine($"Cannot connect: {msir.Message}");
-                        return;
-                    }
-
-                    foreach (IPEndPoint msirEndpoint in msir.Endpoints)
-                    {
-                        for (int i = 0; i < 4; i++)
-                        {
-                            NewConnectionRequest ncr = new NewConnectionRequest(msir.Client, $"end{client.localTCPEndpoint}");
-                            Console.WriteLine($"MSIR connect: {msirEndpoint}");
-                            connection.Send(ncr, msirEndpoint);
-                        }
-                    }
-                    break;
-                }
-
-                case MasterServerPublishReply mspr:
-                {
-                    Console.WriteLine($"Publish Reply for {mspr.Id}, registered {mspr.Status}, {mspr.Message}");
                     break;
                 }
 
