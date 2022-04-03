@@ -5,6 +5,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 
+// TODO: remove hardcoded config location
+
 namespace NATTunnel
 {
     public class Client
@@ -213,6 +215,7 @@ namespace NATTunnel
         {
             try
             {
+                // TODO: Crashes here when other end of tunnel disconnects
                 int bytesRead = tcp.GetStream().EndRead(ar);
                 if (bytesRead == 0)
                 {
