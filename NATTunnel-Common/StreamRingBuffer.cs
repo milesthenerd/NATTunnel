@@ -3,67 +3,66 @@
 
 using System;
 
-namespace NATTunnel.Common
+namespace NATTunnel.Common;
+
+public class StreamRingBuffer
 {
-    public class StreamRingBuffer
+    private readonly byte[] internalBuffer;
+
+    public StreamRingBuffer(int size)
     {
-        private readonly byte[] internalBuffer;
+        internalBuffer = new byte[size];
+    }
 
-        public StreamRingBuffer(int size)
-        {
-            internalBuffer = new byte[size];
-        }
+    public long StreamReadPos { get; private set; }
 
-        public long StreamReadPos { get; private set; }
+    public long StreamWritePos { get; private set; }
 
-        public long StreamWritePos { get; private set; }
+    public int AvailableRead => (int)(StreamWritePos - StreamReadPos);
 
-        public int AvailableRead => (int)(StreamWritePos - StreamReadPos);
+    public int AvailableWrite => internalBuffer.Length - 1 - AvailableRead;
 
-        public int AvailableWrite => internalBuffer.Length - 1 - AvailableRead;
+    public void Write(byte[] source, int offset, int size)
+    {
+        if (size > AvailableWrite)
+            throw new ArgumentOutOfRangeException(nameof(size), "Buffer full");
 
-        public void Write(byte[] source, int offset, int size)
-        {
-            if (size > AvailableWrite)
-                throw new ArgumentOutOfRangeException(nameof(size), "Buffer full");
+        //Because this is a ring buffer we have to "wrap around", so two writes.
+        int firstWriteLength = internalBuffer.Length - (int)(StreamWritePos % internalBuffer.Length);
+        firstWriteLength = firstWriteLength.LimitTo(size);
 
-            //Because this is a ring buffer we have to "wrap around", so two writes.
-            int firstWriteLength = internalBuffer.Length - (int)(StreamWritePos % internalBuffer.Length);
-            firstWriteLength = firstWriteLength.LimitTo(size);
+        Array.Copy(source, offset, internalBuffer, StreamWritePos % internalBuffer.Length, firstWriteLength);
 
-            Array.Copy(source, offset, internalBuffer, StreamWritePos % internalBuffer.Length, firstWriteLength);
+        int secondWriteLength = size - firstWriteLength;
+        if (secondWriteLength > 0)
+            Array.Copy(source, offset + firstWriteLength, internalBuffer, 0, secondWriteLength);
 
-            int secondWriteLength = size - firstWriteLength;
-            if (secondWriteLength > 0)
-                Array.Copy(source, offset + firstWriteLength, internalBuffer, 0, secondWriteLength);
+        StreamWritePos += size;
+    }
 
-            StreamWritePos += size;
-        }
+    //TODO: return value is never used anywhere?
+    public int Read(byte[] dest, int offset, long readPos, int size)
+    {
+        long readDelta = readPos - StreamReadPos;
+        if ((readDelta < 0) || ((AvailableRead - readDelta - size) < 0))
+            throw new ArgumentOutOfRangeException(nameof(readDelta),"Stream trying to read from a non-written area.");
 
-        //TODO: return value is never used anywhere?
-        public int Read(byte[] dest, int offset, long readPos, int size)
-        {
-            long readDelta = readPos - StreamReadPos;
-            if ((readDelta < 0) || ((AvailableRead - readDelta - size) < 0))
-                throw new ArgumentOutOfRangeException(nameof(readDelta),"Stream trying to read from a non-written area.");
+        int firstRead = internalBuffer.Length - (int)(readPos % internalBuffer.Length);
+        firstRead = firstRead.LimitTo(size);
 
-            int firstRead = internalBuffer.Length - (int)(readPos % internalBuffer.Length);
-            firstRead = firstRead.LimitTo(size);
+        int secondRead = size - firstRead;
+        Array.Copy(internalBuffer, readPos % internalBuffer.Length, dest, offset, firstRead);
+        if (secondRead > 0)
+            Array.Copy(internalBuffer, 0, dest, offset + firstRead, secondRead);
 
-            int secondRead = size - firstRead;
-            Array.Copy(internalBuffer, readPos % internalBuffer.Length, dest, offset, firstRead);
-            if (secondRead > 0)
-                Array.Copy(internalBuffer, 0, dest, offset + firstRead, secondRead);
+        return size;
+    }
 
-            return size;
-        }
+    public void MarkFree(long position)
+    {
+        if (position < StreamReadPos)
+            throw new ArgumentOutOfRangeException(nameof(position), "Stream attempting to free a non-written area.");
 
-        public void MarkFree(long position)
-        {
-            if (position < StreamReadPos)
-                throw new ArgumentOutOfRangeException(nameof(position), "Stream attempting to free a non-written area.");
-
-            StreamReadPos = position;
-        }
+        StreamReadPos = position;
     }
 }

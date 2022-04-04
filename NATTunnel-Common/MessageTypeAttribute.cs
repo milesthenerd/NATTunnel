@@ -1,13 +1,12 @@
 using System;
 
-namespace NATTunnel.Common
+namespace NATTunnel.Common;
+
+public class MessageTypeAttribute : Attribute
 {
-    public class MessageTypeAttribute : Attribute
+    public readonly MessageType Type;
+    public MessageTypeAttribute(MessageType type)
     {
-        public readonly MessageType Type;
-        public MessageTypeAttribute(MessageType type)
-        {
-            Type = type;
-        }
+        Type = type;
     }
 }
