@@ -16,6 +16,7 @@ public static class NodeOptions
     /// Servers: Indicates the TCP server to connect to for forwarding over UDP. <br/>
     /// Clients: The UDP server to connect to.
     /// </summary>
+    //TODO: make this an IPEndPoint?
     public static string Endpoint = "serverhost.address.example.com:26702";
 
     /// <summary>
@@ -67,11 +68,12 @@ public static class NodeOptions
     public static void ResolveAddress()
     {
         Endpoints.Clear();
+        //TODO: handle splitIndex being -1
         int splitIndex = Endpoint.LastIndexOf(":", StringComparison.Ordinal);
-        string lhs = Endpoint.Substring(0, splitIndex);
-        string rhs = Endpoint.Substring(splitIndex + 1);
-        int port = Int32.Parse(rhs);
-        if (IPAddress.TryParse(lhs, out IPAddress address))
+        string leftSide = Endpoint.Substring(0, splitIndex);
+        string rightSide = Endpoint.Substring(splitIndex + 1);
+        int port = Int32.Parse(rightSide);
+        if (IPAddress.TryParse(leftSide, out IPAddress address))
         {
             Endpoints.Add(new IPEndPoint(address, port));
         }
@@ -79,7 +81,7 @@ public static class NodeOptions
         //TODO: why not just always do that?
         else
         {
-            foreach (IPAddress address2 in Dns.GetHostAddresses(lhs))
+            foreach (IPAddress address2 in Dns.GetHostAddresses(leftSide))
             {
                 Endpoints.Add(new IPEndPoint(address2, port));
             }

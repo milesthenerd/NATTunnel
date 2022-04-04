@@ -34,7 +34,7 @@ internal static class Program
             Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoints[0]}");
         }
 
-        Console.WriteLine("Press q or ctrl+c to quit.");
+        Console.WriteLine("Press Q or CTRL+C to quit.");
         bool hasConsole = true;
         //TODO: close mediationClient when shutting down.
         Console.CancelKeyPress += (_, _) => { Shutdown(tunnelNode); };

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Net;
 
 namespace NATTunnel.Common;
@@ -9,54 +10,137 @@ namespace NATTunnel.Common;
 /// </summary>
 public static class Config
 {
+    #region Config Options
+
+    private const string Mode = "mode";
+
+    private const string Client = "client";
+
+    private const string Server = "server";
+
+    private const string Endpoint = "endpoint";
+
+    private const string MediationIp = "mediationIP";
+
+    private const string RemoteIp = "remoteIP";
+
+    private const string LocalPort = "localPort";
+
+    private const string MediationClientPort = "mediationClientPort";
+
+    private const string UploadSpeed = "uploadSpeed";
+
+    private const string DownloadSpeed = "downlaodSpeed";
+
+    private const string MinRetransmitTime = "minRetransmitTime";
+
+    #endregion
+
     /// <summary>
     /// Tries to load the config file.
     /// </summary>
     /// <returns>Returns <see langword="true"/> if loading was successful, <see langword="false"/> if it wasn't.</returns>
-    //TODO: this only ever returns true
     public static bool TryLoadConfig()
     {
         using StreamReader streamReader = new StreamReader(GetConfigFilePath());
         string currentLine;
+        IPAddress tempEndpointIP = IPAddress.Loopback;
         while ((currentLine = streamReader.ReadLine()) != null)
         {
+            // Skip all lines which don't have contents or are commented out.
+            if ((currentLine.Length > 1) && (currentLine[0] == '#')) continue;
+
+            // If the current line has no '=', or it's at the beginning, skip.
             int splitIndex = currentLine.IndexOf("=", StringComparison.Ordinal);
             if (splitIndex <= 0) continue;
 
-            string lhs = currentLine.Substring(0, splitIndex);
-            string rhs = currentLine.Substring(splitIndex + 1);
-            switch (lhs)
+            string leftSide = currentLine[..splitIndex].Trim();
+            string rightSide = currentLine[(splitIndex + 1)..].Trim();
+            switch (leftSide)
             {
-                case "mode":
-                    NodeOptions.IsServer = rhs == "server";
+                case Mode:
+                    // If the Mode is neither Server nor Client, exit.
+                    if (!(rightSide.Equals(Server) || rightSide.Equals(Client)))
+                    {
+                        Console.WriteLine($"Unknown option '{rightSide}' for {Mode}!");
+                        return false;
+                    }
+                    // Otherwise, assign IsServer
+                    NodeOptions.IsServer = rightSide == Server;
                     break;
-                case "endpoint":
-                    NodeOptions.Endpoint = rhs;
-                    NodeOptions.ResolveAddress();
+                case Endpoint:
+                    // Temp assign the ip here for use later. If the IP can't be resolved, error out.
+                    try
+                    {
+                        tempEndpointIP = Dns.GetHostAddresses(rightSide).First();
+                    }
+                    catch
+                    {
+                        Console.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
+                        return false;
+                    }
                     break;
-                case "mediationIP":
-                    NodeOptions.MediationIp = IPEndPoint.Parse(rhs);
+                case MediationIp:
+                    //TODO: port is needed, try to resolve address tho
+                    NodeOptions.MediationIp = IPEndPoint.Parse(rightSide);
                     break;
-                case "remoteIP":
-                    NodeOptions.RemoteIp = IPAddress.Parse(rhs);
+                case RemoteIp:
+                    // If the IP can't be resolved, error out.
+                    try
+                    {
+                        NodeOptions.RemoteIp = Dns.GetHostAddresses(rightSide).First();
+                    }
+                    catch
+                    {
+                        Console.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
+                        return false;
+                    }
                     break;
-                case "localPort":
-                    NodeOptions.LocalPort = Int32.Parse(rhs);
+
+                // If any of the values below can't be parsed, error out.
+                case LocalPort:
+                    if (!Int32.TryParse(rightSide, out NodeOptions.LocalPort))
+                    {
+                        Console.WriteLine($"Invalid port for {LocalPort}");
+                        return false;
+                    }
                     break;
-                case "mediationClientPort":
-                    NodeOptions.MediationClientPort = Int32.Parse(rhs);
+                case MediationClientPort:
+                    if (!Int32.TryParse(rightSide, out NodeOptions.MediationClientPort))
+                    {
+                        Console.WriteLine($"Invalid port for {MediationClientPort}");
+                        return false;
+                    }
                     break;
-                case "uploadSpeed":
-                    NodeOptions.UploadSpeed = Int32.Parse(rhs);
+                case UploadSpeed:
+                    if (!Int32.TryParse(rightSide, out NodeOptions.UploadSpeed))
+                    {
+                        Console.WriteLine($"Invalid entry for {UploadSpeed}");
+                        return false;
+                    }
+                    NodeOptions.UploadSpeed = Int32.Parse(rightSide);
                     break;
-                case "downloadSpeed":
-                    NodeOptions.DownloadSpeed = Int32.Parse(rhs);
+                case DownloadSpeed:
+                    if (!Int32.TryParse(rightSide, out NodeOptions.DownloadSpeed))
+                    {
+                        Console.WriteLine($"Invalid entry for {DownloadSpeed}");
+                        return false;
+                    }
+                    NodeOptions.DownloadSpeed = Int32.Parse(rightSide);
                     break;
-                case "minRetransmitTime":
-                    NodeOptions.MinRetransmitTime = Int32.Parse(rhs);
+                case MinRetransmitTime:
+                    if (!Int32.TryParse(rightSide, out NodeOptions.MinRetransmitTime))
+                    {
+                        Console.WriteLine($"Invalid entry for {MinRetransmitTime}");
+                        return false;
+                    }
                     break;
             }
         }
+        // Before exiting, we need to give the correct port (mediation) to the endpoint
+        NodeOptions.Endpoint = tempEndpointIP + ":" + NodeOptions.MediationClientPort;
+        NodeOptions.ResolveAddress();
+
         return true;
     }
 
@@ -66,10 +150,10 @@ public static class Config
     public static void CreateNewConfig()
     {
         using StreamWriter sw = new StreamWriter(GetConfigFilePath());
-        sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP");
+        sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP.");
         sw.WriteLine($"mode={(NodeOptions.IsServer ? "server" : "client")}");
         sw.WriteLine();
-        sw.WriteLine("#endpoint, servers: The TCP server to connect to for forwarding over UDP. Client: The UDP server to connect to");
+        sw.WriteLine("#endpoint, servers: The IP address of the TCP server to connect to for forwarding over UDP. Client: The IP address of the UDP server to connect to.");
         sw.WriteLine($"endpoint={NodeOptions.Endpoint}");
         sw.WriteLine();
         sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
@@ -88,7 +172,7 @@ public static class Config
         sw.WriteLine($"uploadSpeed={NodeOptions.UploadSpeed}");
         sw.WriteLine($"downloadSpeed={NodeOptions.DownloadSpeed}");
         sw.WriteLine();
-        sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets");
+        sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets.");
         sw.WriteLine($"minRetransmitTime={NodeOptions.MinRetransmitTime}");
     }
 
