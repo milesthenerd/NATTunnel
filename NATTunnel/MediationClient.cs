@@ -41,7 +41,10 @@ namespace NATTunnel
         static MediationClient()
         {
             // NodeOptions loading is done here, as MediationClient is the first thing we call and the class that relies most upon the settings.
-            if (!File.Exists("config.txt") && !TryCreateNewConfig())
+
+            // If the config file does not exist, and we couldn't create a config, exit cleanly.
+            // TODO: this should actually throw or show some info on why the config file couldn't be created.
+            if (!File.Exists(Config.GetConfigFilePath()) && !TryCreateNewConfig())
                 Environment.Exit(-1);
 
             if (!Config.TryLoadConfig())
@@ -447,6 +450,7 @@ namespace NATTunnel
         /// <returns>Returns <see langword="true"/> if creation was successful, <see langword="false"/> if creation was cancelled.</returns>
         private static bool TryCreateNewConfig()
         {
+            //TODO: what happens if this gets called when a config already exists? Should it overwrite the config? Message below doesn't make sense fot it at least
             Console.WriteLine("Unable to find config.txt");
             Console.WriteLine("Creating a default:");
             Console.WriteLine("c) Create a client config file");

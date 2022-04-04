@@ -16,8 +16,7 @@ namespace NATTunnel.Common
         //TODO: this only ever returns true
         public static bool TryLoadConfig()
         {
-            //TODO: this currently hardcodes the config file to $PWD/config.txt. Bad idea.
-            using StreamReader streamReader = new StreamReader("config.txt");
+            using StreamReader streamReader = new StreamReader(GetConfigFilePath());
             string currentLine;
             while ((currentLine = streamReader.ReadLine()) != null)
             {
@@ -66,8 +65,7 @@ namespace NATTunnel.Common
         /// </summary>
         public static void CreateNewConfig()
         {
-            //TODO: also hardcodes the config path to $PWD/config.txt
-            using StreamWriter sw = new StreamWriter("config.txt");
+            using StreamWriter sw = new StreamWriter(GetConfigFilePath());
             sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP");
             sw.WriteLine($"mode={(NodeOptions.IsServer ? "server" : "client")}");
             sw.WriteLine();
@@ -92,6 +90,29 @@ namespace NATTunnel.Common
             sw.WriteLine();
             sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets");
             sw.WriteLine($"minRetransmitTime={NodeOptions.MinRetransmitTime}");
+        }
+
+        /// <summary>
+        /// The file path to where the config.txt for NATTunnel is located, depending on the OS.
+        /// </summary>
+        /// <returns>The file path to where the config.txt is located for a known OS, <see langword="null"/> for an unknown OS.</returns>
+        public static string GetConfigFilePath()
+        {
+            if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+            {
+                string nattunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + "/NATTunnel";
+                Directory.CreateDirectory(nattunnelDir);
+                return nattunnelDir + "/config.txt";
+            }
+
+            if (OperatingSystem.IsMacOS())
+            {
+                string nattunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/Library/Application Support/NATTunnel";
+                Directory.CreateDirectory(nattunnelDir);
+                return nattunnelDir + "/config.txt";
+            }
+
+            return null;
         }
 	}
 }
