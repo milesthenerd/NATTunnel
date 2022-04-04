@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using NATTunnel.Common.Messages;
 
 namespace NATTunnel.Common;
 

@@ -1,6 +1,6 @@
 using System.IO;
 
-namespace NATTunnel.Common;
+namespace NATTunnel.Common.Messages;
 
 public abstract class NodeMessage : IMessage
 {

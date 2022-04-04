@@ -1,12 +1,12 @@
 using System.IO;
 
-namespace NATTunnel.Common.Messages;
+namespace NATTunnel.Common.Messages.Types;
 
 /// <summary>
-/// Class for responding to a <see cref="NewConnectionRequest"/>.
+/// Class for requesting a <see cref="NewConnectionReply"/>.
 /// </summary>
-[MessageTypeAttribute(MessageType.NewConnectionReply)]
-public class NewConnectionReply : NodeMessage
+[MessageType(MessageType.NewConnectionRequest)]
+public class NewConnectionRequest : NodeMessage
 {
     /// <summary>
     /// The protocol version.
@@ -25,9 +25,9 @@ public class NewConnectionReply : NodeMessage
 
     // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
     // ReSharper disable once UnusedMember.Global
-    public NewConnectionReply() : this(0, "") { }
+    public NewConnectionRequest() : this(0, "") { }
 
-    public NewConnectionReply(int id, string endpoint)
+    public NewConnectionRequest(int id, string endpoint)
     {
         Id = id;
         Endpoint = endpoint;

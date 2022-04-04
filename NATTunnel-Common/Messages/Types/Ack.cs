@@ -1,45 +1,43 @@
 using System.IO;
 
-namespace NATTunnel.Common.Messages;
+namespace NATTunnel.Common.Messages.Types;
 
 /// <summary>
-/// Class to signal a disconnect.
+/// Class for data acknowledgement.
 /// </summary>
-[MessageTypeAttribute(MessageType.Disconnect)]
-public class Disconnect : NodeMessage
+[MessageType(MessageType.Ack)]
+public class Ack : NodeMessage
 {
-    /// <summary>
-    /// The reason for this disconnect.
-    /// </summary>
-    public string Reason { get; private set; }
+    // TODO: Documentation
+    public long StreamAck { get; private set; }
 
     /// <summary>
     /// The endpoint.
     /// </summary>
-    public string Endpoint { get; private set; } // TODO: source or destination???
+    public string Endpoint { get; private set; }
 
     // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
     // ReSharper disable once UnusedMember.Global
-    public Disconnect() : this(0, "", "") { }
+    public Ack() : this(0, 0, "") { }
 
-    public Disconnect(int id, string reason, string endpoint)
+    public Ack(int id, long streamAck, string endpoint)
     {
         Id = id;
-        Reason = reason;
+        StreamAck = streamAck;
         Endpoint = endpoint;
     }
 
     public override void Serialize(BinaryWriter writer)
     {
         writer.Write(Id);
-        writer.Write(Reason);
+        writer.Write(StreamAck);
         writer.Write(Endpoint);
     }
 
     public override void Deserialize(BinaryReader reader)
     {
         Id = reader.ReadInt32();
-        Reason = reader.ReadString();
+        StreamAck = reader.ReadInt64();
         Endpoint = reader.ReadString();
     }
 }

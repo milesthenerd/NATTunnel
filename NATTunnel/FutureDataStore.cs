@@ -1,5 +1,6 @@
 using NATTunnel.Common.Messages;
 using System.Collections.Generic;
+using NATTunnel.Common.Messages.Types;
 
 namespace NATTunnel;
 

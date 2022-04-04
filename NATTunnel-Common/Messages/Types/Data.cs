@@ -1,10 +1,10 @@
 using System;
 using System.IO;
 
-namespace NATTunnel.Common.Messages;
+namespace NATTunnel.Common.Messages.Types;
 
 // TODO: documentation
-[MessageTypeAttribute(MessageType.Data)]
+[MessageType(MessageType.Data)]
 public class Data : NodeMessage
 {
     public long StreamPos { get; private set; }

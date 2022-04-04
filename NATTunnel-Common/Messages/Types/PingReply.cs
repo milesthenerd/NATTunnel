@@ -1,28 +1,28 @@
 using System.IO;
 
-namespace NATTunnel.Common.Messages;
+namespace NATTunnel.Common.Messages.Types;
 
 /// <summary>
-/// Class for requesting a <see cref="PingReply"/>.
+/// Class for responding to a <see cref="PingRequest"/>.
 /// </summary>
-[MessageTypeAttribute(MessageType.PingRequest)]
-public class PingRequest : NodeMessage
+[MessageType(MessageType.PingReply)]
+public class PingReply : NodeMessage
 {
     /// <summary>
-    /// The time this <see cref="PingRequest"/> was sent.
+    /// The time this <see cref="PingReply"/> was sent.
     /// </summary>
     public long SendTime { get; private set; }
 
     /// <summary>
-    /// The endpoint of this <see cref="PingRequest"/>.
+    /// The endpoint of this <see cref="PingReply"/>.
     /// </summary>
-    public string Endpoint { get; private set; } // TODO: Is this origin or target???  Also TODO: Never used?
+    public string Endpoint { get; private set; } // TODO: Origin or target? Also TODO: Never used?
 
     // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
     // ReSharper disable once UnusedMember.Global
-    public PingRequest() : this(0, 0, "") { }
+    public PingReply() : this(0, 0, "") { }
 
-    public PingRequest(int id, long sendTime, string endpoint)
+    public PingReply(int id, long sendTime, string endpoint)
     {
         Id = id;
         SendTime = sendTime;

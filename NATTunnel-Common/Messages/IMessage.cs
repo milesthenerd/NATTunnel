@@ -1,6 +1,6 @@
 ﻿using System.IO;
 
-namespace NATTunnel.Common;
+namespace NATTunnel.Common.Messages;
 
 /// <summary>
 /// Interface for various message types.
@@ -15,7 +15,7 @@ public interface IMessage
     /// </summary>
     /// <param name="writer">The <see cref="BinaryWriter"/> to send data to.</param>
     void Serialize(BinaryWriter writer);
-    
+
     /// <summary>
     /// Reads all data from the given <paramref name="reader"/> into this object.
     /// </summary>

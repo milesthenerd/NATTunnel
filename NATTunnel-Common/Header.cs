@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using NATTunnel.Common.Messages;
 
 //This class is currently not thread safe.
 
@@ -24,18 +25,17 @@ public static class Header
             Load();
         }
 
-        using (MemoryStream ms = new MemoryStream(buildBytes))
-        {
-            using (BinaryWriter bw = new BinaryWriter(ms, System.Text.Encoding.UTF8, true))
-                message.Serialize(bw);
+        using MemoryStream memoryStream = new MemoryStream(buildBytes);
+        //TODO: why leave the stream open?
+        using (BinaryWriter binaryWriter = new BinaryWriter(memoryStream, System.Text.Encoding.UTF8, true))
+            message.Serialize(binaryWriter);
 
-            short type = (short)typeToMessageType[message.GetType()];
-            short length = (short)ms.Position;
-            BitConverter.GetBytes(type).CopyTo(sendBytes, 4);
-            BitConverter.GetBytes(length).CopyTo(sendBytes, 6);
-            if (length > 0)
-                Array.Copy(buildBytes, 0, sendBytes, 8, length);
-        }
+        short type = (short)typeToMessageType[message.GetType()];
+        short length = (short)memoryStream.Position;
+        BitConverter.GetBytes(type).CopyTo(sendBytes, 4);
+        BitConverter.GetBytes(length).CopyTo(sendBytes, 6);
+        if (length > 0)
+            Array.Copy(buildBytes, 0, sendBytes, 8, length);
         return sendBytes;
     }
 
