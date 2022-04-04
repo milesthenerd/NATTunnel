@@ -5,16 +5,14 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace NATTunnel;
 
 public class TunnelNode
 {
-    //TODO: currently nothing ever sets this to false
     private bool running = true;
     private readonly Random random = new Random();
-    //TODO: what's this used for?
-    private Thread mainLoop;
     private TcpListener tcpServer;
     private Socket udp;
     private readonly UdpConnection udpConnection;
@@ -37,12 +35,17 @@ public class TunnelNode
             SetupUDPSocket(0);
         }
         udpConnection = new UdpConnection(udp, ReceiveCallback);
-        mainLoop = new Thread(MainLoop) { Name = "TunnelNode-MainLoop" };
-        mainLoop.Start();
+    }
+
+    public void Start()
+    {
+        Task mainTask = new Task(MainLoop);
+        mainTask.Start();
     }
 
     public void Stop()
     {
+        running = false;
         udpConnection.Stop();
         tcpServer?.Stop();
         udp.Close();
@@ -61,7 +64,7 @@ public class TunnelNode
         tcpServer.BeginAcceptTcpClient(ConnectCallback, null);
     }
 
-    public void MainLoop()
+    private void MainLoop()
     {
         //This is the cleanup/heartbeating loop
         while (running)
@@ -89,21 +92,25 @@ public class TunnelNode
 
     private void ConnectCallback(IAsyncResult ar)
     {
-        try
+        while (running)
         {
-            TcpClient tcp = tcpServer.EndAcceptTcpClient(ar);
-            int newID = random.Next();
-            Client client = new Client(newID, udpConnection, tcp, connectionBucket);
-            Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
-            ConnectUDPClient(client);
-            clients.Add(client);
-            clientMapping[client.Id] = client;
+            try
+            {
+                TcpClient tcp = tcpServer.EndAcceptTcpClient(ar);
+                int newID = random.Next();
+                Client client = new Client(newID, udpConnection, tcp, connectionBucket);
+                Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
+                ConnectUDPClient(client);
+                clients.Add(client);
+                clientMapping[client.Id] = client;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Error accepting socket: {e}");
+            }
+
+            tcpServer.BeginAcceptTcpClient(ConnectCallback, null);
         }
-        catch (Exception e)
-        {
-            Console.WriteLine($"Error accepting socket: {e}");
-        }
-        tcpServer.BeginAcceptTcpClient(ConnectCallback, null);
     }
 
     private void ConnectUDPClient(Client client)

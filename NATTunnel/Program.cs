@@ -16,6 +16,7 @@ internal static class Program
         MediationClient.TrackedClient();
 
         TunnelNode tunnelNode = new TunnelNode();
+        tunnelNode.Start();
 
         if (NodeOptions.IsServer)
         {
@@ -31,6 +32,7 @@ internal static class Program
         Console.WriteLine("Press q or ctrl+c to quit.");
         bool hasConsole = true;
         bool running = true;
+        //TODO: close mediationClient when shutting down.
         Console.CancelKeyPress += (_, _) => { running = false; tunnelNode.Stop(); };
         while (running)
         {
@@ -39,9 +41,12 @@ internal static class Program
 
             try
             {
-                ConsoleKeyInfo cki = Console.ReadKey(false);
+                ConsoleKeyInfo cki = Console.ReadKey();
                 if (cki.KeyChar == 'q')
+                {
                     running = false;
+                    tunnelNode.Stop();
+                }
             }
             catch (InvalidOperationException)
             {

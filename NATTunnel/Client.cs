@@ -215,8 +215,9 @@ public class Client
     {
         try
         {
-            // TODO: Crashes here when other end of tunnel disconnects
+            // TODO: Crashes here when other end of tunnel disconnects. It shouldn't tho, retest.
             int bytesRead = TCPClient.GetStream().EndRead(ar);
+
             if (bytesRead == 0)
             {
                 Disconnect("TCP connection was closed.");

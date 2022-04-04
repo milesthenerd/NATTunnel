@@ -177,7 +177,6 @@ public static class MediationClient
     public static void UdpServer()
     {
         //Set client intendedIP to something no client will have
-        //TODO: double check that this (255.255.255.255) works the same 0.0.0.0
         intendedIp = IPAddress.None;
         //Try to send initial msg to mediator
         try
