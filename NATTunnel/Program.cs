@@ -5,6 +5,11 @@ namespace NATTunnel;
 
 internal static class Program
 {
+    /// <summary>
+    /// Indicates whether NATTunnel should be running.
+    /// </summary>
+    private static bool running = true;
+
     public static void Main()
     {
         //TODO: the port endpoint has to be the same as the mediationclientport, as otherwise this is handled weirdly somewhere in this mess
@@ -31,9 +36,8 @@ internal static class Program
 
         Console.WriteLine("Press q or ctrl+c to quit.");
         bool hasConsole = true;
-        bool running = true;
         //TODO: close mediationClient when shutting down.
-        Console.CancelKeyPress += (_, _) => { running = false; tunnelNode.Stop(); };
+        Console.CancelKeyPress += (_, _) => { Shutdown(tunnelNode); };
         while (running)
         {
             if (!hasConsole)
@@ -44,8 +48,7 @@ internal static class Program
                 ConsoleKeyInfo cki = Console.ReadKey();
                 if (cki.KeyChar == 'q')
                 {
-                    running = false;
-                    tunnelNode.Stop();
+                    Shutdown(tunnelNode);
                 }
             }
             catch (InvalidOperationException)
@@ -54,5 +57,11 @@ internal static class Program
                 hasConsole = false;
             }
         }
+    }
+
+    private static void Shutdown(TunnelNode tunnelNode)
+    {
+        running = false;
+        tunnelNode.Stop();
     }
 }

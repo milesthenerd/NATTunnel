@@ -16,7 +16,7 @@ namespace NATTunnel;
 public static class MediationClient
 {
     //TODO: entire class should get reviewed and eventually split up into smaller classes
-
+    //TODO: do we really want to have this static? Why not just a normal class, with normal constructor?
     private static readonly TcpClient tcpClient = new TcpClient();
     private static readonly UdpClient udpClient; // set in constructor
     private static NetworkStream tcpClientStream;
@@ -43,8 +43,7 @@ public static class MediationClient
         // NodeOptions loading is done here, as MediationClient is the first thing we call and the class that relies most upon the settings.
 
         // If the config file does not exist, and we couldn't create a config, exit cleanly.
-        // TODO: this should actually throw or show some info on why the config file couldn't be created.
-        if (!File.Exists(Config.GetConfigFilePath()) && !TryCreateNewConfig())
+        if (!Config.CreateNewConfigPrompt())
             Environment.Exit(-1);
 
         if (!Config.TryLoadConfig())
@@ -439,44 +438,6 @@ public static class MediationClient
             catch (Exception e)
             {
                 Console.WriteLine(e);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Tries to create a new config.
-    /// </summary>
-    /// <returns>Returns <see langword="true"/> if creation was successful, <see langword="false"/> if creation was cancelled.</returns>
-    private static bool TryCreateNewConfig()
-    {
-        //TODO: what happens if this gets called when a config already exists? Should it overwrite the config? Message below doesn't make sense fot it at least
-        Console.WriteLine("Unable to find config.txt");
-        Console.WriteLine("Creating a default:");
-        Console.WriteLine("c) Create a client config file");
-        Console.WriteLine("s) Create a server config file");
-        Console.WriteLine("Any other key: Quit");
-        ConsoleKeyInfo cki = Console.ReadKey();
-        switch (cki.KeyChar)
-        {
-            case 'c':
-            {
-                NodeOptions.IsServer = false;
-                NodeOptions.LocalPort = 5001;
-                Config.CreateNewConfig();
-                return true;
-            }
-            case 's':
-            {
-                NodeOptions.IsServer = true;
-                NodeOptions.Endpoint = "127.0.0.1:25565";
-                NodeOptions.LocalPort = 5001;
-                Config.CreateNewConfig();
-                return true;
-            }
-            default:
-            {
-                Console.WriteLine("Quitting...");
-                return false;
             }
         }
     }

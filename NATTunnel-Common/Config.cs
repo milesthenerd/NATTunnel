@@ -92,6 +92,52 @@ public static class Config
         sw.WriteLine($"minRetransmitTime={NodeOptions.MinRetransmitTime}");
     }
 
+
+    /// <summary>
+    /// Prompts in the console to create a new config file.
+    /// </summary>
+    /// <param name="exitOnExistingConfig">Whether to exit if the config file already exists.</param>
+    /// <returns><see langword="true"/> if a config file was created or
+    /// the file exists and <paramref name="exitOnExistingConfig"/> is <see langword="true"/>.
+    /// <see langword="false"/> if the user quit out.</returns>
+    public static bool CreateNewConfigPrompt(bool exitOnExistingConfig = true)
+    {
+        bool doesFileExist = File.Exists(GetConfigFilePath());
+        if (doesFileExist &&exitOnExistingConfig)
+            return true;
+
+        if (!doesFileExist)
+            Console.WriteLine("Unable to find config.txt");
+        Console.WriteLine("Creating a default:");
+        Console.WriteLine("c) Create a client config file");
+        Console.WriteLine("s) Create a server config file");
+        Console.WriteLine("Any other key: Quit");
+        ConsoleKeyInfo cki = Console.ReadKey();
+        switch (cki.KeyChar)
+        {
+            case 'c':
+            {
+                NodeOptions.IsServer = false;
+                NodeOptions.LocalPort = 5001;
+                CreateNewConfig();
+                return true;
+            }
+            case 's':
+            {
+                NodeOptions.IsServer = true;
+                NodeOptions.Endpoint = "127.0.0.1:25565";
+                NodeOptions.LocalPort = 5001;
+                CreateNewConfig();
+                return true;
+            }
+            default:
+            {
+                Console.WriteLine("Quitting...");
+                return false;
+            }
+        }
+    }
+
     /// <summary>
     /// The file path to where the config.txt for NATTunnel is located, depending on the OS.
     /// </summary>

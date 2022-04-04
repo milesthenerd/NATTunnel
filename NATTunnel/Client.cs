@@ -12,7 +12,7 @@ public class Client
     public bool Connected = true;
     public readonly int Id;
     public long LastUdpRecvTime = DateTime.UtcNow.Ticks;
-    //TODO: assigned but not used.
+    //TODO: assigned but not used. Safe to be removed?
     public long LastUdpSendTime;
     public long LastUdpPingTime;
     public long LastUdpSendAckTime;
@@ -170,8 +170,7 @@ public class Client
         Bucket.Take((int)bytesToWrite);
     }
 
-    //TODO: fromUDP is unused
-    public void ReceiveData(Data data, bool fromUDP)
+    public void ReceiveData(Data data)
     {
         if (data.StreamAck > ackSafe)
         {

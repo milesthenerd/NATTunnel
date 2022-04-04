@@ -69,10 +69,7 @@ public class TunnelNode
         //This is the cleanup/heartbeating loop
         while (running)
         {
-            //TODO: not used?
-            long currentTime = DateTime.UtcNow.Ticks;
-
-            // This needs to be a for loop, as the collection gets modified during runtime, which throws
+            // This needs to be a for loop, as the collection gets modified during runtime, which throws.
             for (int i = 0; i < clients.Count; i++)
             {
                 Client client = clients[i];
@@ -226,7 +223,7 @@ public class TunnelNode
                     Client client = clientMapping[data.Id];
                     //TODO: WHY IS THIS NECESSARY!?!?!?
                     client.UdpEndpoint = endpoint;
-                    if (client.TCPClient != null) client.ReceiveData(data, true);
+                    if (client.TCPClient != null) client.ReceiveData(data);
                 }
                 break;
             }
