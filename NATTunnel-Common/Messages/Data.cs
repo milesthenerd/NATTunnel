@@ -4,7 +4,7 @@ using System.IO;
 namespace NATTunnel.Common.Messages
 {
     // TODO: documentation
-    [MessageTypeAttribute(MessageType.DATA)]
+    [MessageTypeAttribute(MessageType.Data)]
     public class Data : NodeMessage
     {
         public long StreamPos { get; private set; }
@@ -17,14 +17,15 @@ namespace NATTunnel.Common.Messages
         public string Endpoint { get; private set; }
 
         // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        // ReSharper disable once UnusedMember.Global
         public Data() : this(0, 0, 0, Array.Empty<byte>(), "") { }
 
-        public Data(int id, long streamPos, long streamAck, byte[] TCPData, string endpoint)
+        public Data(int id, long streamPos, long streamAck, byte[] tcpData, string endpoint)
         {
             Id = id;
             StreamPos = streamPos;
             StreamAck = streamAck;
-            this.TCPData = TCPData;
+            TCPData = tcpData;
             Endpoint = endpoint;
         }
 

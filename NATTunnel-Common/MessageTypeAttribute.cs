@@ -4,10 +4,10 @@ namespace NATTunnel.Common
 {
     public class MessageTypeAttribute : Attribute
     {
-        public MessageType type;
+        public MessageType Type;
         public MessageTypeAttribute(MessageType type)
         {
-            this.type = type;
+            Type = type;
         }
     }
 }

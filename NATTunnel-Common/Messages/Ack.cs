@@ -5,7 +5,7 @@ namespace NATTunnel.Common.Messages
     /// <summary>
     /// Class for data acknowledgement.
     /// </summary>
-    [MessageTypeAttribute(MessageType.ACK)]
+    [MessageTypeAttribute(MessageType.Ack)]
     public class Ack : NodeMessage
     {
         // TODO: Documentation

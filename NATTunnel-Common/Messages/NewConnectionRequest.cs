@@ -5,7 +5,7 @@ namespace NATTunnel.Common.Messages
     /// <summary>
     /// Class for requesting a <see cref="NewConnectionReply"/>.
     /// </summary>
-    [MessageTypeAttribute(MessageType.NEW_CONNECTION_REQUEST)]
+    [MessageTypeAttribute(MessageType.NewConnectionRequest)]
     public class NewConnectionRequest : NodeMessage
     {
         /// <summary>

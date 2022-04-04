@@ -1,4 +1,3 @@
-using System;
 using System.IO;
 
 namespace NATTunnel.Common.Messages
@@ -6,7 +5,7 @@ namespace NATTunnel.Common.Messages
     /// <summary>
     /// Class to signal a disconnect.
     /// </summary>
-    [MessageTypeAttribute(MessageType.DISCONNECT)]
+    [MessageTypeAttribute(MessageType.Disconnect)]
     public class Disconnect : NodeMessage
     {
         /// <summary>

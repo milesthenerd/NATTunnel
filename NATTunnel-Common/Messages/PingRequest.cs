@@ -5,7 +5,7 @@ namespace NATTunnel.Common.Messages
     /// <summary>
     /// Class for requesting a <see cref="PingReply"/>.
     /// </summary>
-    [MessageTypeAttribute(MessageType.PING_REQUEST)]
+    [MessageTypeAttribute(MessageType.PingRequest)]
     public class PingRequest : NodeMessage
     {
         /// <summary>

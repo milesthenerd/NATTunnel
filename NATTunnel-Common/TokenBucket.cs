@@ -7,38 +7,42 @@ namespace NATTunnel.Common
         /// <summary>
         /// Requests data from a parent bucket as well.
         /// </summary>
-        public TokenBucket parent;
+        public TokenBucket Parent;
+
         /// <summary>
         /// The rate in bytes per second
         /// </summary>
-        public int rateBytesPerSecond;
+        public int RateBytesPerSecond;
+
         /// <summary>
-        /// The size of the bucket, also the amount of data we can send at unlimited rate
+        /// The size of the bucket, also the amount of data we can send at an unlimited rate.
         /// </summary>
-        public int totalBytes;
+        public int TotalBytes;
+
+        //TODO: comment
         private int currentBytesPrivate;
 
         /// <summary>
         /// The current amount of bytes we can send
         /// </summary>
-        public int currentBytes
+        public int CurrentBytes
         {
             get
             {
                 Update();
-                if (parent == null || parent.currentBytes >= currentBytesPrivate)
+                if (Parent == null || Parent.CurrentBytes >= currentBytesPrivate)
                     return currentBytesPrivate;
 
-                return parent.currentBytes;
+                return Parent.CurrentBytes;
             }
         }
         private long lastUpdateTime;
 
         public TokenBucket(int rateBytesPerSecond, int totalBytes, TokenBucket parent = null)
         {
-            this.parent = parent;
-            this.rateBytesPerSecond = rateBytesPerSecond;
-            this.totalBytes = totalBytes;
+            this.Parent = parent;
+            this.RateBytesPerSecond = rateBytesPerSecond;
+            this.TotalBytes = totalBytes;
         }
 
         private void Update()
@@ -46,7 +50,7 @@ namespace NATTunnel.Common
             //First call, set the buffer full
             if (lastUpdateTime == 0)
             {
-                currentBytesPrivate = totalBytes;
+                currentBytesPrivate = TotalBytes;
                 lastUpdateTime = DateTime.UtcNow.Ticks;
                 return;
             }
@@ -58,9 +62,9 @@ namespace NATTunnel.Common
             if (timeDelta < TimeSpan.TicksPerMillisecond)
                 return;
 
-            long newBytes = (rateBytesPerSecond * timeDelta) / TimeSpan.TicksPerSecond;
+            long newBytes = (RateBytesPerSecond * timeDelta) / TimeSpan.TicksPerSecond;
             currentBytesPrivate += (int)newBytes;
-            currentBytesPrivate = currentBytesPrivate.LimitTo(totalBytes);
+            currentBytesPrivate = currentBytesPrivate.LimitTo(TotalBytes);
 
             if (newBytes > 0)
                 lastUpdateTime = currentTime;
@@ -68,7 +72,7 @@ namespace NATTunnel.Common
 
         public void Take(int bytes)
         {
-            parent?.Take(bytes);
+            Parent?.Take(bytes);
             currentBytesPrivate -= bytes;
         }
     }

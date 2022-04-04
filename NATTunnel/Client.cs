@@ -11,18 +11,18 @@ namespace NATTunnel
 {
     public class Client
     {
-        public bool connected = true;
-        public int id;
-        public long lastUdpRecvTime = DateTime.UtcNow.Ticks;
-        public long lastUdpSendTime;
-        public long lastUdpPingTime;
-        public long lastUdpSendAckTime;
-        public TcpClient tcp;
-        public IPEndPoint udpEndpoint;
-        public byte[] buffer = new byte[1500];
-        public StreamRingBuffer txQueue = new StreamRingBuffer(16 * 1024 * 1024);
-        public FutureDataStore futureDataStore = new FutureDataStore();
-        public TokenBucket bucket;
+        public bool Connected = true;
+        public int Id;
+        public long LastUdpRecvTime = DateTime.UtcNow.Ticks;
+        public long LastUdpSendTime;
+        public long LastUdpPingTime;
+        public long LastUdpSendAckTime;
+        public TcpClient Tcp;
+        public IPEndPoint UdpEndpoint;
+        public byte[] Buffer = new byte[1500];
+        public StreamRingBuffer TxQueue = new StreamRingBuffer(16 * 1024 * 1024);
+        public FutureDataStore FutureDataStore = new FutureDataStore();
+        public TokenBucket Bucket;
         private long currentRecvPos;
         private long currentSendPos;
         private long lastWriteResetTime;
@@ -33,73 +33,73 @@ namespace NATTunnel
         private UdpConnection connection;
         private long ackSafe;
         private Thread clientThread;
-        public AutoResetEvent sendEvent = new AutoResetEvent(false);
-        public int latency;
-        public IPEndPoint localTCPEndpoint;
+        public AutoResetEvent SendEvent = new AutoResetEvent(false);
+        public int Latency;
+        public IPEndPoint LocalTcpEndpoint;
 
         public Client(int clientID, UdpConnection connection, TcpClient tcp, TokenBucket parentBucket)
         {
-            this.id = clientID;
-            this.tcp = tcp;
+            this.Id = clientID;
+            this.Tcp = tcp;
             this.connection = connection;
-            this.localTCPEndpoint = (IPEndPoint)tcp.Client.LocalEndPoint;
+            this.LocalTcpEndpoint = (IPEndPoint)tcp.Client.LocalEndPoint;
 
             tcp.NoDelay = true;
-            tcp.GetStream().BeginRead(buffer, 0, buffer.Length, TCPReceiveCallback, null);
+            tcp.GetStream().BeginRead(Buffer, 0, Buffer.Length, TCPReceiveCallback, null);
 
             int rateBytesPerSecond = NodeOptions.UploadSpeed * 1024;
-            bucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond, parentBucket);
+            Bucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond, parentBucket);
 
             clientThread = new Thread(Loop);
-            clientThread.Name = $"ClientThread-{id}";
+            clientThread.Name = $"ClientThread-{Id}";
             clientThread.Start();
         }
 
         public void Loop()
         {
-            while (connected)
+            while (Connected)
             {
                 long currentTime = DateTime.UtcNow.Ticks;
 
                 //Disconnect if we hit the timeout
-                if ((currentTime - lastUdpRecvTime) > TIMEOUT)
+                if ((currentTime - LastUdpRecvTime) > TIMEOUT)
                     Disconnect("UDP Receive Timeout");
 
                 //Only do the following if we are connected
-                if (udpEndpoint == null) continue;
+                if (UdpEndpoint == null) continue;
 
                 CheckPing();
                 SendData();
 
                 //Send buffered TCP data to the UDP server
-                if (txQueue.AvailableRead != 0) continue;
+                if (TxQueue.AvailableRead != 0) continue;
 
                 //Ran out of TCP data
-                sendEvent.WaitOne(100);
+                SendEvent.WaitOne(100);
             }
         }
 
         private void CheckPing()
         {
             long currentTime = DateTime.UtcNow.Ticks;
-            if ((currentTime - lastUdpPingTime) <= PING) return;
+            if ((currentTime - LastUdpPingTime) <= PING) return;
 
-            lastUdpPingTime = currentTime;
-            PingRequest pr = new PingRequest(id, currentTime, $"end{localTCPEndpoint}");
-            connection.Send(pr, udpEndpoint);
+            LastUdpPingTime = currentTime;
+            PingRequest pr = new PingRequest(Id, currentTime, $"end{LocalTcpEndpoint}");
+            connection.Send(pr, UdpEndpoint);
         }
 
         private void SendAck(bool force)
         {
             long currentTime = DateTime.UtcNow.Ticks;
             //Send acks to let the other side know we have received data.
-            if (!force && (currentTime - lastUdpSendAckTime) <= ACK_TIME) return;
+            if (!force && (currentTime - LastUdpSendAckTime) <= ACK_TIME) return;
 
-            lastUdpSendTime = currentTime;
-            lastUdpSendAckTime = currentTime;
-            Ack ack = new Ack(id, currentRecvPos, $"end{localTCPEndpoint}");
+            LastUdpSendTime = currentTime;
+            LastUdpSendAckTime = currentTime;
+            Ack ack = new Ack(Id, currentRecvPos, $"end{LocalTcpEndpoint}");
 
-            connection.Send(ack, udpEndpoint);
+            connection.Send(ack, UdpEndpoint);
         }
 
         public void ReceiveAck(Ack ack)
@@ -115,25 +115,25 @@ namespace NATTunnel
             long currentTime = DateTime.UtcNow.Ticks;
 
             //MarkFree is not thread safe with Read
-            if (txQueue.StreamReadPos < ackSafe)
-                txQueue.MarkFree(ackSafe);
+            if (TxQueue.StreamReadPos < ackSafe)
+                TxQueue.MarkFree(ackSafe);
 
 
             //Don't send old data.
-            if (currentSendPos < txQueue.StreamReadPos)
+            if (currentSendPos < TxQueue.StreamReadPos)
             {
                 lastWriteResetTime = currentTime;
-                currentSendPos = txQueue.StreamReadPos;
+                currentSendPos = TxQueue.StreamReadPos;
             }
 
             //If we don't have much data to send let's jump back to the unack'd position to send earlier than the RTT
-            float dataToSend = txQueue.AvailableRead / (float)(bucket.rateBytesPerSecond);
-            if (dataToSend < 0.2f || (latency < NodeOptions.MinRetransmitTime))
+            float dataToSend = TxQueue.AvailableRead / (float)(Bucket.RateBytesPerSecond);
+            if (dataToSend < 0.2f || (Latency < NodeOptions.MinRetransmitTime))
             {
                 if ((currentTime - lastWriteResetTime) > (NodeOptions.MinRetransmitTime * TimeSpan.TicksPerMillisecond))
                 {
                     lastWriteResetTime = currentTime;
-                    currentSendPos = txQueue.StreamReadPos;
+                    currentSendPos = TxQueue.StreamReadPos;
                 }
             }
             else
@@ -143,14 +143,14 @@ namespace NATTunnel
                 {
                     //Bias to let the acks flow again, and also build up data in the remote buffer
                     lastWriteResetTime = currentTime;
-                    lastUdpRecvAckTime = currentTime + (4 * latency * TimeSpan.TicksPerMillisecond);
-                    currentSendPos = txQueue.StreamReadPos;
+                    lastUdpRecvAckTime = currentTime + (4 * Latency * TimeSpan.TicksPerMillisecond);
+                    currentSendPos = TxQueue.StreamReadPos;
                 }
             }
 
             //Ran out of bytes to send and Rate limit
-            long bytesToWrite = txQueue.StreamWritePos - currentSendPos;
-            if (bytesToWrite == 0 || bucket.currentBytes < 500)
+            long bytesToWrite = TxQueue.StreamWritePos - currentSendPos;
+            if (bytesToWrite == 0 || Bucket.CurrentBytes < 500)
             {
                 Thread.Sleep(10);
                 return;
@@ -162,13 +162,13 @@ namespace NATTunnel
             bytesToWrite = bytesToWrite.LimitTo(upperLimit);
 
             //Send data
-            Data data = new Data(id, currentSendPos, currentRecvPos, new byte[bytesToWrite], $"end{localTCPEndpoint}");
-            txQueue.Read(data.TCPData, 0, currentSendPos, (int)bytesToWrite);
-            lastUdpSendAckTime = currentTime;
-            lastUdpSendTime = currentTime;
-            connection.Send(data, udpEndpoint);
+            Data data = new Data(Id, currentSendPos, currentRecvPos, new byte[bytesToWrite], $"end{LocalTcpEndpoint}");
+            TxQueue.Read(data.TCPData, 0, currentSendPos, (int)bytesToWrite);
+            LastUdpSendAckTime = currentTime;
+            LastUdpSendTime = currentTime;
+            connection.Send(data, UdpEndpoint);
             currentSendPos += bytesToWrite;
-            bucket.Take((int)bytesToWrite);
+            Bucket.Take((int)bytesToWrite);
         }
 
         //TODO: fromUDP is unused
@@ -192,21 +192,21 @@ namespace NATTunnel
             //Data in the future
             if (data.StreamPos > currentRecvPos)
             {
-                futureDataStore.StoreData(data);
+                FutureDataStore.StoreData(data);
                 return;
             }
 
             //Exact packet we need, include partial matches
             int offset = (int)(currentRecvPos - data.StreamPos);
-            tcp.GetStream().Write(data.TCPData, offset, data.TCPData.Length - offset);
+            Tcp.GetStream().Write(data.TCPData, offset, data.TCPData.Length - offset);
             currentRecvPos += data.TCPData.Length - offset;
 
             //Handle out of order data
             Data future;
-            while ((future = futureDataStore.GetData(currentRecvPos)) != null)
+            while ((future = FutureDataStore.GetData(currentRecvPos)) != null)
             {
                 offset = (int)(currentRecvPos - future.StreamPos);
-                tcp.GetStream().Write(future.TCPData, offset, future.TCPData.Length - offset);
+                Tcp.GetStream().Write(future.TCPData, offset, future.TCPData.Length - offset);
                 currentRecvPos += future.TCPData.Length - offset;
             }
             SendAck(false);
@@ -217,23 +217,23 @@ namespace NATTunnel
             try
             {
                 // TODO: Crashes here when other end of tunnel disconnects
-                int bytesRead = tcp.GetStream().EndRead(ar);
+                int bytesRead = Tcp.GetStream().EndRead(ar);
                 if (bytesRead == 0)
                 {
                     Disconnect("TCP connection was closed.");
                     return;
                 }
 
-                txQueue.Write(buffer, 0, bytesRead);
-                sendEvent.Set();
+                TxQueue.Write(Buffer, 0, bytesRead);
+                SendEvent.Set();
                 //If our txqueue is full we need to wait before we can write to it.
-                while (txQueue.AvailableWrite < buffer.Length)
+                while (TxQueue.AvailableWrite < Buffer.Length)
                 {
-                    if (!connected) return;
+                    if (!Connected) return;
 
                     Thread.Sleep(10);
                 }
-                tcp.GetStream().BeginRead(buffer, 0, buffer.Length, TCPReceiveCallback, null);
+                Tcp.GetStream().BeginRead(Buffer, 0, Buffer.Length, TCPReceiveCallback, null);
             }
             catch
             {
@@ -243,21 +243,24 @@ namespace NATTunnel
 
         public void Disconnect(string reason)
         {
-            if (!connected) return;
+            if (!Connected) return;
 
-            connected = false;
-            Console.WriteLine($"Disconnected stream {id}");
+            Connected = false;
+            Console.WriteLine($"Disconnected stream {Id}");
             try
             {
-                tcp.Close();
-                tcp = null;
+                Tcp.Close();
+                Tcp = null;
             }
-            catch { }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Exception during disconnecting: {e.Message}: {e.StackTrace}");
+            }
 
-            if (reason == null || udpEndpoint == null) return;
+            if (reason == null || UdpEndpoint == null) return;
 
-            Disconnect dis = new Disconnect(id, reason, $"end{localTCPEndpoint}");
-            connection.Send(dis, udpEndpoint);
+            Disconnect dis = new Disconnect(Id, reason, $"end{LocalTcpEndpoint}");
+            connection.Send(dis, UdpEndpoint);
         }
     }
 }

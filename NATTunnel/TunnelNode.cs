@@ -2,7 +2,6 @@ using NATTunnel.Common;
 using NATTunnel.Common.Messages;
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -14,6 +13,7 @@ namespace NATTunnel
         //TODO: currently nothing ever sets this to false
         private bool running = true;
         private Random random = new Random();
+        //TODO: what's this used for?
         private Thread mainLoop;
         private TcpListener tcpServer;
         private Socket udp;
@@ -66,18 +66,19 @@ namespace NATTunnel
             //This is the cleanup/heartbeating loop
             while (running)
             {
+                //TODO: not used?
                 long currentTime = DateTime.UtcNow.Ticks;
 
-                // This needs to be a for loop, as the collection gets modifed during runtime, which throws
+                // This needs to be a for loop, as the collection gets modified during runtime, which throws
                 for (int i = 0; i < clients.Count; i++)
                 {
                     var client = clients[i];
-                    if (client.connected) continue;
+                    if (client.Connected) continue;
 
-                    if (clientMapping.ContainsKey(client.id))
+                    if (clientMapping.ContainsKey(client.Id))
                     {
-                        MediationClient.Remove(clientMapping[client.id].localTCPEndpoint);
-                        clientMapping.Remove(client.id);
+                        MediationClient.Remove(clientMapping[client.Id].LocalTcpEndpoint);
+                        clientMapping.Remove(client.Id);
                     }
                     clients.Remove(client);
                 }
@@ -93,10 +94,10 @@ namespace NATTunnel
                 TcpClient tcp = tcpServer.EndAcceptTcpClient(ar);
                 int newID = random.Next();
                 Client client = new Client(newID, connection, tcp, connectionBucket);
-                Console.WriteLine($"New TCP Client {client.id} from {tcp.Client.RemoteEndPoint}");
+                Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
                 ConnectUDPClient(client);
                 clients.Add(client);
-                clientMapping[client.id] = client;
+                clientMapping[client.Id] = client;
             }
             catch (Exception e)
             {
@@ -112,7 +113,7 @@ namespace NATTunnel
             {
                 for (int i = 0; i < 4; i++)
                 {
-                    NewConnectionRequest ncr = new NewConnectionRequest(client.id, $"end{client.localTCPEndpoint}");
+                    NewConnectionRequest ncr = new NewConnectionRequest(client.Id, $"end{client.LocalTcpEndpoint}");
                     connection.Send(ncr, endpoint);
                 }
             }
@@ -126,7 +127,7 @@ namespace NATTunnel
                 if (clientMapping.ContainsKey(clientID))
                 {
                     Client client = clientMapping[clientID];
-                    client.lastUdpRecvTime = DateTime.UtcNow.Ticks;
+                    client.LastUdpRecvTime = DateTime.UtcNow.Ticks;
                 }
             }
 
@@ -149,13 +150,13 @@ namespace NATTunnel
                             client = new Client(request.Id, connection, tcp, connectionBucket);
                             //add mapping for local tcp client and remote IP
                             clients.Add(client);
-                            clientMapping.Add(client.id, client);
-                            MediationClient.Add(client.localTCPEndpoint);
+                            clientMapping.Add(client.Id, client);
+                            MediationClient.Add(client.LocalTcpEndpoint);
                         }
                         catch
                         {
                             //TODO do something about this null bandaid
-                            Disconnect dis = new Disconnect(request.Id, "TCP server is currently not running", $"end{client?.localTCPEndpoint}");
+                            Disconnect dis = new Disconnect(request.Id, "TCP server is currently not running", $"end{client?.LocalTcpEndpoint}");
                             connection.Send(dis, endpoint);
                             return;
                         }
@@ -163,20 +164,20 @@ namespace NATTunnel
                     else
                         client = clientMapping[request.Id];
 
-                    NewConnectionReply connectionReply = new NewConnectionReply(request.Id, $"end{client.localTCPEndpoint}");
+                    NewConnectionReply connectionReply = new NewConnectionReply(request.Id, $"end{client.LocalTcpEndpoint}");
                     connection.Send(connectionReply, endpoint);
                     //Clamp to the clients download speed
                     Console.WriteLine($"Client {request.Id} download rate is {request.DownloadRate}KB/s");
                     if (request.DownloadRate < NodeOptions.UploadSpeed)
                     {
-                        client.bucket.rateBytesPerSecond = request.DownloadRate * 1024;
-                        client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
+                        client.Bucket.RateBytesPerSecond = request.DownloadRate * 1024;
+                        client.Bucket.TotalBytes = client.Bucket.RateBytesPerSecond;
                     }
                     //Prefer IPv6
-                    if ((client.udpEndpoint == null) || ((client.udpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6)))
+                    if ((client.UdpEndpoint == null) || ((client.UdpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6)))
                     {
-                        Console.WriteLine($"Client endpoint {client.id} set to: {endpoint}");
-                        client.udpEndpoint = endpoint;
+                        Console.WriteLine($"Client endpoint {client.Id} set to: {endpoint}");
+                        client.UdpEndpoint = endpoint;
                     }
                     break;
                 }
@@ -195,17 +196,17 @@ namespace NATTunnel
                     {
                         Client client = clientMapping[ncr.Id];
                         //Prefer IPv6
-                        if ((client.udpEndpoint == null) || ((client.udpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6)))
+                        if ((client.UdpEndpoint == null) || ((client.UdpEndpoint.AddressFamily == AddressFamily.InterNetwork) && (endpoint.AddressFamily == AddressFamily.InterNetworkV6)))
                         {
-                            Console.WriteLine($"Server endpoint {client.id} set to: {endpoint}");
-                            client.udpEndpoint = endpoint;
+                            Console.WriteLine($"Server endpoint {client.Id} set to: {endpoint}");
+                            client.UdpEndpoint = endpoint;
                         }
                         //Clamp to the servers download speed
                         Console.WriteLine($"Servers download rate is {ncr.DownloadRate}KB/s");
                         if (ncr.DownloadRate < NodeOptions.UploadSpeed)
                         {
-                            client.bucket.rateBytesPerSecond = ncr.DownloadRate * 1024;
-                            client.bucket.totalBytes = client.bucket.rateBytesPerSecond;
+                            client.Bucket.RateBytesPerSecond = ncr.DownloadRate * 1024;
+                            client.Bucket.TotalBytes = client.Bucket.RateBytesPerSecond;
                         }
                     }
                     break;
@@ -217,8 +218,8 @@ namespace NATTunnel
                     {
                         Client client = clientMapping[data.Id];
                         //TODO: WHY IS THIS NECESSARY!?!?!?
-                        client.udpEndpoint = endpoint;
-                        if (client.tcp != null) client.ReceiveData(data, true);
+                        client.UdpEndpoint = endpoint;
+                        if (client.Tcp != null) client.ReceiveData(data, true);
                     }
                     break;
                 }
@@ -238,7 +239,7 @@ namespace NATTunnel
                     if (clientMapping.ContainsKey(pingRequest.Id))
                     {
                         Client client = clientMapping[pingRequest.Id];
-                        PingReply preply = new PingReply(pingRequest.Id, pingRequest.SendTime, $"end{client.localTCPEndpoint}");
+                        PingReply preply = new PingReply(pingRequest.Id, pingRequest.SendTime, $"end{client.LocalTcpEndpoint}");
                         connection.Send(preply, endpoint);
                     }
                     break;
@@ -251,7 +252,7 @@ namespace NATTunnel
                     if (clientMapping.ContainsKey(pingReply.Id))
                     {
                         Client client = clientMapping[pingReply.Id];
-                        client.latency = timeMs;
+                        client.Latency = timeMs;
                     }
                     break;
                 }

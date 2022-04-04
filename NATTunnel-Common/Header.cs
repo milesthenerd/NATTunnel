@@ -77,8 +77,8 @@ namespace NATTunnel.Common
                 MessageTypeAttribute mta = t.GetCustomAttribute<MessageTypeAttribute>();
                 if (mta == null)
                     continue;
-                t2mt[t] = mta.type;
-                mt2t[mta.type] = t;
+                t2mt[t] = mta.Type;
+                mt2t[mta.Type] = t;
             }
         }
     }
