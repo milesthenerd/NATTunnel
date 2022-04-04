@@ -12,13 +12,14 @@ namespace NATTunnel.Common.Messages
         /// The time this <see cref="PingReply"/> was sent.
         /// </summary>
         public long SendTime { get; private set; }
-        
+
         /// <summary>
         /// The endpoint of this <see cref="PingReply"/>.
         /// </summary>
         public string Endpoint { get; private set; } // TODO: Origin or target? Also TODO: Never used?
 
         // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        // ReSharper disable once UnusedMember.Global
         public PingReply() : this(0, 0, "") { }
 
         public PingReply(int id, long sendTime, string endpoint)
@@ -34,7 +35,7 @@ namespace NATTunnel.Common.Messages
             writer.Write(SendTime);
             writer.Write(Endpoint);
         }
-        
+
         public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();

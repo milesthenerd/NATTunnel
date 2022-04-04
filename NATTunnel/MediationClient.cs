@@ -93,7 +93,7 @@ namespace NATTunnel
                 byte[] sendBuffer = Encoding.ASCII.GetBytes("hi");
                 if (isServer)
                 {
-                    foreach (var client in connectedClients)
+                    foreach (IPEndPoint client in connectedClients)
                     {
                         udpClient.Send(sendBuffer, sendBuffer.Length, client);
                     }
@@ -105,7 +105,7 @@ namespace NATTunnel
                 Console.WriteLine("Keep alive");
             }
 
-            foreach ((var key, int value) in timeoutClients)
+            foreach ((IPEndPoint key, int value) in timeoutClients)
             {
                 Console.WriteLine($"time left: {value}");
                 if (value >= 1)
@@ -261,7 +261,7 @@ namespace NATTunnel
 
                 //TODO: pretty sure this is not necessary / can be condensed
                 if (connected && receivedIp?.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
-                    //TODO: weird consistent way to crash here because intendedPort is 0, because it didnt into the if holepunchcount < 5 from above, because receivedIP is null
+                    //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holepunchcount < 5 from above, because receivedIP is null
                     // because buffer is fucked. https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
                     udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
 
@@ -442,7 +442,7 @@ namespace NATTunnel
         }
 
         /// <summary>
-        /// Tries to reate a new config.
+        /// Tries to create a new config.
         /// </summary>
         /// <returns>Returns <see langword="true"/> if creation was successful, <see langword="false"/> if creation was cancelled.</returns>
         private static bool TryCreateNewConfig()

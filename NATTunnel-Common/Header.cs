@@ -11,10 +11,10 @@ namespace NATTunnel.Common
     {
         public const int PROTOCOL_VERSION = 1;
         private static bool loaded = false;
-        private static Dictionary<MessageType, Type> mt2t = new Dictionary<MessageType, Type>();
-        private static Dictionary<Type, MessageType> t2mt = new Dictionary<Type, MessageType>();
-        private static byte[] buildBytes = new byte[1496];
-        private static byte[] sendBytes = new byte[1500];
+        private static readonly Dictionary<MessageType, Type> messageTypeToType = new Dictionary<MessageType, Type>();
+        private static readonly Dictionary<Type, MessageType> typeToMessageType = new Dictionary<Type, MessageType>();
+        private static readonly byte[] buildBytes = new byte[1496];
+        private static readonly byte[] sendBytes = new byte[1500];
 
         public static byte[] FrameMessage(IMessage message)
         {
@@ -29,7 +29,7 @@ namespace NATTunnel.Common
                 using (BinaryWriter bw = new BinaryWriter(ms, System.Text.Encoding.UTF8, true))
                     message.Serialize(bw);
 
-                short type = (short)t2mt[message.GetType()];
+                short type = (short)typeToMessageType[message.GetType()];
                 short length = (short)ms.Position;
                 BitConverter.GetBytes(type).CopyTo(sendBytes, 4);
                 BitConverter.GetBytes(length).CopyTo(sendBytes, 6);
@@ -55,7 +55,7 @@ namespace NATTunnel.Common
             if (!Enum.IsDefined(typeof(MessageType), (int)type) || (length != br.BaseStream.Length - 8))
                 return null;
 
-            Type messageType = mt2t[(MessageType)type];
+            Type messageType = messageTypeToType[(MessageType)type];
             IMessage message = (IMessage)Activator.CreateInstance(messageType);
             if (message != null && length > 0)
                 message.Deserialize(br);
@@ -77,8 +77,8 @@ namespace NATTunnel.Common
                 MessageTypeAttribute mta = t.GetCustomAttribute<MessageTypeAttribute>();
                 if (mta == null)
                     continue;
-                t2mt[t] = mta.Type;
-                mt2t[mta.Type] = t;
+                typeToMessageType[t] = mta.Type;
+                messageTypeToType[mta.Type] = t;
             }
         }
     }

@@ -12,21 +12,21 @@ namespace NATTunnel
     {
         //TODO: currently nothing ever sets this to false
         private bool running = true;
-        private Random random = new Random();
+        private readonly Random random = new Random();
         //TODO: what's this used for?
         private Thread mainLoop;
         private TcpListener tcpServer;
         private Socket udp;
-        private UdpConnection connection;
-        private List<Client> clients = new List<Client>();
-        private Dictionary<int, Client> clientMapping = new Dictionary<int, Client>();
-        private TokenBucket connectionBucket;
+        private readonly UdpConnection udpConnection;
+        private readonly List<Client> clients = new List<Client>();
+        private readonly Dictionary<int, Client> clientMapping = new Dictionary<int, Client>();
+        private readonly TokenBucket connectionBucket;
 
         public TunnelNode()
         {
             int rateBytesPerSecond = NodeOptions.UploadSpeed * 1024;
-            this.connectionBucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond);
-            //1 second connnection buffer
+            connectionBucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond);
+            //1 second connection buffer
             if (NodeOptions.IsServer)
             {
                 SetupUDPSocket(NodeOptions.LocalPort);
@@ -36,14 +36,14 @@ namespace NATTunnel
                 SetupTCPServer();
                 SetupUDPSocket(0);
             }
-            connection = new UdpConnection(udp, ReceiveCallback);
+            udpConnection = new UdpConnection(udp, ReceiveCallback);
             mainLoop = new Thread(MainLoop) { Name = "TunnelNode-MainLoop" };
             mainLoop.Start();
         }
 
         public void Stop()
         {
-            connection.Stop();
+            udpConnection.Stop();
             tcpServer?.Stop();
             udp.Close();
         }
@@ -72,7 +72,7 @@ namespace NATTunnel
                 // This needs to be a for loop, as the collection gets modified during runtime, which throws
                 for (int i = 0; i < clients.Count; i++)
                 {
-                    var client = clients[i];
+                    Client client = clients[i];
                     if (client.Connected) continue;
 
                     if (clientMapping.ContainsKey(client.Id))
@@ -93,7 +93,7 @@ namespace NATTunnel
             {
                 TcpClient tcp = tcpServer.EndAcceptTcpClient(ar);
                 int newID = random.Next();
-                Client client = new Client(newID, connection, tcp, connectionBucket);
+                Client client = new Client(newID, udpConnection, tcp, connectionBucket);
                 Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
                 ConnectUDPClient(client);
                 clients.Add(client);
@@ -114,7 +114,7 @@ namespace NATTunnel
                 for (int i = 0; i < 4; i++)
                 {
                     NewConnectionRequest ncr = new NewConnectionRequest(client.Id, $"end{client.LocalTcpEndpoint}");
-                    connection.Send(ncr, endpoint);
+                    udpConnection.Send(ncr, endpoint);
                 }
             }
         }
@@ -147,7 +147,7 @@ namespace NATTunnel
                         try
                         {
                             tcp.Connect(NodeOptions.Endpoints[0]);
-                            client = new Client(request.Id, connection, tcp, connectionBucket);
+                            client = new Client(request.Id, udpConnection, tcp, connectionBucket);
                             //add mapping for local tcp client and remote IP
                             clients.Add(client);
                             clientMapping.Add(client.Id, client);
@@ -155,9 +155,9 @@ namespace NATTunnel
                         }
                         catch
                         {
-                            //TODO do something about this null bandaid
+                            //TODO do something about this null band-aid
                             Disconnect dis = new Disconnect(request.Id, "TCP server is currently not running", $"end{client?.LocalTcpEndpoint}");
-                            connection.Send(dis, endpoint);
+                            udpConnection.Send(dis, endpoint);
                             return;
                         }
                     }
@@ -165,7 +165,7 @@ namespace NATTunnel
                         client = clientMapping[request.Id];
 
                     NewConnectionReply connectionReply = new NewConnectionReply(request.Id, $"end{client.LocalTcpEndpoint}");
-                    connection.Send(connectionReply, endpoint);
+                    udpConnection.Send(connectionReply, endpoint);
                     //Clamp to the clients download speed
                     Console.WriteLine($"Client {request.Id} download rate is {request.DownloadRate}KB/s");
                     if (request.DownloadRate < NodeOptions.UploadSpeed)
@@ -219,7 +219,7 @@ namespace NATTunnel
                         Client client = clientMapping[data.Id];
                         //TODO: WHY IS THIS NECESSARY!?!?!?
                         client.UdpEndpoint = endpoint;
-                        if (client.Tcp != null) client.ReceiveData(data, true);
+                        if (client.TCPClient != null) client.ReceiveData(data, true);
                     }
                     break;
                 }
@@ -239,8 +239,8 @@ namespace NATTunnel
                     if (clientMapping.ContainsKey(pingRequest.Id))
                     {
                         Client client = clientMapping[pingRequest.Id];
-                        PingReply preply = new PingReply(pingRequest.Id, pingRequest.SendTime, $"end{client.LocalTcpEndpoint}");
-                        connection.Send(preply, endpoint);
+                        PingReply pingReply = new PingReply(pingRequest.Id, pingRequest.SendTime, $"end{client.LocalTcpEndpoint}");
+                        udpConnection.Send(pingReply, endpoint);
                     }
                     break;
                 }

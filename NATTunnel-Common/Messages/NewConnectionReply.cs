@@ -24,6 +24,7 @@ namespace NATTunnel.Common.Messages
         public string Endpoint { get; private set; } // TODO: Source or destination? Also, unused?
 
         // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        // ReSharper disable once UnusedMember.Global
         public NewConnectionReply() : this(0, "") { }
 
         public NewConnectionReply(int id, string endpoint)

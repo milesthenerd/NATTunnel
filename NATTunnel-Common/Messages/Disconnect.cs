@@ -19,6 +19,7 @@ namespace NATTunnel.Common.Messages
         public string Endpoint { get; private set; } // TODO: source or destination???
 
         // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        // ReSharper disable once UnusedMember.Global
         public Disconnect() : this(0, "", "") { }
 
         public Disconnect(int id, string reason, string endpoint)

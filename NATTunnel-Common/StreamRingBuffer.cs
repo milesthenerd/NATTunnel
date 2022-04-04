@@ -1,5 +1,5 @@
 //This class currently has a bug where after 18.5 petabytes it will crap out. Luckily I don't care!
-//Read is multithread safe, write is not.
+//Read is multithreading safe, write is not.
 
 using System;
 
@@ -7,40 +7,20 @@ namespace NATTunnel.Common
 {
     public class StreamRingBuffer
     {
-        private byte[] internalBuffer;
+        private readonly byte[] internalBuffer;
 
         public StreamRingBuffer(int size)
         {
             internalBuffer = new byte[size];
         }
 
-        public long StreamReadPos
-        {
-            private set;
-            get;
-        }
+        public long StreamReadPos { get; private set; }
 
-        public long StreamWritePos
-        {
-            private set;
-            get;
-        }
+        public long StreamWritePos { get; private set; }
 
-        public int AvailableRead
-        {
-            get
-            {
-                return (int)(StreamWritePos - StreamReadPos);
-            }
-        }
+        public int AvailableRead => (int)(StreamWritePos - StreamReadPos);
 
-        public int AvailableWrite
-        {
-            get
-            {
-                return internalBuffer.Length - 1 - AvailableRead;
-            }
-        }
+        public int AvailableWrite => internalBuffer.Length - 1 - AvailableRead;
 
         public void Write(byte[] source, int offset, int size)
         {
@@ -64,7 +44,7 @@ namespace NATTunnel.Common
         public int Read(byte[] dest, int offset, long readPos, int size)
         {
             long readDelta = readPos - StreamReadPos;
-            if (readDelta < 0 || (AvailableRead - readDelta - size) < 0)
+            if ((readDelta < 0) || ((AvailableRead - readDelta - size) < 0))
                 throw new ArgumentOutOfRangeException(nameof(readDelta),"Stream trying to read from a non-written area.");
 
             int firstRead = internalBuffer.Length - (int)(readPos % internalBuffer.Length);

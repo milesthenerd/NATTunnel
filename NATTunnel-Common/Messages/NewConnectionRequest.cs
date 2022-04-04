@@ -24,6 +24,7 @@ namespace NATTunnel.Common.Messages
         public string Endpoint { get; private set; } // TODO: Source or destination? Also, unused?
 
         // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        // ReSharper disable once UnusedMember.Global
         public NewConnectionRequest() : this(0, "") { }
 
         public NewConnectionRequest(int id, string endpoint)
@@ -31,7 +32,7 @@ namespace NATTunnel.Common.Messages
             Id = id;
             Endpoint = endpoint;
         }
-        
+
         public override void Serialize(BinaryWriter writer)
         {
             writer.Write(Id);
@@ -39,7 +40,7 @@ namespace NATTunnel.Common.Messages
             writer.Write(DownloadRate);
             writer.Write(Endpoint);
         }
-        
+
         public override void Deserialize(BinaryReader reader)
         {
             Id = reader.ReadInt32();

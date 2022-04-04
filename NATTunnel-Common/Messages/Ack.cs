@@ -17,6 +17,7 @@ namespace NATTunnel.Common.Messages
         public string Endpoint { get; private set; }
 
         // Base constructor is called in Header.DeframeMessage() via Activator.CreateInstance
+        // ReSharper disable once UnusedMember.Global
         public Ack() : this(0, 0, "") { }
 
         public Ack(int id, long streamAck, string endpoint)

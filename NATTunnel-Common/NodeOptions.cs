@@ -20,7 +20,7 @@ namespace NATTunnel.Common
         public static string Endpoint = "serverhost.address.example.com:26702";
 
         /// <summary>
-        /// The public IP of the mediation server you want to conneect to.
+        /// The public IP of the mediation server you want to connect to.
         /// </summary>
         public static IPEndPoint MediationIp = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
 
@@ -156,17 +156,17 @@ namespace NATTunnel.Common
             string lhs = Endpoint.Substring(0, splitIndex);
             string rhs = Endpoint.Substring(splitIndex + 1);
             int port = Int32.Parse(rhs);
-            if (IPAddress.TryParse(lhs, out IPAddress addr))
+            if (IPAddress.TryParse(lhs, out IPAddress address))
             {
-                Endpoints.Add(new IPEndPoint(addr, port));
+                Endpoints.Add(new IPEndPoint(address, port));
             }
             //Left side is probably hostname instead, so let's try to resolve it and go through + add the IPs from that
             //TODO: why not just always do that?
             else
             {
-                foreach (IPAddress addr2 in Dns.GetHostAddresses(lhs))
+                foreach (IPAddress address2 in Dns.GetHostAddresses(lhs))
                 {
-                    Endpoints.Add(new IPEndPoint(addr2, port));
+                    Endpoints.Add(new IPEndPoint(address2, port));
                 }
             }
         }

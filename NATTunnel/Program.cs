@@ -5,10 +5,8 @@ namespace NATTunnel
 {
     internal static class Program
     {
-        public static void Main(string[] args)
+        public static void Main()
         {
-            //TODO: this whole project has a bunch of obsolete console.writelines
-
             //TODO: the port endpoint has to be the same as the mediationclientport, as otherwise this is handled weirdly somewhere in this mess
 
             //TODO: theres a weird bug where sometimes the server needs to be restarted for whatever reason

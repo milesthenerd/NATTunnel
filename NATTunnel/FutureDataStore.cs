@@ -5,7 +5,7 @@ namespace NATTunnel
 {
     public class FutureDataStore
     {
-        private SortedList<long, Data> futureData = new SortedList<long, Data>();
+        private readonly SortedList<long, Data> futureData = new SortedList<long, Data>();
 
         public void StoreData(Data d)
         {

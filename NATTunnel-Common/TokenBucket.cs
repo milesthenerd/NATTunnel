@@ -7,7 +7,7 @@ namespace NATTunnel.Common
         /// <summary>
         /// Requests data from a parent bucket as well.
         /// </summary>
-        public TokenBucket Parent;
+        public readonly TokenBucket Parent;
 
         /// <summary>
         /// The rate in bytes per second
@@ -40,9 +40,9 @@ namespace NATTunnel.Common
 
         public TokenBucket(int rateBytesPerSecond, int totalBytes, TokenBucket parent = null)
         {
-            this.Parent = parent;
-            this.RateBytesPerSecond = rateBytesPerSecond;
-            this.TotalBytes = totalBytes;
+            Parent = parent;
+            RateBytesPerSecond = rateBytesPerSecond;
+            TotalBytes = totalBytes;
         }
 
         private void Update()
