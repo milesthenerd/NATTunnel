@@ -44,7 +44,7 @@ namespace NATTunnel
             if (!File.Exists("config.txt") && !TryCreateNewConfig())
                 Environment.Exit(-1);
 
-            if (!NodeOptions.TryLoadConfig())
+            if (!Config.TryLoadConfig())
             {
                 Console.WriteLine("Failed to load config.txt");
                 Console.WriteLine("Press any key to exit...");
@@ -459,7 +459,7 @@ namespace NATTunnel
                 {
                     NodeOptions.IsServer = false;
                     NodeOptions.LocalPort = 5001;
-                    NodeOptions.CreateNewConfig();
+                    Config.CreateNewConfig();
                     return true;
                 }
                 case 's':
@@ -467,7 +467,7 @@ namespace NATTunnel
                     NodeOptions.IsServer = true;
                     NodeOptions.Endpoint = "127.0.0.1:25565";
                     NodeOptions.LocalPort = 5001;
-                    NodeOptions.CreateNewConfig();
+                    Config.CreateNewConfig();
                     return true;
                 }
                 default:
