@@ -77,7 +77,7 @@ public static class Config
     {
         using StreamReader streamReader = new StreamReader(GetConfigFilePath());
         string currentLine;
-        IPAddress tempEndpointIP = IPAddress.Loopback;
+        string tempEndpoint = "";
         while ((currentLine = streamReader.ReadLine()) != null)
         {
             // Skip all lines which don't have contents or are commented out.
@@ -102,10 +102,10 @@ public static class Config
                     NodeOptions.IsServer = rightSide == Server;
                     break;
                 case Endpoint:
-                    // Temp assign the ip here for use later. If the IP can't be resolved, error out.
+                    // Temp memorize the endpoint for now, in order to resolve later when we have the port.
                     try
                     {
-                        tempEndpointIP = Dns.GetHostAddresses(rightSide).First();
+                        tempEndpoint = rightSide;
                     }
                     catch
                     {
@@ -174,11 +174,9 @@ public static class Config
                     break;
             }
         }
-        // Before exiting, we need to give the correct port (mediation) to the endpoint
-        NodeOptions.Endpoint = tempEndpointIP + ":" + NodeOptions.MediationClientPort;
-        NodeOptions.ResolveAddress();
-
-        return true;
+        // Before exiting, we need to give the correct port (mediation) to the endpoint.
+        // If resolving fails, we return false, otherwise true.
+        return ResolveAddressAndAssignToEndpoints(tempEndpoint, NodeOptions.MediationClientPort);
     }
 
     /// <summary>
@@ -191,7 +189,7 @@ public static class Config
         sw.WriteLine($"{Mode}={(NodeOptions.IsServer ? Server : Client)}");
         sw.WriteLine();
         sw.WriteLine("#endpoint, servers: The IP address of the TCP server to connect to for forwarding over UDP. Client: The IP address of the UDP server to connect to.");
-        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoint}");
+        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoints[0]}");
         sw.WriteLine();
         sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
         sw.WriteLine($"{MediationIp}={NodeOptions.MediationIp}");
@@ -246,7 +244,7 @@ public static class Config
             case 's':
             {
                 NodeOptions.IsServer = true;
-                NodeOptions.Endpoint = "127.0.0.1:25565";
+                NodeOptions.Endpoints[0] = new IPEndPoint(IPAddress.Loopback, 25565);
                 NodeOptions.LocalPort = 5001;
                 CreateNewConfig();
                 return true;
@@ -257,6 +255,38 @@ public static class Config
                 return false;
             }
         }
+    }
+
+    /// <summary>
+    /// Resolves a string as either IP address or hostname, and adds it to <see cref="NodeOptions.Endpoints"/>.
+    /// </summary>
+    /// <param name="endpoint">The endpoint to resolve.</param>
+    /// <param name="port">The port to use for the endpoints.</param>
+    /// <returns><see langword="true"/> if it can be successfully resolved, otherwise <see langword="false"/>.</returns>
+    private static bool ResolveAddressAndAssignToEndpoints(string endpoint, int port)
+    {
+        NodeOptions.Endpoints.Clear();
+
+        if (endpoint.Contains(':'))
+        {
+            Console.WriteLine($"Port cannot be specified for {Endpoint}!");
+            return false;
+        }
+
+        try
+        {
+            foreach (IPAddress address in Dns.GetHostAddresses(endpoint))
+            {
+                NodeOptions.Endpoints.Add(new IPEndPoint(address, port));
+            }
+        }
+        catch
+        {
+            Console.WriteLine("Could not resolve Endpoint.");
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>

@@ -16,8 +16,8 @@ public static class NodeOptions
     /// Servers: Indicates the TCP server to connect to for forwarding over UDP. <br/>
     /// Clients: The UDP server to connect to.
     /// </summary>
-    //TODO: make this an IPEndPoint?
-    public static string Endpoint = "serverhost.address.example.com:26702";
+    //TODO: not being used properly?
+    //public static IPEndPoint Endpoint = new IPEndPoint(IPAddress.Loopback, 26702);
 
     /// <summary>
     /// The public IP of the mediation server you want to connect to.
@@ -32,7 +32,7 @@ public static class NodeOptions
     /// <summary>
     ///
     /// </summary>
-    public static readonly List<IPEndPoint> Endpoints = new List<IPEndPoint>();
+    public static readonly List<IPEndPoint> Endpoints = new List<IPEndPoint> { new IPEndPoint(IPAddress.Loopback, 26702)};
 
     /// <summary>
     /// Servers: The UDP server port <br/>
@@ -59,32 +59,4 @@ public static class NodeOptions
     /// Indicates by how many milliseconds delay the Tunnel sends unacknowledged packets
     /// </summary>
     public static int MinRetransmitTime = 100;
-
-
-    /// <summary>
-    /// Resolves <see cref="Endpoint"/> as either IP address or hostname,
-    /// and adds it to <see cref="Endpoints"/>.
-    /// </summary>
-    public static void ResolveAddress()
-    {
-        Endpoints.Clear();
-        //TODO: handle splitIndex being -1
-        int splitIndex = Endpoint.LastIndexOf(":", StringComparison.Ordinal);
-        string leftSide = Endpoint.Substring(0, splitIndex);
-        string rightSide = Endpoint.Substring(splitIndex + 1);
-        int port = Int32.Parse(rightSide);
-        if (IPAddress.TryParse(leftSide, out IPAddress address))
-        {
-            Endpoints.Add(new IPEndPoint(address, port));
-        }
-        //Left side is probably hostname instead, so let's try to resolve it and go through + add the IPs from that
-        //TODO: why not just always do that?
-        else
-        {
-            foreach (IPAddress address2 in Dns.GetHostAddresses(leftSide))
-            {
-                Endpoints.Add(new IPEndPoint(address2, port));
-            }
-        }
-    }
 }
