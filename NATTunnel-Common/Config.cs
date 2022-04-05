@@ -269,7 +269,7 @@ public static class Config
 
         if (endpoint.Contains(':'))
         {
-            Console.WriteLine($"Port cannot be specified for {Endpoint}!");
+            Console.Error.WriteLine($"Port cannot be specified for {Endpoint}!");
             return false;
         }
 
@@ -282,7 +282,7 @@ public static class Config
         }
         catch
         {
-            Console.WriteLine("Could not resolve Endpoint.");
+            Console.Error.WriteLine("Could not resolve Endpoint.");
             return false;
         }
 

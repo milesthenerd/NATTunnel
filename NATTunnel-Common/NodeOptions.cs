@@ -4,6 +4,9 @@ using System.Net;
 
 namespace NATTunnel.Common;
 
+/// <summary>
+/// Class that holds option values for various parts for NATTunnel.
+/// </summary>
 public static class NodeOptions
 {
     //TODO: documentation needed
