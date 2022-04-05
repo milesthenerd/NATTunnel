@@ -174,6 +174,7 @@ udp_server.on('close', function(){
 
 udp_server.bind(6510);
 
+// check every second to see if a client has wrongly disconnected
 setInterval(function timeout_loop(){
     console.log(sockets.length);
     if(sockets.length > 0){
