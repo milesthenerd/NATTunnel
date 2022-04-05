@@ -12,26 +12,59 @@ public static class Config
 {
     #region Config Options
 
+    /// <summary>
+    /// Text string for "mode" in the config.
+    /// </summary>
     private const string Mode = "mode";
 
+    /// <summary>
+    /// Text string for "client" in the config.
+    /// </summary>
     private const string Client = "client";
 
+    /// <summary>
+    /// Text string for "server" in the config.
+    /// </summary>
     private const string Server = "server";
 
+    /// <summary>
+    /// Text string for "endpoint" in the config.
+    /// </summary>
     private const string Endpoint = "endpoint";
 
+    /// <summary>
+    /// Text string for "mediationIP" in the config.
+    /// </summary>
     private const string MediationIp = "mediationIP";
 
+    /// <summary>
+    /// Text string for "remoteIP" in the config.
+    /// </summary>
     private const string RemoteIp = "remoteIP";
 
+    /// <summary>
+    /// Text string for "localPort" in the config.
+    /// </summary>
     private const string LocalPort = "localPort";
 
+    /// <summary>
+    /// Text string for "mediationClientPort" in the config.
+    /// </summary>
     private const string MediationClientPort = "mediationClientPort";
 
+    /// <summary>
+    /// Text string for "uploadSpeed" in the config.
+    /// </summary>
     private const string UploadSpeed = "uploadSpeed";
 
-    private const string DownloadSpeed = "downlaodSpeed";
+    /// <summary>
+    /// Text string for "downloadSpeed" in the config.
+    /// </summary>
+    private const string DownloadSpeed = "downloadSpeed";
 
+    /// <summary>
+    /// Text string for "minRetransmitTime" in the config.
+    /// </summary>
     private const string MinRetransmitTime = "minRetransmitTime";
 
     #endregion
@@ -62,7 +95,7 @@ public static class Config
                     // If the Mode is neither Server nor Client, exit.
                     if (!(rightSide.Equals(Server) || rightSide.Equals(Client)))
                     {
-                        Console.WriteLine($"Unknown option '{rightSide}' for {Mode}!");
+                        Console.Error.WriteLine($"Unknown option '{rightSide}' for {Mode}!");
                         return false;
                     }
                     // Otherwise, assign IsServer
@@ -76,7 +109,7 @@ public static class Config
                     }
                     catch
                     {
-                        Console.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
+                        Console.Error.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
                         return false;
                     }
                     break;
@@ -92,7 +125,7 @@ public static class Config
                     }
                     catch
                     {
-                        Console.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
+                        Console.Error.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
                         return false;
                     }
                     break;
@@ -101,21 +134,21 @@ public static class Config
                 case LocalPort:
                     if (!Int32.TryParse(rightSide, out NodeOptions.LocalPort))
                     {
-                        Console.WriteLine($"Invalid port for {LocalPort}");
+                        Console.Error.WriteLine($"Invalid port for {LocalPort}");
                         return false;
                     }
                     break;
                 case MediationClientPort:
                     if (!Int32.TryParse(rightSide, out NodeOptions.MediationClientPort))
                     {
-                        Console.WriteLine($"Invalid port for {MediationClientPort}");
+                        Console.Error.WriteLine($"Invalid port for {MediationClientPort}");
                         return false;
                     }
                     break;
                 case UploadSpeed:
                     if (!Int32.TryParse(rightSide, out NodeOptions.UploadSpeed))
                     {
-                        Console.WriteLine($"Invalid entry for {UploadSpeed}");
+                        Console.Error.WriteLine($"Invalid entry for {UploadSpeed}");
                         return false;
                     }
                     NodeOptions.UploadSpeed = Int32.Parse(rightSide);
@@ -123,7 +156,7 @@ public static class Config
                 case DownloadSpeed:
                     if (!Int32.TryParse(rightSide, out NodeOptions.DownloadSpeed))
                     {
-                        Console.WriteLine($"Invalid entry for {DownloadSpeed}");
+                        Console.Error.WriteLine($"Invalid entry for {DownloadSpeed}");
                         return false;
                     }
                     NodeOptions.DownloadSpeed = Int32.Parse(rightSide);
@@ -131,9 +164,13 @@ public static class Config
                 case MinRetransmitTime:
                     if (!Int32.TryParse(rightSide, out NodeOptions.MinRetransmitTime))
                     {
-                        Console.WriteLine($"Invalid entry for {MinRetransmitTime}");
+                        Console.Error.WriteLine($"Invalid entry for {MinRetransmitTime}");
                         return false;
                     }
+                    break;
+
+                default:
+                    Console.WriteLine($"Unknown config option {leftSide}!");
                     break;
             }
         }
@@ -151,29 +188,29 @@ public static class Config
     {
         using StreamWriter sw = new StreamWriter(GetConfigFilePath());
         sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP.");
-        sw.WriteLine($"mode={(NodeOptions.IsServer ? "server" : "client")}");
+        sw.WriteLine($"{Mode}={(NodeOptions.IsServer ? Server : Client)}");
         sw.WriteLine();
         sw.WriteLine("#endpoint, servers: The IP address of the TCP server to connect to for forwarding over UDP. Client: The IP address of the UDP server to connect to.");
-        sw.WriteLine($"endpoint={NodeOptions.Endpoint}");
+        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoint}");
         sw.WriteLine();
         sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
-        sw.WriteLine($"mediationIP={NodeOptions.MediationIp}");
+        sw.WriteLine($"{MediationIp}={NodeOptions.MediationIp}");
         sw.WriteLine();
         sw.WriteLine("#remoteIP, clients: The public IP of the peer you want to connect to.");
-        sw.WriteLine($"remoteIP={NodeOptions.RemoteIp}");
+        sw.WriteLine($"{RemoteIp}={NodeOptions.RemoteIp}");
         sw.WriteLine();
         sw.WriteLine("#localPort: servers: The UDP server port. client: The TCP port to host the forwarded server on.");
-        sw.WriteLine($"localPort={NodeOptions.LocalPort}");
+        sw.WriteLine($"{LocalPort}={NodeOptions.LocalPort}");
         sw.WriteLine();
         sw.WriteLine("#mediationClientPort: The UDP mediation client port. This is the port that will have a hole punched through the NAT by the mediation server, and all traffic will pass through it.");
-        sw.WriteLine($"mediationClientPort={NodeOptions.MediationClientPort}");
+        sw.WriteLine($"{MediationClientPort}={NodeOptions.MediationClientPort}");
         sw.WriteLine();
         sw.WriteLine("#uploadSpeed/downloadSpeed: Specify your connection limit (kB/s), this program sends at a fixed rate.");
-        sw.WriteLine($"uploadSpeed={NodeOptions.UploadSpeed}");
-        sw.WriteLine($"downloadSpeed={NodeOptions.DownloadSpeed}");
+        sw.WriteLine($"{UploadSpeed}={NodeOptions.UploadSpeed}");
+        sw.WriteLine($"{DownloadSpeed}={NodeOptions.DownloadSpeed}");
         sw.WriteLine();
         sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets.");
-        sw.WriteLine($"minRetransmitTime={NodeOptions.MinRetransmitTime}");
+        sw.WriteLine($"{MinRetransmitTime}={NodeOptions.MinRetransmitTime}");
     }
 
 
