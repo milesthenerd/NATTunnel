@@ -40,6 +40,7 @@ public class TunnelNode
 
     public void Start()
     {
+        //TODO: use proper cancellation token?
         Task mainTask = new Task(MainLoop);
         mainTask.Start();
     }

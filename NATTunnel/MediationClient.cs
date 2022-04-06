@@ -21,6 +21,7 @@ public static class MediationClient
     private static readonly TcpClient tcpClient = new TcpClient();
     private static readonly UdpClient udpClient; // set in constructor
     private static NetworkStream tcpClientStream;
+    //TODO: make all of these Tasks, and use proper cancellation tokens.
     private static Thread tcpClientThread;
     private static Thread udpClientThread;
     private static Thread udpServerThread;
