@@ -10,6 +10,7 @@ using Timer = System.Timers.Timer;
 using NATTunnel.Common;
 using System.Runtime.InteropServices;
 using System.IO;
+using System.Threading.Tasks;
 
 namespace NATTunnel;
 
@@ -20,9 +21,9 @@ public static class MediationClient
     private static readonly TcpClient tcpClient = new TcpClient();
     private static readonly UdpClient udpClient; // set in constructor
     private static NetworkStream tcpClientStream;
-    private static Thread tcpClientThread;
-    private static Thread udpClientThread;
-    private static Thread udpServerThread;
+    private static Task tcpClientThread;
+    private static Task udpClientThread;
+    private static Task udpServerThread;
     private static readonly IPEndPoint endpoint;
     private static readonly IPEndPoint programEndpoint;
     private static IPAddress intendedIp;
@@ -139,7 +140,7 @@ public static class MediationClient
         Console.WriteLine("Connected");
         tcpClientStream = tcpClient.GetStream();
 
-        tcpClientThread = new Thread(TcpListenLoop);
+        tcpClientThread = new Task(TcpListenLoop);
         tcpClientThread.Start();
 
 
@@ -170,7 +171,7 @@ public static class MediationClient
             Console.WriteLine(e);
         }
         //Begin listening
-        udpClientThread = new Thread(UdpClientListenLoop);
+        udpClientThread = new Task(UdpClientListenLoop);
         udpClientThread.Start();
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
@@ -196,7 +197,7 @@ public static class MediationClient
             Console.WriteLine(e);
         }
         //Begin listening
-        udpServerThread = new Thread(UdpServerListenLoop);
+        udpServerThread = new Task(UdpServerListenLoop);
         udpServerThread.Start();
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
@@ -215,9 +216,9 @@ public static class MediationClient
         {
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient),"udpClient.Receive(ref listenEP)");
 
-            Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
+            Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
 
-            if (Equals(listenEndpoint.Address, IPAddress.Loopback) && listenEndpoint.Port != mediationClientPort)
+            if (Equals(listenEndpoint.Address, IPAddress.Loopback) && (listenEndpoint.Port != mediationClientPort))
             {
                 localAppPort = listenEndpoint.Port;
             }
@@ -226,12 +227,13 @@ public static class MediationClient
             {
                 Console.WriteLine("pog");
                 holePunchReceivedCount++;
+                //TODO: random hardcoded value
                 if (holePunchReceivedCount >= 5 && !connected)
                 {
                     try
                     {
                         tcpClientStream.Close();
-                        tcpClientThread.Interrupt();
+                        tcpClientThread.Dispose();
                         tcpClient.Close();
                     }
                     catch (Exception e)
@@ -269,7 +271,6 @@ public static class MediationClient
                 }
             }
 
-            //TODO: pretty sure this is not necessary / can be condensed
             if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holepunchcount < 5 from above, because receivedIP is null
                 // because buffer is fucked. https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png

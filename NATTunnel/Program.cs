@@ -58,6 +58,7 @@ internal static class Program
 
     private static void Shutdown(TunnelNode tunnelNode)
     {
+        Console.WriteLine("Quitting...");
         running = false;
         tunnelNode.Stop();
     }
