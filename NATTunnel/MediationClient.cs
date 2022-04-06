@@ -21,9 +21,9 @@ public static class MediationClient
     private static readonly TcpClient tcpClient = new TcpClient();
     private static readonly UdpClient udpClient; // set in constructor
     private static NetworkStream tcpClientStream;
-    private static Task tcpClientThread;
-    private static Task udpClientThread;
-    private static Task udpServerThread;
+    private static Thread tcpClientThread;
+    private static Thread udpClientThread;
+    private static Thread udpServerThread;
     private static readonly IPEndPoint endpoint;
     private static readonly IPEndPoint programEndpoint;
     private static IPAddress intendedIp;
@@ -140,7 +140,7 @@ public static class MediationClient
         Console.WriteLine("Connected");
         tcpClientStream = tcpClient.GetStream();
 
-        tcpClientThread = new Task(TcpListenLoop);
+        tcpClientThread = new Thread(TcpListenLoop);
         tcpClientThread.Start();
 
 
@@ -171,7 +171,7 @@ public static class MediationClient
             Console.WriteLine(e);
         }
         //Begin listening
-        udpClientThread = new Task(UdpClientListenLoop);
+        udpClientThread = new Thread(UdpClientListenLoop);
         udpClientThread.Start();
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
@@ -197,7 +197,7 @@ public static class MediationClient
             Console.WriteLine(e);
         }
         //Begin listening
-        udpServerThread = new Task(UdpServerListenLoop);
+        udpServerThread = new Thread(UdpServerListenLoop);
         udpServerThread.Start();
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
@@ -233,7 +233,7 @@ public static class MediationClient
                     try
                     {
                         tcpClientStream.Close();
-                        tcpClientThread.Dispose();
+                        tcpClientThread.Interrupt();
                         tcpClient.Close();
                     }
                     catch (Exception e)

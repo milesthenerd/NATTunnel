@@ -16,6 +16,7 @@ public class TunnelNode
     private readonly Random random = new Random();
     private TcpListener tcpServer;
     private Socket udp;
+    private Thread mainTask;
     private readonly UdpConnection udpConnection;
     private readonly List<Client> clients = new List<Client>();
     private readonly Dictionary<int, Client> clientMapping = new Dictionary<int, Client>();
@@ -40,7 +41,7 @@ public class TunnelNode
 
     public void Start()
     {
-        Task mainTask = new Task(MainLoop);
+        mainTask = new Thread(MainLoop);
         mainTask.Start();
     }
 
