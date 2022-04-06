@@ -26,12 +26,12 @@ internal static class Program
         if (NodeOptions.IsServer)
         {
             MediationClient.UdpServer();
-            Console.WriteLine($"Server forwarding {NodeOptions.Endpoints[0]} to UDP port {NodeOptions.LocalPort}");
+            Console.WriteLine($"Server forwarding {NodeOptions.Endpoint} to UDP port {NodeOptions.LocalPort}");
         }
         else
         {
             MediationClient.UdpClient();
-            Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoints[0]}");
+            Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
         }
 
         Console.WriteLine("Press Q or CTRL+C to quit.");

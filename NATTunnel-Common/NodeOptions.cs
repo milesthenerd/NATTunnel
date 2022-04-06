@@ -20,8 +20,7 @@ public static class NodeOptions
     /// Servers: Indicates the TCP server to connect to for forwarding over UDP. <br/>
     /// Clients: The UDP server to connect to.
     /// </summary>
-    //TODO: not being used properly?
-    //public static IPEndPoint Endpoint = new IPEndPoint(IPAddress.Loopback, 26702);
+    public static IPEndPoint Endpoint = new IPEndPoint(IPAddress.Loopback, 26702);
 
     /// <summary>
     /// The public IP of the mediation server you want to connect to.
@@ -32,11 +31,6 @@ public static class NodeOptions
     /// The public IP of the server Tunnel you want to connect to. Only used as a client.
     /// </summary>
     public static IPAddress RemoteIp = IPAddress.Loopback;
-
-    /// <summary>
-    ///
-    /// </summary>
-    public static readonly List<IPEndPoint> Endpoints = new List<IPEndPoint> { new IPEndPoint(IPAddress.Loopback, 26702)};
 
     /// <summary>
     /// Servers: The UDP server port <br/>

@@ -114,13 +114,10 @@ public class TunnelNode
     private void ConnectUDPClient(Client client)
     {
         //TODO: why 4?
-        foreach (IPEndPoint endpoint in NodeOptions.Endpoints)
+        for (int i = 0; i < 4; i++)
         {
-            for (int i = 0; i < 4; i++)
-            {
-                NewConnectionRequest ncr = new NewConnectionRequest(client.Id, $"end{client.LocalTcpEndpoint}");
-                udpConnection.Send(ncr, endpoint);
-            }
+            NewConnectionRequest ncr = new NewConnectionRequest(client.Id, $"end{client.LocalTcpEndpoint}");
+            udpConnection.Send(ncr, NodeOptions.Endpoint);
         }
     }
 
@@ -151,7 +148,7 @@ public class TunnelNode
                     TcpClient tcp = new TcpClient(AddressFamily.InterNetwork);
                     try
                     {
-                        tcp.Connect(NodeOptions.Endpoints[0]);
+                        tcp.Connect(NodeOptions.Endpoint);
                         client = new Client(request.Id, udpConnection, tcp, connectionBucket);
                         //add mapping for local tcp client and remote IP
                         clients.Add(client);

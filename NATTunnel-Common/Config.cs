@@ -214,7 +214,7 @@ public static class Config
         sw.WriteLine($"{Mode}={(NodeOptions.IsServer ? Server : Client)}");
         sw.WriteLine();
         sw.WriteLine("#endpoint, servers: The IP address of the TCP server to connect to for forwarding over UDP. Client: The IP address of the UDP server to connect to.");
-        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoints[0].Address}");
+        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoint.Address}");
         sw.WriteLine();
         sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
         sw.WriteLine($"{MediationIp}={NodeOptions.MediationIp}");
@@ -269,7 +269,7 @@ public static class Config
             case 's':
             {
                 NodeOptions.IsServer = true;
-                NodeOptions.Endpoints[0] = new IPEndPoint(IPAddress.Loopback, 25565);
+                NodeOptions.Endpoint = new IPEndPoint(IPAddress.Loopback, 25565);
                 NodeOptions.LocalPort = 5001;
                 CreateNewConfig();
                 return true;
@@ -283,15 +283,13 @@ public static class Config
     }
 
     /// <summary>
-    /// Resolves a string as either IP address or hostname, and adds it to <see cref="NodeOptions.Endpoints"/>.
+    /// Resolves a string as either IP address or hostname, and assigns it to <see cref="NodeOptions.Endpoint"/>.
     /// </summary>
     /// <param name="endpoint">The endpoint to resolve.</param>
     /// <param name="port">The port to use for the endpoints.</param>
     /// <returns><see langword="true"/> if it can be successfully resolved, otherwise <see langword="false"/>.</returns>
     private static bool ResolveAddressAndAssignToEndpoints(string endpoint, int port)
     {
-        NodeOptions.Endpoints.Clear();
-
         if (endpoint.Contains(':'))
         {
             Console.Error.WriteLine($"Port cannot be specified for {Endpoint}!");
@@ -300,7 +298,7 @@ public static class Config
 
         try
         {
-            NodeOptions.Endpoints.Add(new IPEndPoint(GetIPFromDnsResolve(endpoint), port));
+            NodeOptions.Endpoint = new IPEndPoint(GetIPFromDnsResolve(endpoint), port);
         }
         catch
         {
