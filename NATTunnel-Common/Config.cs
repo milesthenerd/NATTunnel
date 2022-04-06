@@ -193,7 +193,7 @@ public static class Config
         IPAddress ipToReturn = null;
 
         // If we support ipv6, return the first ipv6 ip (if it exists), otherwise return the first ipv4 ip.
-        if (NodeOptions.isIPv6Supported)
+        if (NodeOptions.IsIPv6Supported)
             ipToReturn = ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetworkV6);
 
         ipToReturn ??= ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetwork);

@@ -58,11 +58,17 @@ public static class NodeOptions
     /// </summary>
     public static int MinRetransmitTime = 100;
 
-    public static bool isIPv6Supported { get; } = false;
+    /// <summary>
+    /// Indicated whether IPv6 is supported.
+    /// </summary>
+    public static bool IsIPv6Supported { get; }
 
-    public static bool isIPv4Supported { get; } = false;
+    /// <summary>
+    /// Indicates whether IPv4 is supported.
+    /// </summary>
+    public static bool IsIPv4Supported { get; }
 
-    // Constructor for Node options, determines whether
+    // Constructor for Node options, determines whether ipv6 and ipv4 are supported.
     static NodeOptions()
     {
         NetworkInterface[] nets = NetworkInterface.GetAllNetworkInterfaces();
@@ -72,9 +78,9 @@ public static class NodeOptions
             if (net.OperationalStatus != OperationalStatus.Up) continue;
 
             if (net.Supports(NetworkInterfaceComponent.IPv4))
-                isIPv4Supported = true;
+                IsIPv4Supported = true;
             if (net.Supports(NetworkInterfaceComponent.IPv6))
-                isIPv6Supported = true;
+                IsIPv6Supported = true;
         }
     }
 }
