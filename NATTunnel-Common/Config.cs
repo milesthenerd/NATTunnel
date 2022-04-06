@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.CompilerServices;
 
 namespace NATTunnel.Common;
 
@@ -105,7 +106,7 @@ public static class Config
                     NodeOptions.IsServer = rightSide == Server;
                     break;
                 case Endpoint:
-                    // Temp memorize the endpoint for now, in order to resolve later when we have the port.
+                    // Temp memorize the endpoint for now, in order to resolve later when we have the mediation port.
                     try
                     {
                         tempEndpoint = rightSide;
@@ -117,8 +118,33 @@ public static class Config
                     }
                     break;
                 case MediationIp:
-                    //TODO: port is needed, try to resolve address tho
-                    NodeOptions.MediationIp = IPEndPoint.Parse(rightSide);
+                    // If no port is specified, error out.
+                    int colonIndex = rightSide.IndexOf(':');
+                    if (colonIndex <= 0)
+                    {
+                        Console.Error.WriteLine($"{MediationIp} must have a port specified!");
+                        return false;
+                    }
+
+                    string ip = rightSide[..colonIndex];
+                    string port = rightSide[(colonIndex + 1)..];
+                    int portForMediationIP;
+
+                    if (!Int32.TryParse(port, out portForMediationIP))
+                    {
+                        Console.Error.WriteLine($"Invalid port for {MediationIp}!");
+                        return false;
+                    }
+
+                    try
+                    {
+                        NodeOptions.MediationIp = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
+                    }
+                    catch
+                    {
+                        Console.Error.WriteLine($"Could not resolve '{ip}' to an IP address!");
+                        return false;
+                    }
                     break;
                 case RemoteIp:
                     // If the IP can't be resolved, error out.

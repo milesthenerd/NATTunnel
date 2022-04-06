@@ -1,5 +1,8 @@
 namespace NATTunnel.Common;
 
+/// <summary>
+/// Class for extension methods.
+/// </summary>
 public static class Extensions
 {
     /// <summary>

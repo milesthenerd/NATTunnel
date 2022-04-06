@@ -12,27 +12,24 @@ internal static class Program
 
     public static void Main()
     {
-        //TODO: the port endpoint has to be the same as the mediationclientport, as otherwise this is handled weirdly somewhere in this mess
-
         //TODO: theres a weird bug where sometimes the server needs to be restarted for whatever reason
 
-        // NodeOptions / config file loading is done in the MediationClient constructor
-        // as it is the first thing we call and the class that relies most upon the settings.
-        MediationClient.TrackedClient();
+        // If the config file does not exist, and we couldn't create a config, exit cleanly.
+        if (!Config.CreateNewConfigPrompt())
+            Environment.Exit(-1);
+
+        if (!Config.TryLoadConfig())
+        {
+            Console.WriteLine("Failed to load config.txt");
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+            Environment.Exit(-1);
+        }
+
+        MediationClient.Start();
 
         TunnelNode tunnelNode = new TunnelNode();
         tunnelNode.Start();
-
-        if (NodeOptions.IsServer)
-        {
-            MediationClient.UdpServer();
-            Console.WriteLine($"Server forwarding {NodeOptions.Endpoint} to UDP port {NodeOptions.LocalPort}");
-        }
-        else
-        {
-            MediationClient.UdpClient();
-            Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
-        }
 
         Console.WriteLine("Press Q or CTRL+C to quit.");
         bool hasConsole = true;

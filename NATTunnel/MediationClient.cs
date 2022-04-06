@@ -40,21 +40,16 @@ public static class MediationClient
 
     static MediationClient()
     {
-        // NodeOptions loading is done here, as MediationClient is the first thing we call and the class that relies most upon the settings.
-
-        // If the config file does not exist, and we couldn't create a config, exit cleanly.
-        if (!Config.CreateNewConfigPrompt())
-            Environment.Exit(-1);
-
-        if (!Config.TryLoadConfig())
+        try
         {
-            Console.WriteLine("Failed to load config.txt");
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey();
+            udpClient = new UdpClient(NodeOptions.MediationClientPort);
+        }
+        catch (SocketException _)
+        {
+            Console.WriteLine("Can only run once instance of NATTunnel, because every Socket can only be used once.");
             Environment.Exit(-1);
         }
 
-        udpClient = new UdpClient(NodeOptions.MediationClientPort);
 
         // Windows-specific udpClient switch
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -125,13 +120,14 @@ public static class MediationClient
         }
     }
 
-    public static void TrackedClient()
+    public static void Start()
     {
         //Attempt to connect to mediator
         try
         {
             tcpClient.Connect(endpoint);
         }
+        //TODO: Have exception silent if can't connect? Quit program entirely?
         catch (Exception e)
         {
             Console.WriteLine(e);
@@ -145,6 +141,18 @@ public static class MediationClient
 
         tcpClientThread = new Thread(TcpListenLoop);
         tcpClientThread.Start();
+
+
+        if (isServer)
+        {
+            UdpServer();
+            Console.WriteLine($"Server forwarding {NodeOptions.Endpoint} to UDP port {NodeOptions.LocalPort}");
+        }
+        else
+        {
+            UdpClient();
+            Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
+        }
     }
 
     public static void UdpClient()
@@ -239,6 +247,7 @@ public static class MediationClient
 
             if (Equals(listenEndpoint.Address, endpoint.Address))
             {
+                //TODO: why do we need to constantly reget the ip on where to send stuff to?
                 string[] msgArray = Encoding.ASCII.GetString(receiveBuffer).Split(":");
 
                 receivedIp = IPAddress.Parse(msgArray[0]);
@@ -261,12 +270,12 @@ public static class MediationClient
             }
 
             //TODO: pretty sure this is not necessary / can be condensed
-            if (connected && receivedIp?.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
+            if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holepunchcount < 5 from above, because receivedIP is null
                 // because buffer is fucked. https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
                 udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
 
-            if (!connected || receivedIp?.ToString() == "hi" || !Equals(listenEndpoint.Address, intendedIp))
+            if (!connected || !Equals(listenEndpoint.Address, intendedIp))
                 continue;
 
             try
