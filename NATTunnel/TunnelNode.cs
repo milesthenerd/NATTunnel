@@ -16,7 +16,6 @@ public class TunnelNode
     private readonly Random random = new Random();
     private TcpListener tcpServer;
     private Socket udp;
-    private Thread mainLoop;
     private readonly UdpConnection udpConnection;
     private readonly List<Client> clients = new List<Client>();
     private readonly Dictionary<int, Client> clientMapping = new Dictionary<int, Client>();
@@ -37,20 +36,17 @@ public class TunnelNode
             SetupUDPSocket(0);
         }
         udpConnection = new UdpConnection(udp, ReceiveCallback);
-
-        mainLoop = new Thread(MainLoop) { Name = "TunnelNode-MainLoop" };
-        mainLoop.Start();
     }
 
     public void Start()
     {
-        /*mainTask = new Thread(MainLoop);
-        mainTask.Start();*/
+        Task mainTask = new Task(MainLoop);
+        mainTask.Start();
     }
 
     public void Stop()
     {
-        //running = false;
+        running = false;
         udpConnection.Stop();
         tcpServer?.Stop();
         udp.Close();
@@ -94,6 +90,8 @@ public class TunnelNode
 
     private void ConnectCallback(IAsyncResult ar)
     {
+        if (!running) return;
+
         try
         {
             TcpClient tcp = tcpServer.EndAcceptTcpClient(ar);
@@ -108,6 +106,7 @@ public class TunnelNode
         {
             Console.WriteLine($"Error accepting socket: {e}");
         }
+
         tcpServer.BeginAcceptTcpClient(ConnectCallback, null);
     }
 
