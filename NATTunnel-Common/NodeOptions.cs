@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Net;
+using System.Net.NetworkInformation;
 
 namespace NATTunnel.Common;
 
@@ -62,4 +63,24 @@ public static class NodeOptions
     /// Indicates by how many milliseconds delay the Tunnel sends unacknowledged packets
     /// </summary>
     public static int MinRetransmitTime = 100;
+
+    public static bool isIPv6Supported { get; } = false;
+
+    public static bool isIPv4Supported { get; } = false;
+
+    // Constructor for Node options, determines whether
+    static NodeOptions()
+    {
+        NetworkInterface[] nets = NetworkInterface.GetAllNetworkInterfaces();
+
+        foreach (NetworkInterface net in nets)
+        {
+            if (net.OperationalStatus != OperationalStatus.Up) continue;
+
+            if (net.Supports(NetworkInterfaceComponent.IPv4))
+                isIPv4Supported = true;
+            if (net.Supports(NetworkInterfaceComponent.IPv6))
+                isIPv6Supported = true;
+        }
+    }
 }

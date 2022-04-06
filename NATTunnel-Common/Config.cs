@@ -1,7 +1,10 @@
 using System;
+using System.Net.NetworkInformation;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 
 namespace NATTunnel.Common;
 
@@ -121,7 +124,7 @@ public static class Config
                     // If the IP can't be resolved, error out.
                     try
                     {
-                        NodeOptions.RemoteIp = Dns.GetHostAddresses(rightSide).First();
+                        NodeOptions.RemoteIp = GetIPFromDnsResolve(rightSide);
                     }
                     catch
                     {
@@ -180,6 +183,28 @@ public static class Config
     }
 
     /// <summary>
+    /// Helper method that resolves a DNS and returns the correct IPvX ip depending on what's supported.
+    /// </summary>
+    /// <param name="dns">The dns to resolve and get the ip from.</param>
+    /// <returns>An IPv6 ip of IPv6 is supported, otherwise an IPv4 ip.</returns>
+    private static IPAddress GetIPFromDnsResolve(string dns)
+    {
+        IPAddress[] ips = Dns.GetHostAddresses(dns);
+        IPAddress ipToReturn = null;
+
+        // If we support ipv6, return the first ipv6 ip (if it exists), otherwise return the first ipv4 ip.
+        if (NodeOptions.isIPv6Supported)
+            ipToReturn = ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetworkV6);
+
+        ipToReturn ??= ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetwork);
+
+        if (ipToReturn is null)
+            throw new ArgumentException($"DNS {dns} could not be resolved to neither an IPv6 nor an IPv4 Address.");
+
+        return ipToReturn;
+    }
+
+    /// <summary>
     /// Creates a new config file, filling it out with default values.
     /// </summary>
     public static void CreateNewConfig()
@@ -189,7 +214,7 @@ public static class Config
         sw.WriteLine($"{Mode}={(NodeOptions.IsServer ? Server : Client)}");
         sw.WriteLine();
         sw.WriteLine("#endpoint, servers: The IP address of the TCP server to connect to for forwarding over UDP. Client: The IP address of the UDP server to connect to.");
-        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoints[0]}");
+        sw.WriteLine($"{Endpoint}={NodeOptions.Endpoints[0].Address}");
         sw.WriteLine();
         sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
         sw.WriteLine($"{MediationIp}={NodeOptions.MediationIp}");
@@ -275,10 +300,7 @@ public static class Config
 
         try
         {
-            foreach (IPAddress address in Dns.GetHostAddresses(endpoint))
-            {
-                NodeOptions.Endpoints.Add(new IPEndPoint(address, port));
-            }
+            NodeOptions.Endpoints.Add(new IPEndPoint(GetIPFromDnsResolve(endpoint), port));
         }
         catch
         {
