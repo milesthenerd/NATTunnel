@@ -36,13 +36,17 @@ public class Client
     public readonly AutoResetEvent SendEvent = new AutoResetEvent(false);
     public int Latency;
     public readonly IPEndPoint LocalTcpEndpoint;
+    public readonly IPEndPoint PassthroughLocalUDPEndpoint;
+    public readonly UdpConnection UDPPassthroughConnection;
 
-    public Client(int clientID, UdpConnection udpConnection, TcpClient tcpClient, TokenBucket parentBucket)
+    public Client(int clientID, UdpConnection udpConnection, UdpConnection udpPassthroughConnection, Socket udpPassthroughClient, TcpClient tcpClient, TokenBucket parentBucket)
     {
         Id = clientID;
         TCPClient = tcpClient;
         UDPConnection = udpConnection;
+        UDPPassthroughConnection = udpPassthroughConnection;
         LocalTcpEndpoint = (IPEndPoint)tcpClient.Client.LocalEndPoint;
+        PassthroughLocalUDPEndpoint = (IPEndPoint)udpPassthroughClient.LocalEndPoint;
 
         tcpClient.NoDelay = true;
         tcpClient.GetStream().BeginRead(Buffer, 0, Buffer.Length, TCPReceiveCallback, null);
@@ -209,6 +213,11 @@ public class Client
             currentRecvPos += future.TCPData.Length - offset;
         }
         SendAck(false);
+    }
+
+    public void ReceivePassthroughData(PassthroughData passthroughData, IPEndPoint mediationClientEndpoint)
+    {
+        UDPPassthroughConnection.Send(passthroughData, mediationClientEndpoint);
     }
 
     public void TCPReceiveCallback(IAsyncResult ar)

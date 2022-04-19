@@ -11,5 +11,6 @@ public enum MessageType
     PingRequest = 20,
     PingReply = 21,
     Data = 30,
-    Ack = 31
+    Ack = 31,
+    PassthroughData = 32
 }

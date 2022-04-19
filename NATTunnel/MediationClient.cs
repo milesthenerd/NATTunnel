@@ -36,9 +36,10 @@ public static class MediationClient
     private static readonly int mediationClientPort;
     private static readonly bool isServer;
     private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
-    private static readonly Dictionary<IPEndPoint, IPEndPoint> mapping = new Dictionary<IPEndPoint, IPEndPoint>();
+    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingTCP = new Dictionary<IPEndPoint, IPEndPoint>();
+    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingUDP = new Dictionary<IPEndPoint, IPEndPoint>();
     private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
-    private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
+    public static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
 
     static MediationClient()
     {
@@ -67,14 +68,24 @@ public static class MediationClient
         isServer = NodeOptions.IsServer;
     }
 
-    public static void Add(IPEndPoint localEndpoint)
+    public static void AddTCP(IPEndPoint localEndpoint)
     {
-        mapping.Add(localEndpoint, mostRecentEndPoint);
+        mappingTCP.Add(localEndpoint, mostRecentEndPoint);
     }
 
-    public static void Remove(IPEndPoint localEndpoint)
+    public static void RemoveTCP(IPEndPoint localEndpoint)
     {
-        mapping.Remove(localEndpoint);
+        mappingTCP.Remove(localEndpoint);
+    }
+
+    public static void AddUDP(IPEndPoint localEndpoint)
+    {
+        mappingUDP.Add(localEndpoint, mostRecentEndPoint);
+    }
+
+    public static void RemoveUDP(IPEndPoint localEndpoint)
+    {
+        mappingUDP.Remove(localEndpoint);
     }
 
     private static void OnTimedEvent(object source, ElapsedEventArgs e)
@@ -297,7 +308,7 @@ public static class MediationClient
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
         while (true)
         {
-            Console.WriteLine(mapping.Count);
+            Console.WriteLine(mappingTCP.Count);
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
 
             mostRecentEndPoint = listenEndpoint;
@@ -411,11 +422,19 @@ public static class MediationClient
                             {
                                 try
                                 {
-                                    destEndpoint = mapping[new IPEndPoint(address, port)];
+                                    destEndpoint = mappingTCP[new IPEndPoint(address, port)];
                                 }
                                 catch (Exception e)
                                 {
                                     Console.WriteLine(e);
+                                    try
+                                    {
+                                        destEndpoint = mappingUDP[new IPEndPoint(address, port)];
+                                    }
+                                    catch (Exception e2)
+                                    {
+                                        Console.WriteLine(e2);
+                                    }
                                 }
                             }
                             Console.WriteLine(destEndpoint);

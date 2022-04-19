@@ -79,7 +79,8 @@ public class TunnelNode
 
                 if (clientMapping.ContainsKey(client.Id))
                 {
-                    MediationClient.Remove(clientMapping[client.Id].LocalTcpEndpoint);
+                    MediationClient.RemoveTCP(clientMapping[client.Id].LocalTcpEndpoint);
+                    MediationClient.RemoveUDP(clientMapping[client.Id].PassthroughLocalUDPEndpoint);
                     clientMapping.Remove(client.Id);
                 }
                 clients.Remove(client);
@@ -96,8 +97,11 @@ public class TunnelNode
         try
         {
             TcpClient tcp = tcpServer.EndAcceptTcpClient(ar);
+            Socket udpPassthrough = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+            udpPassthrough.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
             int newID = random.Next();
-            Client client = new Client(newID, udpConnection, tcp, connectionBucket);
+            UdpConnection udpPassthroughConnection = new UdpConnection(udpPassthrough, ReceiveCallback, MediationClient.mostRecentEndPoint, newID, true);
+            Client client = new Client(newID, udpConnection, udpPassthroughConnection, udpPassthrough, tcp, connectionBucket);
             Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
             ConnectUDPClient(client);
             clients.Add(client);
@@ -149,11 +153,15 @@ public class TunnelNode
                     try
                     {
                         tcp.Connect(NodeOptions.Endpoint);
-                        client = new Client(request.Id, udpConnection, tcp, connectionBucket);
+                        Socket udpPassthrough = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
+                        udpPassthrough.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                        UdpConnection udpPassthroughConnection = new UdpConnection(udpPassthrough, ReceiveCallback, MediationClient.mostRecentEndPoint, request.Id, true);
+                        client = new Client(request.Id, udpConnection, udpPassthroughConnection, udpPassthrough, tcp, connectionBucket);
                         //add mapping for local tcp client and remote IP
                         clients.Add(client);
                         clientMapping.Add(client.Id, client);
-                        MediationClient.Add(client.LocalTcpEndpoint);
+                        MediationClient.AddTCP(client.LocalTcpEndpoint);
+                        MediationClient.AddUDP(client.PassthroughLocalUDPEndpoint);
                     }
                     catch
                     {
@@ -265,6 +273,16 @@ public class TunnelNode
                     Client client = clientMapping[disconnect.Id];
                     client.Disconnect("Remote side requested a disconnect");
                     Console.WriteLine($"Stream {disconnect.Id} remotely disconnected because: {disconnect.Reason}");
+                }
+                break;
+            }
+            case PassthroughData passthroughData:
+            {
+                if (clientMapping.ContainsKey(passthroughData.Id))
+                {
+                    Client client = clientMapping[passthroughData.Id];
+                    IPEndPoint mediationClientEndpoint = new IPEndPoint(IPAddress.Loopback, NodeOptions.MediationClientPort);
+                    client.ReceivePassthroughData(passthroughData, mediationClientEndpoint);
                 }
                 break;
             }

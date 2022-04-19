@@ -70,6 +70,18 @@ public static class Config
     /// Text string for "minRetransmitTime" in the config.
     /// </summary>
     private const string MinRetransmitTime = "minRetransmitTime";
+    /// <summary>
+    /// Text string for "connectionType" in the config.
+    /// </summary>
+    private const string ConnectionType = "connectionType";
+    /// <summary>
+    /// Text string for "tcp" in the config.
+    /// </summary>
+    private const string TCP = "tcp";
+    /// <summary>
+    /// Text string for "udp" in the config.
+    /// </summary>
+    private const string UDP = "udp";
 
     #endregion
 
@@ -197,6 +209,15 @@ public static class Config
                         return false;
                     }
                     break;
+                case ConnectionType:
+                    if (!(rightSide.ToLower()).Equals(TCP) && !(rightSide.ToLower()).Equals(UDP))
+                    {
+                        Console.Error.WriteLine($"Invalid entry for {ConnectionType}");
+                        return false;
+                    }
+
+                    NodeOptions.ConnectionType = rightSide.ToLower();
+                    break;
 
                 default:
                     Console.WriteLine($"Unknown config option {leftSide}!");
@@ -260,6 +281,9 @@ public static class Config
         sw.WriteLine();
         sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets.");
         sw.WriteLine($"{MinRetransmitTime}={NodeOptions.MinRetransmitTime}");
+        sw.WriteLine();
+        sw.WriteLine("#connectionType: The protocol that the end application will be using (tcp or udp).");
+        sw.WriteLine($"{ConnectionType}={NodeOptions.ConnectionType}");
     }
 
 
