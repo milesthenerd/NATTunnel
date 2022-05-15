@@ -29,6 +29,7 @@ public class TunnelNode
         if (NodeOptions.IsServer)
         {
             SetupUDPSocket(NodeOptions.LocalPort);
+            SetupTCPServer();
         }
         else
         {
@@ -106,6 +107,9 @@ public class TunnelNode
             ConnectUDPClient(client);
             clients.Add(client);
             clientMapping[client.Id] = client;
+            MediationClient.AddTCP(client.LocalTcpEndpoint);
+            MediationClient.AddUDP(new IPEndPoint(IPAddress.Loopback, client.PassthroughLocalUDPEndpoint.Port));
+            Console.WriteLine(new IPEndPoint(IPAddress.Loopback, client.PassthroughLocalUDPEndpoint.Port));
         }
         catch (Exception e)
         {
@@ -162,6 +166,8 @@ public class TunnelNode
                         clientMapping.Add(client.Id, client);
                         MediationClient.AddTCP(client.LocalTcpEndpoint);
                         MediationClient.AddUDP(client.PassthroughLocalUDPEndpoint);
+                        Console.WriteLine("socket port");
+                        Console.WriteLine((IPEndPoint)udpPassthrough.LocalEndPoint);
                     }
                     catch
                     {
@@ -273,16 +279,6 @@ public class TunnelNode
                     Client client = clientMapping[disconnect.Id];
                     client.Disconnect("Remote side requested a disconnect");
                     Console.WriteLine($"Stream {disconnect.Id} remotely disconnected because: {disconnect.Reason}");
-                }
-                break;
-            }
-            case PassthroughData passthroughData:
-            {
-                if (clientMapping.ContainsKey(passthroughData.Id))
-                {
-                    Client client = clientMapping[passthroughData.Id];
-                    IPEndPoint mediationClientEndpoint = new IPEndPoint(IPAddress.Loopback, NodeOptions.MediationClientPort);
-                    client.ReceivePassthroughData(passthroughData, mediationClientEndpoint);
                 }
                 break;
             }

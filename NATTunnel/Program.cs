@@ -26,10 +26,10 @@ internal static class Program
             Environment.Exit(-1);
         }
 
-        MediationClient.Start();
-
         TunnelNode tunnelNode = new TunnelNode();
         tunnelNode.Start();
+
+        MediationClient.Start();
 
         Console.WriteLine("Press Q or CTRL+C to quit.");
         bool hasConsole = true;

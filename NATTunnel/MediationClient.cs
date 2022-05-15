@@ -24,20 +24,22 @@ public static class MediationClient
     //TODO: make all of these Tasks, and use proper cancellation tokens.
     private static Thread tcpClientThread;
     private static Thread udpClientThread;
-    private static Thread udpServerThread;
+    private static Thread udpServerThread;  
     private static readonly IPEndPoint endpoint;
     private static readonly IPEndPoint programEndpoint;
     private static IPAddress intendedIp;
     private static int intendedPort;
-    private static int localAppPort;
+    private static int localAppPort = 65535;
     private static int holePunchReceivedCount;
     private static bool connected;
     private static readonly IPAddress remoteIp;
     private static readonly int mediationClientPort;
     private static readonly bool isServer;
     private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
-    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingTCP = new Dictionary<IPEndPoint, IPEndPoint>();
-    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingUDP = new Dictionary<IPEndPoint, IPEndPoint>();
+    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingLocalTCPtoRemote = new Dictionary<IPEndPoint, IPEndPoint>();
+    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingLocalUDPtoRemote = new Dictionary<IPEndPoint, IPEndPoint>();
+    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingRemoteTCPtoLocal = new Dictionary<IPEndPoint, IPEndPoint>();
+    private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingRemoteUDPtoLocal = new Dictionary<IPEndPoint, IPEndPoint>();
     private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
     public static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
 
@@ -49,7 +51,7 @@ public static class MediationClient
         }
         catch (SocketException _)
         {
-            Console.WriteLine("Can only run once instance of NATTunnel, because every Socket can only be used once.");
+            Console.WriteLine("Can only run one instance of NATTunnel, because every Socket can only be used once.");
             Environment.Exit(-1);
         }
 
@@ -70,22 +72,26 @@ public static class MediationClient
 
     public static void AddTCP(IPEndPoint localEndpoint)
     {
-        mappingTCP.Add(localEndpoint, mostRecentEndPoint);
+        mappingLocalTCPtoRemote.Add(localEndpoint, mostRecentEndPoint);
+        mappingRemoteTCPtoLocal.Add(mostRecentEndPoint, localEndpoint);
     }
 
     public static void RemoveTCP(IPEndPoint localEndpoint)
     {
-        mappingTCP.Remove(localEndpoint);
+        mappingRemoteTCPtoLocal.Remove(mappingLocalTCPtoRemote[localEndpoint]);
+        mappingLocalTCPtoRemote.Remove(localEndpoint);
     }
 
     public static void AddUDP(IPEndPoint localEndpoint)
     {
-        mappingUDP.Add(localEndpoint, mostRecentEndPoint);
+        mappingLocalUDPtoRemote.Add(localEndpoint, mostRecentEndPoint);
+        mappingRemoteUDPtoLocal.Add(mostRecentEndPoint, localEndpoint);
     }
 
     public static void RemoveUDP(IPEndPoint localEndpoint)
     {
-        mappingUDP.Remove(localEndpoint);
+        mappingRemoteUDPtoLocal.Remove(mappingLocalUDPtoRemote[localEndpoint]);
+        mappingLocalUDPtoRemote.Remove(localEndpoint);
     }
 
     private static void OnTimedEvent(object source, ElapsedEventArgs e)
@@ -151,10 +157,8 @@ public static class MediationClient
 
         Console.WriteLine("Connected");
         tcpClientStream = tcpClient.GetStream();
-
         tcpClientThread = new Thread(TcpListenLoop);
         tcpClientThread.Start();
-
 
         if (isServer)
         {
@@ -226,6 +230,8 @@ public static class MediationClient
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
         while (true)
         {
+            mostRecentEndPoint = listenEndpoint;
+
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient),"udpClient.Receive(ref listenEP)");
 
             Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
@@ -234,6 +240,8 @@ public static class MediationClient
             {
                 localAppPort = listenEndpoint.Port;
             }
+            
+            Console.WriteLine(localAppPort);
 
             if (Equals(listenEndpoint.Address, intendedIp))
             {
@@ -285,20 +293,23 @@ public static class MediationClient
 
             if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
                 //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holepunchcount < 5 from above, because receivedIP is null
-                // because buffer is fucked. https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
+                //https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
                 udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
 
-            if (!connected || !Equals(listenEndpoint.Address, intendedIp))
-                continue;
-
-            try
+            if (connected && Equals(listenEndpoint.Address, intendedIp))
             {
-                //TODO: sometimes fails here for whatever reason
-                udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
+                try
+                {
+                    //TODO: sometimes fails here for whatever reason
+                    if (!Equals(Encoding.ASCII.GetString(receiveBuffer), "hi"))
+                    {
+                        udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
+                    }
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine(e);
+                }
             }
         }
     }
@@ -308,7 +319,7 @@ public static class MediationClient
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
         while (true)
         {
-            Console.WriteLine(mappingTCP.Count);
+            Console.WriteLine(mappingLocalTCPtoRemote.Count);
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
 
             mostRecentEndPoint = listenEndpoint;
@@ -346,7 +357,19 @@ public static class MediationClient
             {
                 Console.WriteLine("pog");
                 holePunchReceivedCount++;
-                if (holePunchReceivedCount >= 5 && !connected) connected = true;
+                if (holePunchReceivedCount >= 5 && !connected)
+                {
+                    TcpClient tcpClientPassthrough = new TcpClient();
+                    NetworkStream tcpClientPassthroughStream;
+                    Thread tcpClientPassthroughThread;
+
+                    tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, 5001));
+
+                    tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
+                    tcpClientPassthroughThread = new Thread(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
+                    tcpClientPassthroughThread.Start();
+                    connected = true;
+                }
             }
 
             IPAddress receivedIp = null;
@@ -387,6 +410,8 @@ public static class MediationClient
 
             if (connected && receivedIp?.ToString() != "hi" && Equals(listenEndpoint.Address, IPAddress.Loopback))
             {
+                IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Loopback, 65535);
+
                 string receiveString = Encoding.ASCII.GetString(receiveBuffer);
                 int splitPos = receiveString.IndexOf("end", StringComparison.Ordinal);
                 if (splitPos > 0)
@@ -416,40 +441,79 @@ public static class MediationClient
 
                             Console.WriteLine($"{address}:{port}");
 
-                            IPEndPoint destEndpoint = new IPEndPoint(address, port);
-
                             if (checkMap)
                             {
-                                try
+                                if (NodeOptions.ConnectionType.Equals("tcp"))
                                 {
-                                    destEndpoint = mappingTCP[new IPEndPoint(address, port)];
-                                }
-                                catch (Exception e)
-                                {
-                                    Console.WriteLine(e);
                                     try
                                     {
-                                        destEndpoint = mappingUDP[new IPEndPoint(address, port)];
+                                        destEndpoint = mappingLocalTCPtoRemote[new IPEndPoint(address, port)];
                                     }
-                                    catch (Exception e2)
+                                    catch (Exception e)
                                     {
-                                        Console.WriteLine(e2);
+                                        Console.WriteLine(e);
                                     }
                                 }
                             }
+                            Console.WriteLine("dest port");
                             Console.WriteLine(destEndpoint);
                             udpClient.Send(receiveBuffer, receiveBuffer.Length, destEndpoint);
                         }
                     }
                 }
+
+                if (NodeOptions.ConnectionType.Equals("udp"))
+                {
+                    try
+                    {
+                        destEndpoint = mappingLocalUDPtoRemote[new IPEndPoint(listenEndpoint.Address, listenEndpoint.Port)];
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine(e);
+                    }
+
+                    Console.WriteLine("dest port");
+                    Console.WriteLine(destEndpoint);
+                    udpClient.Send(receiveBuffer, receiveBuffer.Length, destEndpoint);
+                }
             }
 
-            foreach (IPEndPoint client in connectedClients)
+            if (NodeOptions.ConnectionType.Equals("tcp"))
             {
-                if (!connected || receivedIp?.ToString() == "hi" || listenEndpoint.Address.ToString() != client.Address.ToString())
-                    continue;
+                foreach (IPEndPoint client in connectedClients)
+                {
+                    if (!connected || receivedIp?.ToString() == "hi" || listenEndpoint.Address.ToString() != client.Address.ToString())
+                        continue;
 
-                udpClient.Send(receiveBuffer, receiveBuffer.Length, programEndpoint);
+                    udpClient.Send(receiveBuffer, receiveBuffer.Length, programEndpoint);
+                }
+            }
+            else
+            {
+                if (connected && receivedIp?.ToString() != "hi" && Encoding.ASCII.GetString(receiveBuffer) != "hi")
+                {
+                    foreach (IPEndPoint client in connectedClients)
+                    {
+                        if (listenEndpoint.Address.ToString() == client.Address.ToString())
+                        {
+                            IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Loopback, 65535);
+                            try
+                            {
+                                destEndpoint = mappingRemoteUDPtoLocal[new IPEndPoint(listenEndpoint.Address, listenEndpoint.Port)];
+                            }
+                            catch (Exception e)
+                            {
+                                Console.WriteLine(e);
+                            }
+
+                            Console.WriteLine("udp dest endpoint");
+                            Console.WriteLine(destEndpoint);
+
+                            udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, destEndpoint.Port));
+                        }
+                    }
+                }
             }
         }
     }
@@ -464,6 +528,32 @@ public static class MediationClient
                 //TODO: sometimes fails here
                 int bytesRead = tcpClientStream.Read(receiveBuffer, 0, tcpClient.ReceiveBufferSize);
                 Console.WriteLine("Received: " + Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead));
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e);
+            }
+        }
+    }
+
+    private static void TcpListenLoopPassthrough(TcpClient _tcpClientPassthrough, NetworkStream _tcpClientPassthroughStream)
+    {
+        while (_tcpClientPassthrough.Connected)
+        {
+            try
+            {
+                byte[] receiveBuffer = new byte[_tcpClientPassthrough.ReceiveBufferSize];
+                int bytesRead = _tcpClientPassthroughStream.Read(receiveBuffer, 0, _tcpClientPassthrough.ReceiveBufferSize);
+                //Console.WriteLine("Received: " + Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead));
+                //Console.WriteLine(bytesRead);
+                /*
+                if (!Equals(Encoding.ASCII.GetString(prevReceiveBuffer, 0, prevReceiveBuffer.Length), Encoding.ASCII.GetString(receiveBuffer, 0, receiveBuffer.Length)))
+                {
+                    _tcpClientPassthroughStream.Write(receiveBuffer, 0, bytesRead);
+                    prevReceiveBuffer = receiveBuffer;
+                    Console.WriteLine("sending");
+                }
+                */
             }
             catch (Exception e)
             {

@@ -65,8 +65,11 @@ public class Client
             long currentTime = DateTime.UtcNow.Ticks;
 
             //Disconnect if we hit the timeout
-            if ((currentTime - LastUdpRecvTime) > TIMEOUT)
-                Disconnect("UDP Receive Timeout");
+            if (NodeOptions.ConnectionType.Equals("tcp"))
+            {
+                if ((currentTime - LastUdpRecvTime) > TIMEOUT)
+                    Disconnect("UDP Receive Timeout");
+            }
 
             //Only do the following if we are connected
             if (UdpEndpoint == null) continue;
@@ -215,11 +218,6 @@ public class Client
         SendAck(false);
     }
 
-    public void ReceivePassthroughData(PassthroughData passthroughData, IPEndPoint mediationClientEndpoint)
-    {
-        UDPPassthroughConnection.Send(passthroughData, mediationClientEndpoint);
-    }
-
     public void TCPReceiveCallback(IAsyncResult ar)
     {
         try
@@ -256,6 +254,7 @@ public class Client
 
         Connected = false;
         Console.WriteLine($"Disconnected stream {Id}");
+        Console.WriteLine(reason);
         try
         {
             TCPClient.Close();
