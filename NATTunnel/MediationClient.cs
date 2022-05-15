@@ -443,16 +443,13 @@ public static class MediationClient
 
                             if (checkMap)
                             {
-                                if (NodeOptions.ConnectionType.Equals("tcp"))
+                                try
                                 {
-                                    try
-                                    {
-                                        destEndpoint = mappingLocalTCPtoRemote[new IPEndPoint(address, port)];
-                                    }
-                                    catch (Exception e)
-                                    {
-                                        Console.WriteLine(e);
-                                    }
+                                    destEndpoint = mappingLocalTCPtoRemote[new IPEndPoint(address, port)];
+                                }
+                                catch (Exception e)
+                                {
+                                    Console.WriteLine(e);
                                 }
                             }
                             Console.WriteLine("dest port");
