@@ -29,7 +29,7 @@ public class UdpConnection
         this.receiveCallback = receiveCallback;
         this.RemoteEndpoint = remoteEndpoint;
         this.ID = id;
-        if (NodeOptions.ConnectionType.Equals("udp") && passthrough)
+        if (passthrough)
         {
             recvThread = new Thread(ReceivePassthroughLoop) { Name = "UdpConnection-PassthroughReceive" };
             recvThread.Start();
