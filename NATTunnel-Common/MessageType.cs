@@ -1,5 +1,6 @@
 namespace NATTunnel.Common;
 
+//TODO: fill out documentation.
 public enum MessageType
 {
     //"heartbeat" is not used, "Ack"s do the job of keeping the UDP connection alive

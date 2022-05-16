@@ -1,5 +1,3 @@
-using System;
-using System.Collections.Generic;
 using System.Net;
 using System.Net.NetworkInformation;
 
@@ -76,6 +74,7 @@ public static class NodeOptions
     /// Indicates whether IPv4 is supported.
     /// </summary>
     public static bool IsIPv4Supported { get; }
+
     /// <summary>
     /// Indicates what protocol to use for application communication.
     /// </summary>

@@ -1,5 +1,4 @@
 using NATTunnel.Common;
-using NATTunnel.Common.Messages;
 using System;
 using System.Net;
 using System.Net.Sockets;
@@ -30,21 +29,19 @@ public class Client
     private const long TIMEOUT = 10 * TimeSpan.TicksPerSecond;
     private const long PING = 2 * TimeSpan.TicksPerSecond;
     private const long ACK_TIME = 10 * TimeSpan.TicksPerMillisecond;
-    private readonly UdpConnection UDPConnection;
+    private readonly UdpConnection udpConnection;
     private long ackSafe;
     private Thread clientThread;
     public readonly AutoResetEvent SendEvent = new AutoResetEvent(false);
     public int Latency;
     public readonly IPEndPoint LocalTcpEndpoint;
     public readonly IPEndPoint PassthroughLocalUDPEndpoint;
-    public readonly UdpConnection UDPPassthroughConnection;
 
-    public Client(int clientID, UdpConnection udpConnection, UdpConnection udpPassthroughConnection, Socket udpPassthroughClient, TcpClient tcpClient, TokenBucket parentBucket)
+    public Client(int clientID, UdpConnection udpConnection, Socket udpPassthroughClient, TcpClient tcpClient, TokenBucket parentBucket)
     {
         Id = clientID;
         TCPClient = tcpClient;
-        UDPConnection = udpConnection;
-        UDPPassthroughConnection = udpPassthroughConnection;
+        this.udpConnection = udpConnection;
         LocalTcpEndpoint = (IPEndPoint)tcpClient.Client.LocalEndPoint;
         PassthroughLocalUDPEndpoint = (IPEndPoint)udpPassthroughClient.LocalEndPoint;
 
@@ -92,7 +89,7 @@ public class Client
 
         LastUdpPingTime = currentTime;
         PingRequest pr = new PingRequest(Id, currentTime, $"end{LocalTcpEndpoint}");
-        UDPConnection.Send(pr, UdpEndpoint);
+        udpConnection.Send(pr, UdpEndpoint);
     }
 
     private void SendAck(bool force)
@@ -105,7 +102,7 @@ public class Client
         LastUdpSendAckTime = currentTime;
         Ack ack = new Ack(Id, currentRecvPos, $"end{LocalTcpEndpoint}");
 
-        UDPConnection.Send(ack, UdpEndpoint);
+        udpConnection.Send(ack, UdpEndpoint);
     }
 
     public void ReceiveAck(Ack ack)
@@ -173,7 +170,7 @@ public class Client
         TxQueue.Read(data.TCPData, 0, currentSendPos, (int)bytesToWrite);
         LastUdpSendAckTime = currentTime;
         LastUdpSendTime = currentTime;
-        UDPConnection.Send(data, UdpEndpoint);
+        udpConnection.Send(data, UdpEndpoint);
         currentSendPos += bytesToWrite;
         Bucket.Take((int)bytesToWrite);
     }
@@ -268,6 +265,6 @@ public class Client
         if (reason == null || UdpEndpoint == null) return;
 
         Disconnect dis = new Disconnect(Id, reason, $"end{LocalTcpEndpoint}");
-        UDPConnection.Send(dis, UdpEndpoint);
+        udpConnection.Send(dis, UdpEndpoint);
     }
 }

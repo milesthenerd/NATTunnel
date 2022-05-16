@@ -11,7 +11,7 @@ namespace NATTunnel.Common;
 public static class Header
 {
     public const int PROTOCOL_VERSION = 1;
-    private static bool loaded = false;
+    private static bool loaded;
     private static readonly Dictionary<MessageType, Type> messageTypeToType = new Dictionary<MessageType, Type>();
     private static readonly Dictionary<Type, MessageType> typeToMessageType = new Dictionary<Type, MessageType>();
     private static readonly byte[] buildBytes = new byte[1496];

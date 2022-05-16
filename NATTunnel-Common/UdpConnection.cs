@@ -1,18 +1,16 @@
 using System;
 using System.Collections.Concurrent;
 using System.IO;
-using System.Text;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using NATTunnel.Common.Messages;
-using NATTunnel.Common.Messages.Types;
 
 namespace NATTunnel.Common;
 
 public class UdpConnection
 {
-    public bool running = true;
+    public bool Running = true;
     private readonly Socket udpSocket;
     //TODO: use of the threads?
     private readonly Thread recvThread;
@@ -20,15 +18,12 @@ public class UdpConnection
     private readonly AutoResetEvent autoResetEvent = new AutoResetEvent(false);
     private readonly Action<IMessage, IPEndPoint> receiveCallback;
     private readonly ConcurrentQueue<Tuple<IMessage, IPEndPoint>> sendMessages = new ConcurrentQueue<Tuple<IMessage, IPEndPoint>>();
-    private readonly IPEndPoint RemoteEndpoint;
-    private readonly int ID;
 
-    public UdpConnection(Socket udpSocket, Action<IMessage, IPEndPoint> receiveCallback, IPEndPoint remoteEndpoint = null, int id=0, bool passthrough=false)
+
+    public UdpConnection(Socket udpSocket, Action<IMessage, IPEndPoint> receiveCallback, bool passthrough=false)
     {
         this.udpSocket = udpSocket;
         this.receiveCallback = receiveCallback;
-        this.RemoteEndpoint = remoteEndpoint;
-        this.ID = id;
         if (passthrough)
         {
             recvThread = new Thread(ReceivePassthroughLoop) { Name = "UdpConnection-PassthroughReceive" };
@@ -47,7 +42,7 @@ public class UdpConnection
 
     public void Stop()
     {
-        running = false;
+        Running = false;
         recvThread.Join();
         sendThread.Join();
     }
@@ -57,7 +52,7 @@ public class UdpConnection
         byte[] recvBuffer = new byte[1500];
         int receivedBytes;
         EndPoint recvEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
-        while (running)
+        while (Running)
         {
             if (!udpSocket.Poll(5000, SelectMode.SelectRead))
                 continue;
@@ -83,9 +78,9 @@ public class UdpConnection
         byte[] recvBuffer = new byte[1500];
         int receivedBytes;
         EndPoint recvEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
-        IPEndPoint recvIPEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
-        while (running)
+        while (Running)
         {
+            IPEndPoint recvIPEndpoint;
             try
             {
                 receivedBytes = udpSocket.ReceiveFrom(recvBuffer, ref recvEndpoint);
@@ -117,7 +112,7 @@ public class UdpConnection
 
     private void SendLoop()
     {
-        while (running)
+        while (Running)
         {
             autoResetEvent.WaitOne(100);
             while (sendMessages.TryDequeue(out Tuple<IMessage, IPEndPoint> sendMessage))
