@@ -284,14 +284,14 @@ public static class Config
     /// <summary>
     /// Prompts in the console to create a new config file.
     /// </summary>
-    /// <param name="exitOnExistingConfig">Whether to exit if the config file already exists.</param>
+    /// <param name="exitOnExistingConfig">Whether to exit if the config file already exists, instead of erroring.</param>
     /// <returns><see langword="true"/> if a config file was created or
     /// the file exists and <paramref name="exitOnExistingConfig"/> is <see langword="true"/>.
     /// <see langword="false"/> if the user quit out.</returns>
     public static bool CreateNewConfigPrompt(bool exitOnExistingConfig = true)
     {
         bool doesFileExist = File.Exists(GetConfigFilePath());
-        if (doesFileExist &&exitOnExistingConfig)
+        if (doesFileExist && exitOnExistingConfig)
             return true;
 
         if (!doesFileExist)
@@ -366,6 +366,7 @@ public static class Config
             return nattunnelDir + "/config.txt";
         }
 
+        // Special case for macos, because the applicationdata folder is currently bugged on macos+.net
         if (OperatingSystem.IsMacOS())
         {
             string nattunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/Library/Application Support/NATTunnel";

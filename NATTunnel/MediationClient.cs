@@ -167,7 +167,7 @@ public static class MediationClient
         }
     }
 
-    public static void UdpClient()
+    private static void UdpClient()
     {
         //Set client intendedIP to remote endpoint IP
         intendedIp = remoteIp;
@@ -193,7 +193,7 @@ public static class MediationClient
         timer.Elapsed += OnTimedEvent;
     }
 
-    public static void UdpServer()
+    private static void UdpServer()
     {
         //Set client intendedIP to something no client will have
         intendedIp = IPAddress.None;
@@ -354,13 +354,11 @@ public static class MediationClient
                 if (holePunchReceivedCount >= 5 && !connected)
                 {
                     TcpClient tcpClientPassthrough = new TcpClient();
-                    NetworkStream tcpClientPassthroughStream;
-                    Thread tcpClientPassthroughThread;
 
                     tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, 5001));
 
-                    tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
-                    tcpClientPassthroughThread = new Thread(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
+                    NetworkStream tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
+                    Thread tcpClientPassthroughThread = new Thread(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
                     tcpClientPassthroughThread.Start();
                     connected = true;
                 }
