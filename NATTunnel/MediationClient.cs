@@ -24,7 +24,7 @@ public static class MediationClient
     //TODO: make all of these Tasks, and use proper cancellation tokens.
     private static Thread tcpClientThread;
     private static Thread udpClientThread;
-    private static Thread udpServerThread;  
+    private static Thread udpServerThread;
     private static readonly IPEndPoint endpoint;
     private static readonly IPEndPoint programEndpoint;
     private static IPAddress intendedIp;
@@ -240,7 +240,7 @@ public static class MediationClient
             {
                 localAppPort = listenEndpoint.Port;
             }
-            
+
             Console.WriteLine(localAppPort);
 
             if (Equals(listenEndpoint.Address, intendedIp))
@@ -459,7 +459,7 @@ public static class MediationClient
                     }
                 }
 
-                if (NodeOptions.ConnectionType.Equals("udp"))
+                if (NodeOptions.ConnectionType == ConnectionTypes.UDP)
                 {
                     try
                     {
@@ -476,7 +476,7 @@ public static class MediationClient
                 }
             }
 
-            if (NodeOptions.ConnectionType.Equals("tcp"))
+            if (NodeOptions.ConnectionType == ConnectionTypes.TCP)
             {
                 foreach (IPEndPoint client in connectedClients)
                 {

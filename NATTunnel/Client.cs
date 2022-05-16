@@ -65,7 +65,7 @@ public class Client
             long currentTime = DateTime.UtcNow.Ticks;
 
             //Disconnect if we hit the timeout
-            if (NodeOptions.ConnectionType.Equals("tcp"))
+            if (NodeOptions.ConnectionType == ConnectionTypes.TCP)
             {
                 if ((currentTime - LastUdpRecvTime) > TIMEOUT)
                     Disconnect("UDP Receive Timeout");

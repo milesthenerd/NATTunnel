@@ -1,11 +1,8 @@
 using System;
-using System.Net.NetworkInformation;
-using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
-using System.Runtime.CompilerServices;
 
 namespace NATTunnel.Common;
 
@@ -210,15 +207,12 @@ public static class Config
                     }
                     break;
                 case ConnectionType:
-                    if (!(rightSide.ToLower()).Equals(TCP) && !(rightSide.ToLower()).Equals(UDP))
+                    if (!Enum.TryParse(rightSide, true, out NodeOptions.ConnectionType))
                     {
                         Console.Error.WriteLine($"Invalid entry for {ConnectionType}");
                         return false;
                     }
-
-                    NodeOptions.ConnectionType = rightSide.ToLower();
                     break;
-
                 default:
                     Console.WriteLine($"Unknown config option {leftSide}!");
                     break;
@@ -282,7 +276,7 @@ public static class Config
         sw.WriteLine("#minRetransmitTime: How many milliseconds delay to send unacknowledged packets.");
         sw.WriteLine($"{MinRetransmitTime}={NodeOptions.MinRetransmitTime}");
         sw.WriteLine();
-        sw.WriteLine("#connectionType: The protocol that the end application will be using (tcp or udp).");
+        sw.WriteLine($"#connectionType: The protocol that the end application will be using ({TCP} or {UDP}).");
         sw.WriteLine($"{ConnectionType}={NodeOptions.ConnectionType}");
     }
 

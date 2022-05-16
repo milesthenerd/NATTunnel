@@ -6,6 +6,15 @@ using System.Net.NetworkInformation;
 namespace NATTunnel.Common;
 
 /// <summary>
+/// Possible protocols to use for application communication.
+/// </summary>
+public enum ConnectionTypes
+{
+    TCP,
+    UDP
+}
+
+/// <summary>
 /// Class that holds option values for various parts for NATTunnel.
 /// </summary>
 public static class NodeOptions
@@ -70,7 +79,7 @@ public static class NodeOptions
     /// <summary>
     /// Indicates what protocol to use for application communication.
     /// </summary>
-    public static string ConnectionType = "tcp";
+    public static ConnectionTypes ConnectionType = ConnectionTypes.TCP;
 
     // Constructor for Node options, determines whether ipv6 and ipv4 are supported.
     static NodeOptions()
