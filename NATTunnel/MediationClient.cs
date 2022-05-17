@@ -254,6 +254,7 @@ public static class MediationClient
                         tcpClientStream.Close();
                         tcpClientTaskCancellationToken.Cancel();
                         tcpClient.Close();
+                        tcpClientTaskCancellationToken.Dispose();
                     }
                     catch (Exception e)
                     {
