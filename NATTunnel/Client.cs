@@ -13,7 +13,6 @@ public class Client
     public readonly int Id;
     public long LastUdpReceivedTime = DateTime.UtcNow.Ticks;
     //TODO: assigned but not used. Safe to be removed?
-    private long LastUdpSendTime;
     private long LastUdpPingTime;
     private long LastUdpSendAckTime;
     public TcpClient TCPClient;
@@ -98,7 +97,6 @@ public class Client
         //Send acks to let the other side know we have received data.
         if (!force && ((currentTime - LastUdpSendAckTime) <= ACK_TIME)) return;
 
-        LastUdpSendTime = currentTime;
         LastUdpSendAckTime = currentTime;
         Ack ack = new Ack(Id, currentReceivedPos, $"end{LocalTcpEndpoint}");
 
@@ -169,7 +167,6 @@ public class Client
         Data data = new Data(Id, currentSendPos, currentReceivedPos, new byte[bytesToWrite], $"end{LocalTcpEndpoint}");
         TxQueue.Read(data.TCPData, 0, currentSendPos, (int)bytesToWrite);
         LastUdpSendAckTime = currentTime;
-        LastUdpSendTime = currentTime;
         udpConnection.Send(data, UdpEndpoint);
         currentSendPos += bytesToWrite;
         Bucket.Take((int)bytesToWrite);
