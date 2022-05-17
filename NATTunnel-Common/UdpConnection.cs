@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 using NATTunnel.Common.Messages;
 
 namespace NATTunnel.Common;
@@ -14,8 +15,8 @@ public class UdpConnection
     public bool Running = true;
     private readonly Socket udpSocket;
     //TODO: convert to tasks
-    private readonly Thread receiveThread;
-    private readonly Thread sendThread;
+    private readonly Task receiveThread;
+    private readonly Task sendThread;
     private readonly AutoResetEvent autoResetEvent = new AutoResetEvent(false);
     private readonly Action<IMessage, IPEndPoint> receiveCallback;
     private readonly ConcurrentQueue<Tuple<IMessage, IPEndPoint>> sendMessages = new ConcurrentQueue<Tuple<IMessage, IPEndPoint>>();
@@ -27,13 +28,13 @@ public class UdpConnection
         this.receiveCallback = receiveCallback;
         if (passthrough)
         {
-            receiveThread = new Thread(ReceivePassthroughLoop) { Name = "UdpConnection-PassthroughReceive" };
-            sendThread = new Thread(SendLoop) { Name = "UdpConnection-Send" };
+            receiveThread = new Task(ReceivePassthroughLoop);
+            sendThread = new Task(SendLoop);
         }
         else
         {
-            receiveThread = new Thread(ReceiveLoop) { Name = "UdpConnection-Receive" };
-            sendThread = new Thread(SendLoop) { Name = "UdpConnection-Send" };
+            receiveThread = new Task(ReceiveLoop);
+            sendThread = new Task(SendLoop);
         }
     }
 
@@ -46,8 +47,8 @@ public class UdpConnection
     public void Stop()
     {
         Running = false;
-        receiveThread.Join();
-        sendThread.Join();
+        receiveThread.Wait();
+        sendThread.Wait();
     }
 
     private void ReceiveLoop()
