@@ -4,7 +4,7 @@
 using System;
 
 namespace NATTunnel.Common;
-
+//TODO: documentation
 public class StreamRingBuffer
 {
     private readonly byte[] internalBuffer;

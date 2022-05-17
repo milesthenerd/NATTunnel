@@ -33,7 +33,7 @@ internal static class Program
 
         Console.WriteLine("Press Q or CTRL+C to quit.");
         bool hasConsole = true;
-        //TODO: close mediationClient when shutting down.
+        //TODO: close mediationClient when shutting down / give it a stop method
         Console.CancelKeyPress += (_, _) => { Shutdown(tunnelNode); };
         while (running)
         {

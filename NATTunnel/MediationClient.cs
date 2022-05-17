@@ -536,7 +536,7 @@ public static class MediationClient
             try
             {
                 byte[] receiveBuffer = new byte[tcpClientPassthrough.ReceiveBufferSize];
-                //TODO: check if read is important
+                //TODO: check if read is important after tcp has been fixed
                 int _ = tcpClientPassthroughStream.Read(receiveBuffer, 0, tcpClientPassthrough.ReceiveBufferSize);
             }
             catch (Exception e)

@@ -13,7 +13,6 @@ public class Client
     public bool Connected = true;
     public readonly int Id;
     public long LastUdpReceivedTime = DateTime.UtcNow.Ticks;
-    //TODO: assigned but not used. Safe to be removed?
     private long LastUdpPingTime;
     private long LastUdpSendAckTime;
     public TcpClient TCPClient;
@@ -159,7 +158,7 @@ public class Client
         long bytesToWrite = TxQueue.StreamWritePos - currentSendPos;
         if (bytesToWrite == 0 || Bucket.CurrentBytes < 500)
         {
-            Task.Delay(10);
+            Thread.Sleep(10);
             return;
         }
 
@@ -237,7 +236,7 @@ public class Client
             {
                 if (!Connected) return;
 
-                Task.Delay(10);
+                Thread.Sleep(10);
             }
             TCPClient.GetStream().BeginRead(Buffer, 0, Buffer.Length, TCPReceiveCallback, null);
         }

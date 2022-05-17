@@ -45,7 +45,6 @@ public class TunnelNode
 
     public void Start()
     {
-        //TODO: use proper cancellation token?
         Task mainTask = new Task(MainLoop);
         mainTask.Start();
     }
@@ -92,7 +91,7 @@ public class TunnelNode
                 clients.Remove(client);
             }
 
-            Task.Delay(100);
+            Thread.Sleep(100);
         }
     }
 
@@ -244,7 +243,7 @@ public class TunnelNode
                     Client client = clientMapping[data.Id];
                     //TODO: WHY IS THIS NECESSARY!?!?!?
                     client.UdpEndpoint = endpoint;
-                    if (client.TCPClient != null) client.ReceiveData(data);
+                    if (client.TCPClient is not null) client.ReceiveData(data);
                 }
                 break;
             }
