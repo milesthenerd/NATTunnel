@@ -54,11 +54,12 @@ internal static class Program
                 hasConsole = false;
             }
         }
+        Console.WriteLine("NATTunnel exited.");
     }
 
     private static void Shutdown(TunnelNode tunnelNode)
     {
-        Console.WriteLine("Quitting...");
+        Console.WriteLine("\nQuitting...");
         running = false;
         tunnelNode.Stop();
     }

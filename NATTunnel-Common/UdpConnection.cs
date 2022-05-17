@@ -12,9 +12,11 @@ namespace NATTunnel.Common;
 public class UdpConnection
 {
     //TODO: make this work properly so it quits out everything else.
-    public bool Running = true;
+    /// <summary>
+    /// A <see cref="CancellationTokenSource"/> that indicates whether the <see cref="UdpConnection"/> should still run.
+    /// </summary>
+    private readonly CancellationTokenSource running = new CancellationTokenSource();
     private readonly Socket udpSocket;
-    //TODO: convert to tasks
     private readonly Task receiveThread;
     private readonly Task sendThread;
     private readonly AutoResetEvent autoResetEvent = new AutoResetEvent(false);
@@ -46,16 +48,17 @@ public class UdpConnection
 
     public void Stop()
     {
-        Running = false;
+        running.Cancel();
         receiveThread.Wait();
         sendThread.Wait();
+        running.Dispose();
     }
 
     private void ReceiveLoop()
     {
         byte[] receivedBuffer = new byte[1500];
         EndPoint receivedEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
-        while (Running)
+        while (!running.Token.IsCancellationRequested)
         {
             if (!udpSocket.Poll(5000, SelectMode.SelectRead))
                 continue;
@@ -81,7 +84,7 @@ public class UdpConnection
     {
         byte[] receivedBuffer = new byte[1500];
         EndPoint receivedEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
-        while (Running)
+        while (!running.Token.IsCancellationRequested)
         {
             IPEndPoint receivedIPEndpoint;
             int receivedBytes;
@@ -116,7 +119,7 @@ public class UdpConnection
 
     private void SendLoop()
     {
-        while (Running)
+        while (!running.Token.IsCancellationRequested)
         {
             autoResetEvent.WaitOne(100);
             while (sendMessages.TryDequeue(out Tuple<IMessage, IPEndPoint> sendMessage))

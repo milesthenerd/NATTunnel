@@ -20,7 +20,6 @@ public static class MediationClient
     private static readonly TcpClient tcpClient = new TcpClient();
     private static readonly UdpClient udpClient; // set in constructor
     private static NetworkStream tcpClientStream;
-    //TODO: make all of these Tasks, and use proper cancellation tokens.
     private static Task tcpClientTask;
     private static readonly CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
     private static Task udpClientTask;
@@ -156,7 +155,7 @@ public static class MediationClient
 
         Console.WriteLine("Connected");
         tcpClientStream = tcpClient.GetStream();
-        tcpClientTask = new Task(() => TcpListenLoop(tcpClientTaskCancellationToken.Token));
+        tcpClientTask = new Task(TcpListenLoop);
         tcpClientTask.Start();
 
         if (isServer)
@@ -509,7 +508,7 @@ public static class MediationClient
         }
     }
 
-    private static void TcpListenLoop(CancellationToken cancellationToken)
+    private static void TcpListenLoop()
     {
         while (tcpClient.Connected)
         {
@@ -525,7 +524,7 @@ public static class MediationClient
                 Console.WriteLine(e);
             }
 
-            if (cancellationToken.IsCancellationRequested)
+            if (tcpClientTaskCancellationToken.Token.IsCancellationRequested)
                 return;
         }
     }

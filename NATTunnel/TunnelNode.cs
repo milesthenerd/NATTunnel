@@ -12,7 +12,10 @@ namespace NATTunnel;
 
 public class TunnelNode
 {
-    private bool running = true;
+    /// <summary>
+    /// A <see cref="CancellationTokenSource"/> thatt indicates whether the <see cref="TunnelNode"/> should still run.
+    /// </summary>
+    private readonly CancellationTokenSource running = new CancellationTokenSource();
     private readonly Random random = new Random();
     private TcpListener tcpServer;
     private Socket udp;
@@ -49,10 +52,11 @@ public class TunnelNode
 
     public void Stop()
     {
-        running = false;
+        running.Cancel();
         udpConnection.Stop();
         tcpServer?.Stop();
         udp.Close();
+        running.Dispose();
     }
 
     private void SetupUDPSocket(int port)
@@ -71,7 +75,7 @@ public class TunnelNode
     private void MainLoop()
     {
         //This is the cleanup/heartbeating loop
-        while (running)
+        while (!running.Token.IsCancellationRequested)
         {
             // This needs to be a for loop, as the collection gets modified during runtime, which throws.
             for (int i = 0; i < clients.Count; i++)
@@ -94,7 +98,7 @@ public class TunnelNode
 
     private void ConnectCallback(IAsyncResult ar)
     {
-        if (!running) return;
+        if (running.Token.IsCancellationRequested) return;
 
         try
         {
