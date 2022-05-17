@@ -11,21 +11,21 @@ public class Client
 {
     public bool Connected = true;
     public readonly int Id;
-    public long LastUdpRecvTime = DateTime.UtcNow.Ticks;
+    public long LastUdpReceivedTime = DateTime.UtcNow.Ticks;
     //TODO: assigned but not used. Safe to be removed?
-    public long LastUdpSendTime;
-    public long LastUdpPingTime;
-    public long LastUdpSendAckTime;
+    private long LastUdpSendTime;
+    private long LastUdpPingTime;
+    private long LastUdpSendAckTime;
     public TcpClient TCPClient;
     public IPEndPoint UdpEndpoint;
-    public readonly byte[] Buffer = new byte[1500];
-    public readonly StreamRingBuffer TxQueue = new StreamRingBuffer(16 * 1024 * 1024);
-    public readonly FutureDataStore FutureDataStore = new FutureDataStore();
+    private readonly byte[] Buffer = new byte[1500];
+    private readonly StreamRingBuffer TxQueue = new StreamRingBuffer(16 * 1024 * 1024);
+    private readonly FutureDataStore FutureDataStore = new FutureDataStore();
     public readonly TokenBucket Bucket;
-    private long currentRecvPos;
+    private long currentReceivedPos;
     private long currentSendPos;
     private long lastWriteResetTime;
-    private long lastUdpRecvAckTime;
+    private long lastUdpReceivedAckTime;
     private const long TIMEOUT = 10 * TimeSpan.TicksPerSecond;
     private const long PING = 2 * TimeSpan.TicksPerSecond;
     private const long ACK_TIME = 10 * TimeSpan.TicksPerMillisecond;
@@ -64,7 +64,7 @@ public class Client
             //Disconnect if we hit the timeout
             if (NodeOptions.ConnectionType == ConnectionTypes.TCP)
             {
-                if ((currentTime - LastUdpRecvTime) > TIMEOUT)
+                if ((currentTime - LastUdpReceivedTime) > TIMEOUT)
                     Disconnect("UDP Receive Timeout");
             }
 
@@ -100,7 +100,7 @@ public class Client
 
         LastUdpSendTime = currentTime;
         LastUdpSendAckTime = currentTime;
-        Ack ack = new Ack(Id, currentRecvPos, $"end{LocalTcpEndpoint}");
+        Ack ack = new Ack(Id, currentReceivedPos, $"end{LocalTcpEndpoint}");
 
         udpConnection.Send(ack, UdpEndpoint);
     }
@@ -109,7 +109,7 @@ public class Client
     {
         if (ack.StreamAck <= ackSafe) return;
 
-        lastUdpRecvAckTime = DateTime.UtcNow.Ticks;
+        lastUdpReceivedAckTime = DateTime.UtcNow.Ticks;
         ackSafe = ack.StreamAck;
     }
 
@@ -143,11 +143,11 @@ public class Client
         else
         {
             //We have a lot of data to send, so let's wait for Ack's to stop changing before doing a position reset.
-            if ((currentTime - lastUdpRecvAckTime) > (50 * TimeSpan.TicksPerMillisecond))
+            if ((currentTime - lastUdpReceivedAckTime) > (50 * TimeSpan.TicksPerMillisecond))
             {
                 //Bias to let the acks flow again, and also build up data in the remote buffer
                 lastWriteResetTime = currentTime;
-                lastUdpRecvAckTime = currentTime + (4 * Latency * TimeSpan.TicksPerMillisecond);
+                lastUdpReceivedAckTime = currentTime + (4 * Latency * TimeSpan.TicksPerMillisecond);
                 currentSendPos = TxQueue.StreamReadPos;
             }
         }
@@ -166,7 +166,7 @@ public class Client
         bytesToWrite = bytesToWrite.LimitTo(upperLimit);
 
         //Send data
-        Data data = new Data(Id, currentSendPos, currentRecvPos, new byte[bytesToWrite], $"end{LocalTcpEndpoint}");
+        Data data = new Data(Id, currentSendPos, currentReceivedPos, new byte[bytesToWrite], $"end{LocalTcpEndpoint}");
         TxQueue.Read(data.TCPData, 0, currentSendPos, (int)bytesToWrite);
         LastUdpSendAckTime = currentTime;
         LastUdpSendTime = currentTime;
@@ -179,38 +179,38 @@ public class Client
     {
         if (data.StreamAck > ackSafe)
         {
-            lastUdpRecvAckTime = DateTime.UtcNow.Ticks;
+            lastUdpReceivedAckTime = DateTime.UtcNow.Ticks;
             ackSafe = data.StreamAck;
         }
 
         //Data from the past
-        if ((data.StreamPos + data.TCPData.Length) <= currentRecvPos)
+        if ((data.StreamPos + data.TCPData.Length) <= currentReceivedPos)
         {
-            if ((data.StreamPos + data.TCPData.Length) == currentRecvPos)
+            if ((data.StreamPos + data.TCPData.Length) == currentReceivedPos)
                 SendAck(true);
 
             return;
         }
 
         //Data in the future
-        if (data.StreamPos > currentRecvPos)
+        if (data.StreamPos > currentReceivedPos)
         {
             FutureDataStore.StoreData(data);
             return;
         }
 
         //Exact packet we need, include partial matches
-        int offset = (int)(currentRecvPos - data.StreamPos);
+        int offset = (int)(currentReceivedPos - data.StreamPos);
         TCPClient.GetStream().Write(data.TCPData, offset, data.TCPData.Length - offset);
-        currentRecvPos += data.TCPData.Length - offset;
+        currentReceivedPos += data.TCPData.Length - offset;
 
         //Handle out of order data
         Data future;
-        while ((future = FutureDataStore.GetData(currentRecvPos)) != null)
+        while ((future = FutureDataStore.GetData(currentReceivedPos)) != null)
         {
-            offset = (int)(currentRecvPos - future.StreamPos);
+            offset = (int)(currentReceivedPos - future.StreamPos);
             TCPClient.GetStream().Write(future.TCPData, offset, future.TCPData.Length - offset);
-            currentRecvPos += future.TCPData.Length - offset;
+            currentReceivedPos += future.TCPData.Length - offset;
         }
         SendAck(false);
     }
@@ -230,7 +230,7 @@ public class Client
 
             TxQueue.Write(Buffer, 0, bytesRead);
             SendEvent.Set();
-            //If our txqueue is full we need to wait before we can write to it.
+            //If our txQueue is full we need to wait before we can write to it.
             while (TxQueue.AvailableWrite < Buffer.Length)
             {
                 if (!Connected) return;

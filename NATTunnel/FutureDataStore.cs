@@ -21,27 +21,27 @@ public class FutureDataStore
         }
     }
 
-    public Data GetData(long currentRecvPos)
+    public Data GetData(long currentReceivedPosition)
     {
         //Deletes all data from the past
-        SetReceivePos(currentRecvPos);
+        SetReceivePos(currentReceivedPosition);
 
         if (futureData.Count <= 0) return null;
 
         Data candidate = futureData.Values[0];
-        if (candidate.StreamPos > currentRecvPos) return null;
+        if (candidate.StreamPos > currentReceivedPosition) return null;
 
         //We have current data!
         futureData.Remove(candidate.StreamPos);
         return candidate;
     }
 
-    private void SetReceivePos(long currentRecvPos)
+    private void SetReceivePos(long currentReceivedPosition)
     {
         while (futureData.Count > 0)
         {
             Data d = futureData.Values[0];
-            if ((d.StreamPos + d.TCPData.Length) <= currentRecvPos)
+            if ((d.StreamPos + d.TCPData.Length) <= currentReceivedPosition)
                 futureData.Remove(d.StreamPos);
             else
                 return;

@@ -361,17 +361,17 @@ public static class Config
     {
         if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
         {
-            string nattunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + "/NATTunnel";
-            Directory.CreateDirectory(nattunnelDir);
-            return nattunnelDir + "/config.txt";
+            string natTunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + "/NATTunnel";
+            Directory.CreateDirectory(natTunnelDir);
+            return natTunnelDir + "/config.txt";
         }
 
-        // Special case for macos, because the applicationdata folder is currently bugged on macos+.net
+        // Special case for macos, because the applicationData folder is currently bugged on macos+.net
         if (OperatingSystem.IsMacOS())
         {
-            string nattunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/Library/Application Support/NATTunnel";
-            Directory.CreateDirectory(nattunnelDir);
-            return nattunnelDir + "/config.txt";
+            string natTunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/Library/Application Support/NATTunnel";
+            Directory.CreateDirectory(natTunnelDir);
+            return natTunnelDir + "/config.txt";
         }
 
         return null;

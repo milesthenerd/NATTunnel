@@ -139,7 +139,7 @@ public class TunnelNode
             if (clientMapping.ContainsKey(clientID))
             {
                 Client client = clientMapping[clientID];
-                client.LastUdpRecvTime = DateTime.UtcNow.Ticks;
+                client.LastUdpReceivedTime = DateTime.UtcNow.Ticks;
             }
         }
 

@@ -56,6 +56,8 @@ public static class MediationClient
         // Windows-specific udpClient switch
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
+            // ReSharper disable once IdentifierTypo - taken from here:
+            // https://docs.microsoft.com/en-us/windows/win32/winsock/winsock-ioctls#sio_udp_connreset-opcode-setting-i-t3
             const int SIO_UDP_CONNRESET = -1744830452;
             udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
         }
@@ -264,7 +266,7 @@ public static class MediationClient
 
             if (Equals(listenEndpoint.Address, endpoint.Address))
             {
-                //TODO: why do we need to constantly reget the ip on where to send stuff to?
+                //TODO: why do we need to constantly re-get the ip on where to send stuff to?
                 string[] msgArray = Encoding.ASCII.GetString(receiveBuffer).Split(":");
 
                 receivedIp = IPAddress.Parse(msgArray[0]);
@@ -287,7 +289,7 @@ public static class MediationClient
             }
 
             if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
-                //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holepunchcount < 5 from above, because receivedIP is null
+                //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holePunchCount < 5 from above, because receivedIP is null
                 //https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
                 udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
 
