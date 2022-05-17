@@ -51,10 +51,14 @@ public class Client
         Bucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond, parentBucket);
 
         clientThread = new Thread(Loop) { Name = $"ClientThread-{Id}" };
+    }
+
+    public void Start()
+    {
         clientThread.Start();
     }
 
-    public void Loop()
+    private void Loop()
     {
         while (Connected)
         {
@@ -212,7 +216,7 @@ public class Client
         SendAck(false);
     }
 
-    public void TCPReceiveCallback(IAsyncResult ar)
+    private void TCPReceiveCallback(IAsyncResult ar)
     {
         try
         {
@@ -259,7 +263,7 @@ public class Client
             Console.WriteLine($"Exception during disconnecting: {e.Message}: {e.StackTrace}");
         }
 
-        if (reason == null || UdpEndpoint == null) return;
+        if (reason is null || UdpEndpoint is null) return;
 
         Disconnect dis = new Disconnect(Id, reason, $"end{LocalTcpEndpoint}");
         udpConnection.Send(dis, UdpEndpoint);

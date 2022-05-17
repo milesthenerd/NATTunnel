@@ -105,6 +105,7 @@ public class TunnelNode
             UdpConnection udpPassthroughConnection = new UdpConnection(udpPassthrough, ReceiveCallback, true);
             udpPassthroughConnection.Start();
             Client client = new Client(newID, udpConnection, udpPassthrough, tcp, connectionBucket);
+            client.Start();
             Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
             ConnectUDPClient(client);
             clients.Add(client);
@@ -164,6 +165,7 @@ public class TunnelNode
                         UdpConnection udpPassthroughConnection = new UdpConnection(udpPassthrough, ReceiveCallback, true);
                         udpPassthroughConnection.Start();
                         client = new Client(request.Id, udpConnection, udpPassthrough, tcp, connectionBucket);
+                        client.Start();
                         //add mapping for local tcp client and remote IP
                         clients.Add(client);
                         clientMapping.Add(client.Id, client);
