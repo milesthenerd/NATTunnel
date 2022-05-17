@@ -27,17 +27,19 @@ public class UdpConnection
         if (passthrough)
         {
             recvThread = new Thread(ReceivePassthroughLoop) { Name = "UdpConnection-PassthroughReceive" };
-            recvThread.Start();
             sendThread = new Thread(SendLoop) { Name = "UdpConnection-Send" };
-            sendThread.Start();
         }
         else
         {
             recvThread = new Thread(ReceiveLoop) { Name = "UdpConnection-Receive" };
-            recvThread.Start();
             sendThread = new Thread(SendLoop) { Name = "UdpConnection-Send" };
-            sendThread.Start();
         }
+    }
+
+    public void Start()
+    {
+        recvThread.Start();
+        sendThread.Start();
     }
 
     public void Stop()

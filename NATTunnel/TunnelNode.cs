@@ -37,6 +37,7 @@ public class TunnelNode
             SetupUDPSocket(0);
         }
         udpConnection = new UdpConnection(udp, ReceiveCallback);
+        udpConnection.Start();
     }
 
     public void Start()
@@ -102,6 +103,7 @@ public class TunnelNode
             udpPassthrough.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
             int newID = random.Next();
             UdpConnection udpPassthroughConnection = new UdpConnection(udpPassthrough, ReceiveCallback, true);
+            udpPassthroughConnection.Start();
             Client client = new Client(newID, udpConnection, udpPassthrough, tcp, connectionBucket);
             Console.WriteLine($"New TCP Client {client.Id} from {tcp.Client.RemoteEndPoint}");
             ConnectUDPClient(client);
@@ -160,6 +162,7 @@ public class TunnelNode
                         Socket udpPassthrough = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp) { DualMode = true };
                         udpPassthrough.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
                         UdpConnection udpPassthroughConnection = new UdpConnection(udpPassthrough, ReceiveCallback, true);
+                        udpPassthroughConnection.Start();
                         client = new Client(request.Id, udpConnection, udpPassthrough, tcp, connectionBucket);
                         //add mapping for local tcp client and remote IP
                         clients.Add(client);
