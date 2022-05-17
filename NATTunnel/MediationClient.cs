@@ -9,6 +9,7 @@ using System.Timers;
 using Timer = System.Timers.Timer;
 using NATTunnel.Common;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace NATTunnel;
 
@@ -21,8 +22,8 @@ public static class MediationClient
     private static NetworkStream tcpClientStream;
     //TODO: make all of these Tasks, and use proper cancellation tokens.
     private static Thread tcpClientThread;
-    private static Thread udpClientThread;
-    private static Thread udpServerThread;
+    private static Task udpClientTask;
+    private static Task udpServerTask;
     private static readonly IPEndPoint endpoint;
     private static readonly IPEndPoint programEndpoint;
     private static IPAddress intendedIp;
@@ -184,8 +185,8 @@ public static class MediationClient
             Console.WriteLine(e);
         }
         //Begin listening
-        udpClientThread = new Thread(UdpClientListenLoop);
-        udpClientThread.Start();
+        udpClientTask = new Task(UdpClientListenLoop);
+        udpClientTask.Start();
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
         {
@@ -210,8 +211,8 @@ public static class MediationClient
             Console.WriteLine(e);
         }
         //Begin listening
-        udpServerThread = new Thread(UdpServerListenLoop);
-        udpServerThread.Start();
+        udpServerTask = new Task(UdpServerListenLoop);
+        udpServerTask.Start();
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
         {
@@ -360,7 +361,7 @@ public static class MediationClient
                     tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, 5001));
 
                     NetworkStream tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
-                    Thread tcpClientPassthroughThread = new Thread(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
+                    Task tcpClientPassthroughThread = new Task(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
                     tcpClientPassthroughThread.Start();
                     connected = true;
                 }

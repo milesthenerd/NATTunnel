@@ -88,7 +88,7 @@ public class TunnelNode
                 clients.Remove(client);
             }
 
-            Thread.Sleep(100);
+            Task.Delay(100);
         }
     }
 

@@ -13,7 +13,7 @@ public class UdpConnection
     //TODO: make this work properly so it quits out everything else.
     public bool Running = true;
     private readonly Socket udpSocket;
-    //TODO: use of the threads?
+    //TODO: convert to tasks
     private readonly Thread receiveThread;
     private readonly Thread sendThread;
     private readonly AutoResetEvent autoResetEvent = new AutoResetEvent(false);

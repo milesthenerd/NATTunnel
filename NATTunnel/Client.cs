@@ -3,6 +3,7 @@ using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Tasks;
 using NATTunnel.Common.Messages.Types;
 
 namespace NATTunnel;
@@ -30,7 +31,7 @@ public class Client
     private const long ACK_TIME = 10 * TimeSpan.TicksPerMillisecond;
     private readonly UdpConnection udpConnection;
     private long ackSafe;
-    private Thread clientThread;
+    private readonly Task clientThread;
     public readonly AutoResetEvent SendEvent = new AutoResetEvent(false);
     public int Latency;
     public readonly IPEndPoint LocalTcpEndpoint;
@@ -50,7 +51,7 @@ public class Client
         int rateBytesPerSecond = NodeOptions.UploadSpeed * 1024;
         Bucket = new TokenBucket(rateBytesPerSecond, rateBytesPerSecond, parentBucket);
 
-        clientThread = new Thread(Loop) { Name = $"ClientThread-{Id}" };
+        clientThread = new Task(Loop);
     }
 
     public void Start()
@@ -158,7 +159,7 @@ public class Client
         long bytesToWrite = TxQueue.StreamWritePos - currentSendPos;
         if (bytesToWrite == 0 || Bucket.CurrentBytes < 500)
         {
-            Thread.Sleep(10);
+            Task.Delay(10);
             return;
         }
 
@@ -236,7 +237,7 @@ public class Client
             {
                 if (!Connected) return;
 
-                Thread.Sleep(10);
+                Task.Delay(10);
             }
             TCPClient.GetStream().BeginRead(Buffer, 0, Buffer.Length, TCPReceiveCallback, null);
         }
