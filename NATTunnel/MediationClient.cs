@@ -72,7 +72,8 @@ public static class MediationClient
 
     public static void AddTCP(IPEndPoint localEndpoint)
     {
-        mappingLocalTCPtoRemote.Add(localEndpoint, mostRecentEndPoint);
+        if (!mappingLocalTCPtoRemote.ContainsKey(localEndpoint))
+            mappingLocalTCPtoRemote.Add(localEndpoint, mostRecentEndPoint);
     }
 
     public static void RemoveTCP(IPEndPoint localEndpoint)
@@ -82,8 +83,11 @@ public static class MediationClient
 
     public static void AddUDP(IPEndPoint localEndpoint)
     {
-        mappingLocalUDPtoRemote.Add(localEndpoint, mostRecentEndPoint);
-        mappingRemoteUDPtoLocal.Add(mostRecentEndPoint, localEndpoint);
+        if (!mappingLocalUDPtoRemote.ContainsKey(localEndpoint))
+            mappingLocalUDPtoRemote.Add(localEndpoint, mostRecentEndPoint);
+
+        if (!mappingRemoteUDPtoLocal.ContainsKey(mostRecentEndPoint))
+            mappingRemoteUDPtoLocal.Add(mostRecentEndPoint, localEndpoint);
     }
 
     public static void RemoveUDP(IPEndPoint localEndpoint)
@@ -359,7 +363,7 @@ public static class MediationClient
                 {
                     TcpClient tcpClientPassthrough = new TcpClient();
 
-                    tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, 5001));
+                    tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, NodeOptions.LocalPort));
 
                     NetworkStream tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
                     Task tcpClientPassthroughThread = new Task(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
