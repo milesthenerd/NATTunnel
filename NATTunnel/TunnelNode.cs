@@ -208,7 +208,7 @@ public class TunnelNode
 
             case NewConnectionReply ncr:
             {
-                if (!NodeOptions.IsServer) break;
+                if (NodeOptions.IsServer) break;
 
                 if (ncr.ProtocolVersion != Header.PROTOCOL_VERSION)
                 {
