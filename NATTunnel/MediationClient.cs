@@ -4,6 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Timers;
 using Timer = System.Timers.Timer;
@@ -40,6 +41,7 @@ public static class MediationClient
     private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingRemoteUDPtoLocal = new Dictionary<IPEndPoint, IPEndPoint>();
     private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
     private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
+    private static NATType natType = NATType.Unknown;
 
     static MediationClient()
     {
@@ -161,17 +163,6 @@ public static class MediationClient
         tcpClientStream = tcpClient.GetStream();
         tcpClientTask = new Task(TcpListenLoop);
         tcpClientTask.Start();
-
-        if (isServer)
-        {
-            UdpServer();
-            Console.WriteLine($"Server forwarding {NodeOptions.Endpoint} to UDP port {NodeOptions.LocalPort}");
-        }
-        else
-        {
-            UdpClient();
-            Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
-        }
     }
 
     private static void UdpClient()
@@ -284,8 +275,8 @@ public static class MediationClient
             if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
             {
                 intendedPort = receivedPort;
-                Console.WriteLine(intendedIp);
-                Console.WriteLine(intendedPort);
+                Console.WriteLine($"intendedIp:{intendedIp}");
+                Console.WriteLine($"intendedPort:{intendedPort}");
                 if (intendedPort != 0)
                 {
                     byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
@@ -398,8 +389,8 @@ public static class MediationClient
             if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
             {
                 intendedPort = receivedPort;
-                Console.WriteLine(intendedIp);
-                Console.WriteLine(intendedPort);
+                Console.WriteLine($"intendedIp:{intendedIp}");
+                Console.WriteLine($"intendedPort:{intendedPort}");
                 if (intendedPort != 0)
                 {
                     byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
@@ -521,7 +512,47 @@ public static class MediationClient
                 byte[] receiveBuffer = new byte[tcpClient.ReceiveBufferSize];
                 //TODO: sometimes fails here
                 int bytesRead = tcpClientStream.Read(receiveBuffer, 0, tcpClient.ReceiveBufferSize);
-                Console.WriteLine("Received: " + Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead));
+                string receivedString = Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead);
+                MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
+                Console.WriteLine("Received: " + receivedString);
+
+                switch(receivedMessage.ID)
+                {
+                    case MediationMessageType.Connected:
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest, ((IPEndPoint)udpClient.Client.LocalEndPoint).Port);
+                        string serializedMessage = JsonSerializer.Serialize<MediationMessage>(message);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(serializedMessage);
+                        Console.WriteLine(serializedMessage);
+                        tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                    }
+                    break;
+                    case MediationMessageType.NATTestBegin:
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.NATTest);
+                        string serializedMessage = JsonSerializer.Serialize<MediationMessage>(message);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(serializedMessage);
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, 6511));
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, 6512));
+                    }
+                    break;
+                    case MediationMessageType.NATTypeResponse:
+                    {
+                        Console.WriteLine(receivedMessage.NATType);
+                        natType = receivedMessage.NATType;
+                        if (isServer)
+                        {
+                            UdpServer();
+                            Console.WriteLine($"Server forwarding {NodeOptions.Endpoint} to UDP port {NodeOptions.LocalPort}");
+                        }
+                        else
+                        {
+                            UdpClient();
+                            Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
+                        }
+                    }
+                    break;
+                }
             }
             catch (Exception e)
             {
