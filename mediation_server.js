@@ -3,10 +3,10 @@ var tcp = require('net');
 const { Buffer } = require('buffer');
 
 const nat_types = {
-    Unknown: -1,
     DirectMapping: 0,
     Restricted: 1,
-    Symmetric: 2
+    Symmetric: 2,
+    Unknown: 3
 };
 
 const msg_types = {
@@ -14,7 +14,11 @@ const msg_types = {
     NATTypeRequest: 1,
     NATTestBegin: 2,
     NATTest: 3,
-    NATTypeResponse: 4
+    NATTypeResponse: 4,
+    KeepAlive: 5,
+    ConnectionRequest: 6,
+    ConnectionBegin: 7,
+    ServerNotAvailable: 8
 };
 
 var sockets = [];
@@ -29,11 +33,42 @@ var tcp_server = tcp.createServer(function(socket){
         switch(message.ID){
             case msg_types.NATTypeRequest:
                 for(let i=0; i<sockets.length; i++){
-                    if(sockets[i][0] == socket){
-                        sockets[i][5] = message.LocalPort;
+                    if(sockets[i].socket == socket){
+                        sockets[i].localPort = message.LocalPort;
                     }
                 }
                 socket.write(Buffer.from(JSON.stringify({"ID": msg_types.NATTestBegin})));
+            break;
+            case msg_types.ConnectionRequest:
+                var contains_requested_ip = false;
+                var requested_ip = message.ServerEndpointString;
+                console.log(requested_ip);
+                for(let i=0; i<sockets.length; i++){
+                    if(requested_ip.includes(sockets[i].ip)){
+                        contains_requested_ip = true;
+                        for(let f=0; f<udp_connection_info.length; f++){
+                            if(requested_ip.includes(udp_connection_info[f].ip)){
+                                var port = udp_connection_info[f].port;
+                                socket.write(Buffer.from(JSON.stringify({
+                                    "ID": msg_types.ConnectionBegin,
+                                    "ServerEndpointString": `${sockets[i].ip}:${port}`
+                                })));
+                                console.log(JSON.stringify({
+                                    "ID": msg_types.ConnectionBegin,
+                                    "ServerEndpointString": `${sockets[i].ip}:${port}`
+                                }));
+                            }
+                        }
+                    }
+                }
+                if(!contains_requested_ip){
+                    socket.write(Buffer.from(JSON.stringify({
+                        "ID": msg_types.ServerNotAvailable
+                    })));
+                    console.log(JSON.stringify({
+                        "ID": msg_types.ServerNotAvailable
+                    }));
+                }
             break;
         }
     });
@@ -41,9 +76,9 @@ var tcp_server = tcp.createServer(function(socket){
     socket.on('close', function(){
         console.log("Someone disconnected");
         for(let i=0; i<sockets.length; i++){
-            if(sockets[i][0] == socket){
+            if(sockets[i].socket == socket){
                 for(let f=0; f<udp_connection_info.length; f++){
-                    if(udp_connection_info[f][0] == sockets[i][1]){
+                    if(udp_connection_info[f].ip == sockets[i].ip){
                         udp_connection_info.splice(f, 1);
                         console.log("udp splice worked???");
                     }
@@ -79,7 +114,16 @@ tcp_server.on('listening', function(){
 // print on connection
 tcp_server.on('connection', function(socket){
     console.log(`Received connection from ${socket.remoteAddress}:${socket.remotePort}`);
-    sockets.push([socket, socket.remoteAddress, socket.remotePort, timeout, -1, 0, 0, 0]);
+    sockets.push({
+        socket: socket,
+        ip: socket.remoteAddress,
+        tcpPort: socket.remotePort,
+        timeout: timeout,
+        natType: nat_types.Unknown,
+        localPort: 0,
+        externalPortOne: 0,
+        externalPortTwo: 0
+    });
     console.log(sockets);
 });
 
@@ -107,41 +151,37 @@ udp_server.on('message', function(msg, info){
     console.log(`Received ${msg.length} bytes from ${info.address}:${info.port}`);
 
     for(let i=0; i<sockets.length; i++){
-        if(sockets[i][1] == info.address){
-            sockets[i][3] = timeout;
+        if(sockets[i].ip == info.address){
+            sockets[i].timeout = timeout;
         }
     }
 
     var add_ip = true;
 
     for(let i=0; i<udp_connection_info.length; i++){
-        if(udp_connection_info[i][0] == info.address){
+        if(udp_connection_info[i].ip == info.address){
             add_ip = false;
         }
     }
 
     if(add_ip){
-        udp_connection_info.push([info.address, info.port]);
+        udp_connection_info.push({ip: info.address, port: info.port});
     }
 
-    var contains_intended_ip = false;
-    var intended_ip = "";
-    var intended_port = "";
-    var str = String(msg);
+    var message;
+    try {
+        message = JSON.parse(msg);
+    } catch (e) {
+        message = false;
+    }
 
-    for(let i=0; i<sockets.length; i++){
-        if(str.includes(sockets[i][1])){
-            contains_intended_ip = true;
-            intended_ip = sockets[i][1];
-            intended_port = sockets[i][2];
-            for(let d=0; d<udp_connection_info.length; d++){
-                if(udp_connection_info[d][0] == intended_ip){
-                    intended_port = udp_connection_info[d][1];
-                }
-            }
+    if(message != false){
+        switch(message.ID){
+            
         }
     }
 
+    /*
     if(!contains_intended_ip){
         intended_ip = info.address;
         intended_port = info.port.toString();
@@ -156,7 +196,7 @@ udp_server.on('message', function(msg, info){
             }
         });
         
-        var buf = Buffer.from(`${intended_ip}:${intended_port}`);
+        buf = Buffer.from(`${intended_ip}:${intended_port}`);
 
         udp_server.send(buf, info.port, info.address, function(err){
             if(err){
@@ -177,6 +217,7 @@ udp_server.on('message', function(msg, info){
             console.log('Data sent to client');
         }
     });
+    */
 });
 
 // print when server begins listening
@@ -209,12 +250,12 @@ udp_nat_test_server.on('error', function(err){
 udp_nat_test_server.on('message', function(msg, info){
     console.log(`nat test 1 from ${info.address}:${info.port}`);
     for(let i=0; i<sockets.length; i++){
-        if(sockets[i][1] == info.address){
+        if(sockets[i].ip == info.address){
             let message = JSON.parse(msg);
             switch(message.ID){
                 case msg_types.NATTest:
-                    sockets[i][6] = info.port;
-                    check_nat_type(sockets[i][0], sockets[i][5], sockets[i][6], sockets[i][7]);
+                    sockets[i].externalPortOne = info.port;
+                    check_nat_type(sockets[i].socket, sockets[i].localPort, sockets[i].externalPortOne, sockets[i].externalPortTwo);
                 break;
             }
         }
@@ -247,12 +288,12 @@ udp_nat_test_server_2.on('error', function(err){
 udp_nat_test_server_2.on('message', function(msg, info){
     console.log(`nat test 2 from ${info.address}:${info.port}`);
     for(let i=0; i<sockets.length; i++){
-        if(sockets[i][1] == info.address){
+        if(sockets[i].ip == info.address){
             let message = JSON.parse(msg);
             switch(message.ID){
                 case msg_types.NATTest:
-                    sockets[i][7] = info.port;
-                    check_nat_type(sockets[i][0], sockets[i][5], sockets[i][6], sockets[i][7]);
+                    sockets[i].externalPortTwo = info.port;
+                    check_nat_type(sockets[i].socket, sockets[i].localPort, sockets[i].externalPortOne, sockets[i].externalPortTwo);
                 break;
             }
         }
@@ -277,19 +318,19 @@ udp_nat_test_server_2.bind(6512);
 setInterval(function timeout_loop(){
     console.log(sockets.length);
     if(sockets.length > 0){
-        for(let socket=0; socket<sockets.length; socket++){
-            console.log(sockets[socket][3]);
-            if(sockets[socket][3] > 0 && sockets[socket][4] != -1){
-                sockets[socket][3] = sockets[socket][3] - 1;
-                console.log(sockets[socket][3]);
+        for(let i=0; i<sockets.length; i++){
+            console.log(sockets[i].timeout);
+            if(sockets[i].timeout > 0 && sockets[i].natType != nat_types.Unknown){
+                sockets[i].timeout = sockets[i].timeout - 1;
+                console.log(sockets[i].timeout);
             }  
-            if(sockets[socket][3] == 0){
-                for(let udp_socket=0; udp_socket<udp_connection_info.length; udp_socket++){
-                    if(udp_connection_info[udp_socket][0] == sockets[socket][1]){
-                        udp_connection_info.splice(udp_socket, 1);
+            if(sockets[i].timeout == 0){
+                for(let f=0; f<udp_connection_info.length; f++){
+                    if(udp_connection_info[f].ip == sockets[i].ip){
+                        udp_connection_info.splice(f, 1);
                     }
                 }
-                sockets.splice(socket, 1);
+                sockets.splice(i, 1);
                 console.log("timed out");
             }
         }

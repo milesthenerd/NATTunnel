@@ -100,17 +100,17 @@ public static class MediationClient
 
     private static void OnTimedEvent(object source, ElapsedEventArgs e)
     {
+        MediationMessage message = new MediationMessage(MediationMessageType.KeepAlive);
+        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
         //If not connected to remote endpoint, send remote IP to mediator
         if (!connected || isServer)
         {
-            byte[] sendBuffer = Encoding.ASCII.GetBytes(intendedIp.ToString());
             udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
             Console.WriteLine("Sent");
         }
         //If connected to remote endpoint, send keep alive message
         if (connected)
         {
-            byte[] sendBuffer = Encoding.ASCII.GetBytes("hi");
             if (isServer)
             {
                 foreach (IPEndPoint client in connectedClients)
@@ -159,7 +159,6 @@ public static class MediationClient
         if (!tcpClient.Connected)
             return;
 
-        Console.WriteLine("Connected");
         tcpClientStream = tcpClient.GetStream();
         tcpClientTask = new Task(TcpListenLoop);
         tcpClientTask.Start();
@@ -170,6 +169,7 @@ public static class MediationClient
         //Set client intendedIP to remote endpoint IP
         intendedIp = remoteIp;
         //Try to send initial msg to mediator
+        /*
         try
         {
             byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
@@ -179,6 +179,7 @@ public static class MediationClient
         {
             Console.WriteLine(e);
         }
+        */
         //Begin listening
         udpClientTask = new Task(UdpClientListenLoop);
         udpClientTask.Start();
@@ -196,6 +197,7 @@ public static class MediationClient
         //Set client intendedIP to something no client will have
         intendedIp = IPAddress.None;
         //Try to send initial msg to mediator
+        /*
         try
         {
             byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
@@ -205,6 +207,7 @@ public static class MediationClient
         {
             Console.WriteLine(e);
         }
+        */
         //Begin listening
         udpServerTask = new Task(UdpServerListenLoop);
         udpServerTask.Start();
@@ -516,22 +519,29 @@ public static class MediationClient
                 MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
                 Console.WriteLine("Received: " + receivedString);
 
+                static void pollForAvailableServer(object source, ElapsedEventArgs e)
+                {
+                    MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
+                    message.SetServerEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                }
+
                 switch(receivedMessage.ID)
                 {
                     case MediationMessageType.Connected:
                     {
-                        MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest, ((IPEndPoint)udpClient.Client.LocalEndPoint).Port);
-                        string serializedMessage = JsonSerializer.Serialize<MediationMessage>(message);
-                        byte[] sendBuffer = Encoding.ASCII.GetBytes(serializedMessage);
-                        Console.WriteLine(serializedMessage);
+                        MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest);
+                        message.LocalPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        Console.WriteLine(message.Serialize());
                         tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                     }
                     break;
                     case MediationMessageType.NATTestBegin:
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.NATTest);
-                        string serializedMessage = JsonSerializer.Serialize<MediationMessage>(message);
-                        byte[] sendBuffer = Encoding.ASCII.GetBytes(serializedMessage);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, 6511));
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, 6512));
                     }
@@ -549,7 +559,21 @@ public static class MediationClient
                         {
                             UdpClient();
                             Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
+                            MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
+                            message.SetServerEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                         }
+                    }
+                    break;
+                    case MediationMessageType.ServerNotAvailable:
+                    {
+                        Timer recheckAvailability = new Timer(3000)
+                        {
+                            AutoReset = false,
+                            Enabled = true
+                        };
+                        recheckAvailability.Elapsed += pollForAvailableServer;
                     }
                     break;
                 }

@@ -13,7 +13,7 @@ namespace NATTunnel;
 public class TunnelNode
 {
     /// <summary>
-    /// A <see cref="CancellationTokenSource"/> thatt indicates whether the <see cref="TunnelNode"/> should still run.
+    /// A <see cref="CancellationTokenSource"/> that indicates whether the <see cref="TunnelNode"/> should still run.
     /// </summary>
     private readonly CancellationTokenSource running = new CancellationTokenSource();
     private readonly Random random = new Random();
