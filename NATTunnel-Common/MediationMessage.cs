@@ -27,7 +27,7 @@ public class MediationMessage
     ///Server's IP address and port as a string becaause IPEndpoint is not deserializable
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public string ServerEndpointString { get; set; }
+    public string EndpointString { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
@@ -38,14 +38,14 @@ public class MediationMessage
         return JsonSerializer.Serialize<MediationMessage>(this);
     }
 
-    public IPEndPoint GetServerEndpoint()
+    public IPEndPoint GetEndpoint()
     {
-        return IPEndPoint.Parse(ServerEndpointString);
+        return IPEndPoint.Parse(EndpointString);
     }
 
-    public void SetServerEndpoint(IPEndPoint serverEndpoint)
+    public void SetEndpoint(IPEndPoint serverEndpoint)
     {
-        ServerEndpointString = serverEndpoint.ToString();
+        EndpointString = serverEndpoint.ToString();
     }
 }
 /// <summary>
@@ -88,7 +88,11 @@ public enum MediationMessageType
     /// <summary>
     ///Response from the mediation server stating that the specified NATTunnel server is not available
     /// </summary>
-    ServerNotAvailable
+    ServerNotAvailable,
+    /// <summary>
+    ///Packet sent during hole punch attempts
+    /// </summary>
+    HolePunchAttempt
 }
 
 /// <summary>
@@ -111,5 +115,5 @@ public enum NATType
     /// <summary>
     ///Before the type is defined
     /// </summary>
-    Unknown,
+    Unknown = -1
 }

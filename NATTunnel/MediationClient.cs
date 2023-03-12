@@ -27,8 +27,8 @@ public static class MediationClient
     private static Task udpServerTask;
     private static readonly IPEndPoint endpoint;
     private static readonly IPEndPoint programEndpoint;
-    private static IPAddress intendedIp;
-    private static int intendedPort;
+    private static IPAddress targetPeerIp;
+    private static int targetPeerPort;
     private static int localAppPort = 65535;
     private static int holePunchReceivedCount;
     private static bool connected;
@@ -55,7 +55,6 @@ public static class MediationClient
             Environment.Exit(-1);
         }
 
-
         // Windows-specific udpClient switch
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
@@ -70,6 +69,17 @@ public static class MediationClient
         remoteIp = NodeOptions.RemoteIp;
         mediationClientPort = NodeOptions.MediationClientPort;
         isServer = NodeOptions.IsServer;
+
+        //Try to send initial msg to mediator
+        try
+        {
+            byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
+            udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine(e);
+        }
     }
 
     public static void AddTCP(IPEndPoint localEndpoint)
@@ -120,7 +130,7 @@ public static class MediationClient
             }
             else
             {
-                udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
+                udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
             }
             Console.WriteLine("Keep alive");
         }
@@ -166,20 +176,8 @@ public static class MediationClient
 
     private static void UdpClient()
     {
-        //Set client intendedIP to remote endpoint IP
-        intendedIp = remoteIp;
-        //Try to send initial msg to mediator
-        /*
-        try
-        {
-            byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-            udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e);
-        }
-        */
+        //Set client targetPeerIp to remote endpoint IP
+        targetPeerIp = remoteIp;
         //Begin listening
         udpClientTask = new Task(UdpClientListenLoop);
         udpClientTask.Start();
@@ -194,20 +192,8 @@ public static class MediationClient
 
     private static void UdpServer()
     {
-        //Set client intendedIP to something no client will have
-        intendedIp = IPAddress.None;
-        //Try to send initial msg to mediator
-        /*
-        try
-        {
-            byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-            udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e);
-        }
-        */
+        //Set client targetPeerIp to something no client will have
+        targetPeerIp = IPAddress.None;
         //Begin listening
         udpServerTask = new Task(UdpServerListenLoop);
         udpServerTask.Start();
@@ -239,7 +225,7 @@ public static class MediationClient
 
             Console.WriteLine(localAppPort);
 
-            if (Equals(listenEndpoint.Address, intendedIp))
+            if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
                 holePunchReceivedCount++;
@@ -275,25 +261,25 @@ public static class MediationClient
                     receivedPort = Int32.Parse(msgArray[1]);
             }
 
-            if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
+            if (Equals(receivedIp, targetPeerIp) && holePunchReceivedCount < 5)
             {
-                intendedPort = receivedPort;
-                Console.WriteLine($"intendedIp:{intendedIp}");
-                Console.WriteLine($"intendedPort:{intendedPort}");
-                if (intendedPort != 0)
+                //targetPeerPort = receivedPort;
+                Console.WriteLine($"targetPeerIp:{targetPeerIp}");
+                Console.WriteLine($"targetPeerPort:{targetPeerPort}");
+                if (targetPeerPort != 0)
                 {
                     byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
+                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     Console.WriteLine("punching");
                 }
             }
 
             if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
-                //TODO: weird consistent way to crash here because intendedPort is 0, because it didn't into the if holePunchCount < 5 from above, because receivedIP is null
+                //TODO: weird consistent way to crash here because targetPeerPort is 0, because it didn't into the if holePunchCount < 5 from above, because receivedIP is null
                 //https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
-                udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
+                udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
 
-            if (!connected || !Equals(listenEndpoint.Address, intendedIp)) continue;
+            if (!connected || !Equals(listenEndpoint.Address, targetPeerIp)) continue;
 
             try
             {
@@ -342,14 +328,14 @@ public static class MediationClient
                 localAppPort = listenEndpoint.Port;
 
 
-            if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && Equals(listenEndpoint.Address, intendedIp))
+            if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && Equals(listenEndpoint.Address, targetPeerIp))
             {
                 connectedClients.Add(listenEndpoint);
                 timeoutClients.Add(listenEndpoint, 5);
                 Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
             }
 
-            if (Equals(listenEndpoint.Address, intendedIp))
+            if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
                 holePunchReceivedCount++;
@@ -369,35 +355,15 @@ public static class MediationClient
             IPAddress receivedIp = null;
             int receivedPort = 0;
 
-            if (listenEndpoint.Address.ToString() == endpoint.Address.ToString())
+            if (Equals(receivedIp, targetPeerIp) && holePunchReceivedCount < 5)
             {
-                string[] msgArray = Encoding.ASCII.GetString(receiveBuffer).Split(":");
-
-                receivedIp = IPAddress.Parse(msgArray[0]);
-                receivedPort = 0;
-                if (msgArray.Length > 1) receivedPort = Int32.Parse(msgArray[1]);
-
-                if (msgArray.Length > 2)
-                {
-                    string type = msgArray[2];
-                    if (type == "clientreq" && !Equals(intendedIp, receivedIp) && intendedPort != receivedPort)
-                    {
-                        intendedIp = receivedIp;
-                        intendedPort = receivedPort;
-                        holePunchReceivedCount = 0;
-                    }
-                }
-            }
-
-            if (Equals(receivedIp, intendedIp) && holePunchReceivedCount < 5)
-            {
-                intendedPort = receivedPort;
-                Console.WriteLine($"intendedIp:{intendedIp}");
-                Console.WriteLine($"intendedPort:{intendedPort}");
-                if (intendedPort != 0)
+                targetPeerPort = receivedPort;
+                Console.WriteLine($"targetPeerIp:{targetPeerIp}");
+                Console.WriteLine($"targetPeerPort:{targetPeerPort}");
+                if (targetPeerPort != 0)
                 {
                     byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(intendedIp, intendedPort));
+                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     Console.WriteLine("punching");
                 }
             }
@@ -519,12 +485,22 @@ public static class MediationClient
                 MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
                 Console.WriteLine("Received: " + receivedString);
 
-                static void pollForAvailableServer(object source, ElapsedEventArgs e)
+                void PollForAvailableServer(object source, ElapsedEventArgs e)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
-                    message.SetServerEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                    message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                }
+
+                void TryConnect(object source, ElapsedEventArgs e)
+                {
+                    if(holePunchReceivedCount >= 5)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    }
                 }
 
                 switch(receivedMessage.ID)
@@ -560,10 +536,25 @@ public static class MediationClient
                             UdpClient();
                             Console.WriteLine($"Client forwarding TCP port {NodeOptions.LocalPort} to UDP server {NodeOptions.Endpoint}");
                             MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
-                            message.SetServerEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                            message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                            message.NATType = natType;
                             byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                             tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                         }
+                    }
+                    break;
+                    case MediationMessageType.ConnectionBegin:
+                    {
+                        holePunchReceivedCount = 0;
+                        IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                        targetPeerIp = targetPeerEndpoint.Address;
+                        targetPeerPort = targetPeerEndpoint.Port;
+                        Timer connectionAttempt = new Timer(1000)
+                        {
+                            AutoReset = true,
+                            Enabled = true
+                        };
+                        connectionAttempt.Elapsed += TryConnect;
                     }
                     break;
                     case MediationMessageType.ServerNotAvailable:
@@ -573,7 +564,7 @@ public static class MediationClient
                             AutoReset = false,
                             Enabled = true
                         };
-                        recheckAvailability.Elapsed += pollForAvailableServer;
+                        recheckAvailability.Elapsed += PollForAvailableServer;
                     }
                     break;
                 }

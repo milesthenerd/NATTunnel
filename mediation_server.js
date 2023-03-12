@@ -6,7 +6,7 @@ const nat_types = {
     DirectMapping: 0,
     Restricted: 1,
     Symmetric: 2,
-    Unknown: 3
+    Unknown: -1
 };
 
 const msg_types = {
@@ -18,7 +18,8 @@ const msg_types = {
     KeepAlive: 5,
     ConnectionRequest: 6,
     ConnectionBegin: 7,
-    ServerNotAvailable: 8
+    ServerNotAvailable: 8,
+    HolePunchAttempt: 9
 };
 
 var sockets = [];
@@ -41,21 +42,39 @@ var tcp_server = tcp.createServer(function(socket){
             break;
             case msg_types.ConnectionRequest:
                 var contains_requested_ip = false;
-                var requested_ip = message.ServerEndpointString;
+                var requested_ip = message.EndpointString;
                 console.log(requested_ip);
                 for(let i=0; i<sockets.length; i++){
                     if(requested_ip.includes(sockets[i].ip)){
                         contains_requested_ip = true;
                         for(let f=0; f<udp_connection_info.length; f++){
                             if(requested_ip.includes(udp_connection_info[f].ip)){
-                                var port = udp_connection_info[f].port;
+                                let port = udp_connection_info[f].port;
+                                //Tell client the endpoint of the server
                                 socket.write(Buffer.from(JSON.stringify({
                                     "ID": msg_types.ConnectionBegin,
-                                    "ServerEndpointString": `${sockets[i].ip}:${port}`
+                                    "EndpointString": `${sockets[i].ip}:${port}`,
+                                    "NATType": sockets[i].natType
                                 })));
                                 console.log(JSON.stringify({
                                     "ID": msg_types.ConnectionBegin,
-                                    "ServerEndpointString": `${sockets[i].ip}:${port}`
+                                    "EndpointString": `${sockets[i].ip}:${port}`,
+                                    "NATType": sockets[i].natType
+                                }));
+                            }
+
+                            if(socket.remoteAddress.includes(udp_connection_info[f].ip)){
+                                //Tell server the endpoint of the client
+                                let port = udp_connection_info[f].port;
+                                sockets[i].socket.write(Buffer.from(JSON.stringify({
+                                    "ID": msg_types.ConnectionBegin,
+                                    "EndpointString": `${socket.remoteAddress}:${port}`,
+                                    "NATType": message.NATType
+                                })));
+                                console.log(JSON.stringify({
+                                    "ID": msg_types.ConnectionBegin,
+                                    "EndpointString": `${socket.remoteAddress}:${port}`,
+                                    "NATType": message.NATType
                                 }));
                             }
                         }
@@ -255,7 +274,7 @@ udp_nat_test_server.on('message', function(msg, info){
             switch(message.ID){
                 case msg_types.NATTest:
                     sockets[i].externalPortOne = info.port;
-                    check_nat_type(sockets[i].socket, sockets[i].localPort, sockets[i].externalPortOne, sockets[i].externalPortTwo);
+                    sockets[i].natType = check_nat_type(sockets[i].socket, sockets[i].localPort, sockets[i].externalPortOne, sockets[i].externalPortTwo);
                 break;
             }
         }
@@ -293,7 +312,7 @@ udp_nat_test_server_2.on('message', function(msg, info){
             switch(message.ID){
                 case msg_types.NATTest:
                     sockets[i].externalPortTwo = info.port;
-                    check_nat_type(sockets[i].socket, sockets[i].localPort, sockets[i].externalPortOne, sockets[i].externalPortTwo);
+                    sockets[i].natType = check_nat_type(sockets[i].socket, sockets[i].localPort, sockets[i].externalPortOne, sockets[i].externalPortTwo);
                 break;
             }
         }
@@ -338,8 +357,8 @@ setInterval(function timeout_loop(){
 }, 1000);
 
 function check_nat_type(socket, local_port, external_port_one, external_port_two){
+    let nat_type = nat_types.Unknown;
     if(external_port_one != 0 && external_port_two != 0) {
-        let nat_type = nat_types.Unknown;
         if(local_port == external_port_one && local_port == external_port_two){
             console.log("DirectMapping");
             nat_type = nat_types.DirectMapping;
@@ -357,4 +376,5 @@ function check_nat_type(socket, local_port, external_port_one, external_port_two
             "NATType": nat_type,
         })));
     }
+    return nat_type;
 }
