@@ -19,7 +19,8 @@ const msg_types = {
     ConnectionRequest: 6,
     ConnectionBegin: 7,
     ServerNotAvailable: 8,
-    HolePunchAttempt: 9
+    HolePunchAttempt: 9,
+    NATTunnelData: 10
 };
 
 var sockets = [];

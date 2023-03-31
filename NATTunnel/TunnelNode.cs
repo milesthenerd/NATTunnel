@@ -137,6 +137,7 @@ public class TunnelNode
 
     private void ReceiveCallback(IMessage message, IPEndPoint endpoint)
     {
+        Console.WriteLine("CAN WE HIT THIS???");
         if (message is NodeMessage nodeMessage)
         {
             int clientID = nodeMessage.Id;
@@ -152,6 +153,7 @@ public class TunnelNode
             case NewConnectionRequest request:
             {
                 if (!NodeOptions.IsServer) break;
+                Console.WriteLine("DO WE EVEN MAKE IT THIS FAR");
 
                 //Do not connect protocol-incompatible clients.
                 if (request.ProtocolVersion != Header.PROTOCOL_VERSION) return;

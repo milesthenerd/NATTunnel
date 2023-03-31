@@ -3,6 +3,8 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using NATTunnel.Common.Messages;
@@ -64,19 +66,32 @@ public class UdpConnection
                 continue;
 
             int receivedBytes;
+            string receivedString;
             try
             {
                 receivedBytes = udpSocket.ReceiveFrom(receivedBuffer, ref receivedEndpoint);
+                receivedString = Encoding.ASCII.GetString(receivedBuffer, 0, receivedBytes);
+                Console.WriteLine(receivedString);
             }
             catch (Exception e)
             {
                 Console.WriteLine($"Error receiving: {e}");
                 continue;
             }
-            using MemoryStream ms = new MemoryStream(receivedBuffer, 0, receivedBytes, false);
-            using BinaryReader br = new BinaryReader(ms);
-            IMessage receivedMessage = Header.DeframeMessage(br);
-            receiveCallback(receivedMessage, (IPEndPoint)receivedEndpoint);
+
+            try
+            {
+                MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
+
+                using MemoryStream ms = new MemoryStream(receivedMessage.Data, 0, receivedMessage.Data.Length, false);
+                using BinaryReader br = new BinaryReader(ms);
+                IMessage receivedIMessage = Header.DeframeMessage(br);
+                receiveCallback(receivedIMessage, (IPEndPoint)receivedEndpoint);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"Deserializing error: {e}");
+            }
         }
     }
 
@@ -128,7 +143,12 @@ public class UdpConnection
                 int sendSize = 8 + BitConverter.ToInt16(sendBytes, 6);
                 try
                 {
-                    udpSocket.SendTo(sendBytes, 0, sendSize, SocketFlags.None, sendMessage.Item2);
+                    MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
+                    //Easiest way to clear buffer padding
+                    string temp = Encoding.ASCII.GetString(sendBytes, 0, sendSize);
+                    message.Data = Encoding.ASCII.GetBytes(temp);
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpSocket.SendTo(sendBuffer, 0, sendBuffer.Length, SocketFlags.None, sendMessage.Item2);
                 }
                 catch (Exception e)
                 {

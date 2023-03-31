@@ -28,6 +28,11 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string EndpointString { get; set; }
+    /// <summary>
+    ///NATTunnel data included within the packet
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] Data { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
@@ -92,7 +97,11 @@ public enum MediationMessageType
     /// <summary>
     ///Packet sent during hole punch attempts
     /// </summary>
-    HolePunchAttempt
+    HolePunchAttempt,
+    /// <summary>
+    ///Packet sent for normal NATTunnel data between clients and servers
+    /// </summary>
+    NATTunnelData
 }
 
 /// <summary>

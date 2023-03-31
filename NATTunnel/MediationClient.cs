@@ -216,6 +216,24 @@ public static class MediationClient
 
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient),"udpClient.Receive(ref listenEP)");
 
+            string receivedString = Encoding.ASCII.GetString(receiveBuffer);
+
+            MediationMessage receivedMessage;
+
+            byte[] tunnelData = new byte[1500];
+
+            try
+            {
+                receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
+                Console.WriteLine("VALID?");
+                Console.WriteLine(receivedString);
+            }
+            catch
+            {
+                Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
+                continue;
+            }
+
             Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
 
             if (Equals(listenEndpoint.Address, IPAddress.Loopback) && (listenEndpoint.Port != mediationClientPort))
@@ -247,51 +265,68 @@ public static class MediationClient
                 }
             }
 
-            IPAddress receivedIp = null;
-            int receivedPort = 0;
-
-            if (Equals(listenEndpoint.Address, endpoint.Address))
+            switch(receivedMessage.ID)
             {
-                //TODO: why do we need to constantly re-get the ip on where to send stuff to?
-                string[] msgArray = Encoding.ASCII.GetString(receiveBuffer).Split(":");
-
-                receivedIp = IPAddress.Parse(msgArray[0]);
-                receivedPort = 0;
-                if (msgArray.Length > 1)
-                    receivedPort = Int32.Parse(msgArray[1]);
-            }
-
-            if (Equals(receivedIp, targetPeerIp) && holePunchReceivedCount < 5)
-            {
-                //targetPeerPort = receivedPort;
-                Console.WriteLine($"targetPeerIp:{targetPeerIp}");
-                Console.WriteLine($"targetPeerPort:{targetPeerPort}");
-                if (targetPeerPort != 0)
+                case MediationMessageType.HolePunchAttempt:
                 {
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
-                    Console.WriteLine("punching");
+                    Console.WriteLine("POG");
                 }
-            }
-
-            if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
-                //TODO: weird consistent way to crash here because targetPeerPort is 0, because it didn't into the if holePunchCount < 5 from above, because receivedIP is null
-                //https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
-                udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
-
-            if (!connected || !Equals(listenEndpoint.Address, targetPeerIp)) continue;
-
-            try
-            {
-                //TODO: sometimes fails here for whatever reason
-                if (!Equals(Encoding.ASCII.GetString(receiveBuffer), "hi"))
+                break;
+                case MediationMessageType.NATTunnelData:
                 {
-                    udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
+                    tunnelData = receivedMessage.Data;
+                    Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+
+                    /*
+                    IPAddress receivedIp = null;
+                    int receivedPort = 0;
+
+                    if (Equals(listenEndpoint.Address, endpoint.Address))
+                    {
+                        //TODO: why do we need to constantly re-get the ip on where to send stuff to?
+                        string[] msgArray = tunnelData.Split(":");
+
+                        receivedIp = IPAddress.Parse(msgArray[0]);
+                        receivedPort = 0;
+                        if (msgArray.Length > 1)
+                            receivedPort = Int32.Parse(msgArray[1]);
+                    }
+
+                    if (Equals(receivedIp, targetPeerIp) && holePunchReceivedCount < 5)
+                    {
+                        //targetPeerPort = receivedPort;
+                        Console.WriteLine($"targetPeerIp:{targetPeerIp}");
+                        Console.WriteLine($"targetPeerPort:{targetPeerPort}");
+                        if (targetPeerPort != 0)
+                        {
+                            byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
+                            udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                            Console.WriteLine("punching");
+                        }
+                    }
+                    */
+
+                    if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
+                        //TODO: weird consistent way to crash here because targetPeerPort is 0, because it didn't into the if holePunchCount < 5 from above, because receivedIP is null
+                        //https://cdn.discordapp.com/attachments/806611530438803458/933443905066790962/unknown.png
+                        udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+
+                    if (!connected || !Equals(listenEndpoint.Address, targetPeerIp)) continue;
+
+                    try
+                    {
+                        //TODO: sometimes fails here for whatever reason
+                        if (!Equals(Encoding.ASCII.GetString(tunnelData), ""))
+                        {
+                            udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Console.WriteLine(e);
+                    }
                 }
-            }
-            catch (Exception e)
-            {
-                Console.WriteLine(e);
+                break;
             }
         }
     }
@@ -303,6 +338,23 @@ public static class MediationClient
         {
             Console.WriteLine(mappingLocalTCPtoRemote.Count);
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
+
+            string receivedString = Encoding.ASCII.GetString(receiveBuffer);
+
+            MediationMessage receivedMessage;
+
+            byte[] tunnelData = new byte[1500];
+
+            try
+            {
+                receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
+                Console.WriteLine("VALID?");
+            }
+            catch
+            {
+                Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
+                continue;
+            }
 
             mostRecentEndPoint = listenEndpoint;
 
@@ -323,10 +375,6 @@ public static class MediationClient
 
             Console.WriteLine($"length {timeoutClients.Count} and {connectedClients.Count}");
             Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
-
-            if (!Equals(listenEndpoint.Address, IPAddress.Loopback) && listenEndpoint.Port != mediationClientPort)
-                localAppPort = listenEndpoint.Port;
-
 
             if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && Equals(listenEndpoint.Address, targetPeerIp))
             {
@@ -352,9 +400,9 @@ public static class MediationClient
                 }
             }
 
+            /*
             IPAddress receivedIp = null;
             int receivedPort = 0;
-
             if (Equals(receivedIp, targetPeerIp) && holePunchReceivedCount < 5)
             {
                 targetPeerPort = receivedPort;
@@ -367,107 +415,126 @@ public static class MediationClient
                     Console.WriteLine("punching");
                 }
             }
+            */
 
-            if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
+            switch(receivedMessage.ID)
             {
-                IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Loopback, 65535);
-
-                string receiveString = Encoding.ASCII.GetString(receiveBuffer);
-                int splitPos = receiveString.IndexOf("end", StringComparison.Ordinal);
-                if (splitPos > 0)
+                case MediationMessageType.HolePunchAttempt:
                 {
-                    string[] receiveSplit = receiveString.Split("end");
-                    if (receiveSplit.Length > 1)
+                    Console.WriteLine("POG");
+                }
+                break;
+                case MediationMessageType.NATTunnelData:
+                {
+                    tunnelData = receivedMessage.Data;
+                    Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+
+                    if (connected && Equals(listenEndpoint.Address, IPAddress.Loopback))
                     {
-                        string endpointStr = receiveSplit[1];
-                        string[] endpointSplit = endpointStr.Split(":");
-                        if (endpointSplit.Length > 1)
+                        IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Loopback, 0);
+
+                        string receiveString = Encoding.ASCII.GetString(tunnelData);
+                        int splitPos = receiveString.IndexOf("end", StringComparison.Ordinal);
+                        if (splitPos > 0)
                         {
-                            IPAddress address;
-                            int port;
-                            bool checkMap = true;
-
-                            if (!IPAddress.TryParse(endpointSplit[0], out address))
+                            string[] receiveSplit = receiveString.Split("end");
+                            Console.WriteLine("end");
+                            if (receiveSplit.Length > 1)
                             {
-                                address = IPAddress.Loopback;
-                                checkMap = false;
-                            }
-
-                            if (!Int32.TryParse(endpointSplit[1], out port))
-                            {
-                                port = 65535;
-                                checkMap = false;
-                            }
-
-                            Console.WriteLine($"{address}:{port}");
-
-                            if (checkMap)
-                            {
-                                try
+                                string endpointStr = receiveSplit[1];
+                                string[] endpointSplit = endpointStr.Split(":");
+                                Console.WriteLine("split :");
+                                if (endpointSplit.Length > 1)
                                 {
-                                    destEndpoint = mappingLocalTCPtoRemote[new IPEndPoint(address, port)];
-                                }
-                                catch (Exception e)
-                                {
-                                    Console.WriteLine(e);
+                                    IPAddress address;
+                                    int port;
+                                    bool checkMap = true;
+
+                                    if (!IPAddress.TryParse(endpointSplit[0], out address))
+                                    {
+                                        address = IPAddress.Loopback;
+                                        checkMap = false;
+                                    }
+
+                                    if (!Int32.TryParse(endpointSplit[1], out port))
+                                    {
+                                        port = 65535;
+                                        checkMap = false;
+                                    }
+
+                                    Console.WriteLine($"{address}:{port}");
+
+                                    if (checkMap)
+                                    {
+                                        try
+                                        {
+                                            destEndpoint = mappingLocalTCPtoRemote[new IPEndPoint(address, port)];
+                                        }
+                                        catch (Exception e)
+                                        {
+                                            Console.WriteLine(e);
+                                        }
+                                    }
+                                    Console.WriteLine("dest port");
+                                    Console.WriteLine(destEndpoint);
+                                    udpClient.Send(receiveBuffer, receiveBuffer.Length, destEndpoint);
                                 }
                             }
-                            Console.WriteLine("dest port");
+                        }
+
+                        if (NodeOptions.ConnectionType == ConnectionTypes.UDP)
+                        {
+                            try
+                            {
+                                destEndpoint = mappingLocalUDPtoRemote[new IPEndPoint(listenEndpoint.Address, listenEndpoint.Port)];
+                            }
+                            catch (Exception e)
+                            {
+                                Console.WriteLine(e);
+                            }
+
+                            Console.WriteLine("dest port udp");
                             Console.WriteLine(destEndpoint);
                             udpClient.Send(receiveBuffer, receiveBuffer.Length, destEndpoint);
                         }
                     }
-                }
 
-                if (NodeOptions.ConnectionType == ConnectionTypes.UDP)
-                {
-                    try
+                    if (NodeOptions.ConnectionType == ConnectionTypes.TCP)
                     {
-                        destEndpoint = mappingLocalUDPtoRemote[new IPEndPoint(listenEndpoint.Address, listenEndpoint.Port)];
+                        foreach (IPEndPoint client in connectedClients)
+                        {
+                            if (!connected || !Equals(listenEndpoint.Address, client.Address)) continue;
+                            Console.WriteLine("ARE WE JUST NOT HITTING THIS CONDITION????");
+
+                            udpClient.Send(receiveBuffer, receiveBuffer.Length, programEndpoint);
+                        }
                     }
-                    catch (Exception e)
+                    else
                     {
-                        Console.WriteLine(e);
+                        if (!connected || Encoding.ASCII.GetString(tunnelData) == "") continue;
+
+                        foreach (IPEndPoint client in connectedClients)
+                        {
+                            if (listenEndpoint.Address.ToString() != client.Address.ToString()) continue;
+
+                            IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Loopback, 65535);
+                            try
+                            {
+                                destEndpoint = mappingRemoteUDPtoLocal[new IPEndPoint(listenEndpoint.Address, listenEndpoint.Port)];
+                            }
+                            catch (Exception e)
+                            {
+                                Console.WriteLine(e);
+                            }
+
+                            Console.WriteLine("udp dest endpoint");
+                            Console.WriteLine(destEndpoint);
+
+                            udpClient.Send(tunnelData, tunnelData.Length, new IPEndPoint(IPAddress.Loopback, destEndpoint.Port));
+                        }
                     }
-
-                    Console.WriteLine("dest port");
-                    Console.WriteLine(destEndpoint);
-                    udpClient.Send(receiveBuffer, receiveBuffer.Length, destEndpoint);
                 }
-            }
-
-            if (NodeOptions.ConnectionType == ConnectionTypes.TCP)
-            {
-                foreach (IPEndPoint client in connectedClients)
-                {
-                    if (!connected || !Equals(listenEndpoint.Address, client.Address)) continue;
-
-                    udpClient.Send(receiveBuffer, receiveBuffer.Length, programEndpoint);
-                }
-            }
-            else
-            {
-                if (!connected || Encoding.ASCII.GetString(receiveBuffer) == "hi") continue;
-
-                foreach (IPEndPoint client in connectedClients)
-                {
-                    if (listenEndpoint.Address.ToString() != client.Address.ToString()) continue;
-
-                    IPEndPoint destEndpoint = new IPEndPoint(IPAddress.Loopback, 65535);
-                    try
-                    {
-                        destEndpoint = mappingRemoteUDPtoLocal[new IPEndPoint(listenEndpoint.Address, listenEndpoint.Port)];
-                    }
-                    catch (Exception e)
-                    {
-                        Console.WriteLine(e);
-                    }
-
-                    Console.WriteLine("udp dest endpoint");
-                    Console.WriteLine(destEndpoint);
-
-                    udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, destEndpoint.Port));
-                }
+                break;
             }
         }
     }
@@ -495,7 +562,7 @@ public static class MediationClient
 
                 void TryConnect(object source, ElapsedEventArgs e)
                 {
-                    if(holePunchReceivedCount >= 5)
+                    if(holePunchReceivedCount <= 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
