@@ -318,6 +318,7 @@ public static class MediationClient
                         //TODO: sometimes fails here for whatever reason
                         if (!Equals(Encoding.ASCII.GetString(tunnelData), ""))
                         {
+                            Console.WriteLine("Sending to localAppPort");
                             udpClient.Send(receiveBuffer, receiveBuffer.Length, new IPEndPoint(IPAddress.Loopback, localAppPort));
                         }
                     }

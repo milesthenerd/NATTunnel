@@ -140,6 +140,7 @@ public class TunnelNode
         Console.WriteLine("CAN WE HIT THIS???");
         if (message is NodeMessage nodeMessage)
         {
+            Console.WriteLine(message.GetType().ToString() + $" {nodeMessage.Id}");
             int clientID = nodeMessage.Id;
             if (clientMapping.ContainsKey(clientID))
             {
@@ -240,12 +241,17 @@ public class TunnelNode
 
             case Data data:
             {
+                Console.WriteLine($"AYO SO DATA IS ACTUALLY SHOWING UP??? {data.Id}");
                 if (clientMapping.ContainsKey(data.Id))
                 {
                     Client client = clientMapping[data.Id];
                     //TODO: WHY IS THIS NECESSARY!?!?!?
                     client.UdpEndpoint = endpoint;
-                    if (client.TCPClient is not null) client.ReceiveData(data);
+                    if (client.TCPClient is not null)
+                    {
+                        Console.WriteLine("OH CRAP IT'S NULL");
+                        client.ReceiveData(data);
+                    }
                 }
                 break;
             }

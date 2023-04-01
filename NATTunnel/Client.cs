@@ -162,9 +162,9 @@ public class Client
             return;
         }
 
-        //Clamp to 1100 byte packets
+        //Clamp to 1000 byte packets
         //TODO: Look into changing this MTU to something that will fit more connections, like 500-1000
-        const int upperLimit = 1100;
+        const int upperLimit = 1000;
         bytesToWrite = bytesToWrite.LimitTo(upperLimit);
 
         //Send data

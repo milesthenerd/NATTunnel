@@ -145,8 +145,9 @@ public class UdpConnection
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
                     //Easiest way to clear buffer padding
-                    string temp = Encoding.ASCII.GetString(sendBytes, 0, sendSize);
-                    message.Data = Encoding.ASCII.GetBytes(temp);
+                    byte[] temp = new byte[sendSize];
+                    Array.Copy(sendBytes, 0, temp, 0, sendSize);
+                    message.Data = temp;
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     udpSocket.SendTo(sendBuffer, 0, sendBuffer.Length, SocketFlags.None, sendMessage.Item2);
                 }
