@@ -19,13 +19,17 @@ public static class MediationClient
     //TODO: entire class should get reviewed and eventually split up into smaller classes
     //TODO: do we really want to have this static? Why not just a normal class, with normal constructor?
     private static readonly TcpClient tcpClient = new TcpClient();
-    private static readonly UdpClient udpClient; // set in constructor
+    private static UdpClient udpClient; // set in constructor
     private static NetworkStream tcpClientStream;
     private static Task tcpClientTask;
-    private static readonly CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
+    private static CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
     private static Task udpClientTask;
+    private static readonly CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();
     private static Task udpServerTask;
+    private static readonly CancellationTokenSource udpServerTaskCancellationToken = new CancellationTokenSource();
     private static readonly IPEndPoint endpoint;
+    private static int natTestPortOne = 6511;
+    private static int natTestPortTwo = 6512;
     private static readonly IPEndPoint programEndpoint;
     private static IPAddress targetPeerIp;
     private static int targetPeerPort;
@@ -42,6 +46,7 @@ public static class MediationClient
     private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
     private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
     private static NATType natType = NATType.Unknown;
+    private static List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
 
     static MediationClient()
     {
@@ -328,7 +333,18 @@ public static class MediationClient
                     }
                 }
                 break;
+                case MediationMessageType.SymmetricHolePunchAttempt:
+                {
+                    if (natType != NATType.Symmetric)
+                    {
+                        targetPeerIp = listenEndpoint.Address;
+                        targetPeerPort = listenEndpoint.Port;
+                    }
+                }
+                break;
             }
+            if (udpClientTaskCancellationToken.Token.IsCancellationRequested)
+                return;
         }
     }
 
@@ -536,7 +552,18 @@ public static class MediationClient
                     }
                 }
                 break;
+                case MediationMessageType.SymmetricHolePunchAttempt:
+                {
+                    if (natType != NATType.Symmetric)
+                    {
+                        targetPeerIp = listenEndpoint.Address;
+                        targetPeerPort = listenEndpoint.Port;
+                    }
+                }
+                break;
             }
+            if (udpServerTaskCancellationToken.Token.IsCancellationRequested)
+                return;
         }
     }
 
@@ -571,6 +598,41 @@ public static class MediationClient
                     }
                 }
 
+                void TryConnectFromSymmetric(object source, ElapsedEventArgs e)
+                {
+                    if(holePunchReceivedCount > 0 && holePunchReceivedCount <= 5)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    }
+
+                    if(holePunchReceivedCount < 1)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        foreach (UdpClient probe in symmetricConnectionUdpProbes)
+                        {
+                            probe.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                        }
+                    }
+                }
+
+                void TryConnectToSymmetric(object source, ElapsedEventArgs e)
+                {
+                    if(holePunchReceivedCount <= 5)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+
+                        Random randPort = new Random();
+                        for (int i = 0; i < 100; i++)
+                        {
+                            udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, randPort.Next(1024, 65536)));
+                        }
+                    }
+                }
+
                 switch(receivedMessage.ID)
                 {
                     case MediationMessageType.Connected:
@@ -584,10 +646,12 @@ public static class MediationClient
                     break;
                     case MediationMessageType.NATTestBegin:
                     {
+                        natTestPortOne = receivedMessage.NATTestPortOne;
+                        natTestPortTwo = receivedMessage.NATTestPortTwo;
                         MediationMessage message = new MediationMessage(MediationMessageType.NATTest);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, 6511));
-                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, 6512));
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortOne));
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortTwo));
                     }
                     break;
                     case MediationMessageType.NATTypeResponse:
@@ -614,15 +678,77 @@ public static class MediationClient
                     case MediationMessageType.ConnectionBegin:
                     {
                         holePunchReceivedCount = 0;
-                        IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
-                        targetPeerIp = targetPeerEndpoint.Address;
-                        targetPeerPort = targetPeerEndpoint.Port;
-                        Timer connectionAttempt = new Timer(1000)
+                        if (natType == NATType.Symmetric)
                         {
-                            AutoReset = true,
-                            Enabled = true
-                        };
-                        connectionAttempt.Elapsed += TryConnect;
+                            IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                            targetPeerIp = targetPeerEndpoint.Address;
+                            targetPeerPort = targetPeerEndpoint.Port;
+
+                            Timer connectionAttempt = new Timer(1000)
+                            {
+                                AutoReset = true,
+                                Enabled = false
+                            };
+                            connectionAttempt.Elapsed += TryConnectFromSymmetric;
+                            
+                            while (symmetricConnectionUdpProbes.Count < 256)
+                            {
+                                UdpClient tempUdpClient = new UdpClient();
+                                tempUdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+                                tempUdpClient.BeginReceive(new AsyncCallback(probeReceive), null);
+                                void probeReceive(IAsyncResult res)
+                                {
+                                    try
+                                    {
+                                        IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
+                                        byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
+
+                                        Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
+                                        holePunchReceivedCount++;
+                                        udpClient = tempUdpClient;
+                                        NodeOptions.MediationClientPort = ((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port;
+                                        if (isServer)
+                                        {
+                                            udpServerTask = new Task(UdpServerListenLoop);
+                                            udpServerTask.Start();
+                                        }
+                                        else
+                                        {
+                                            udpClientTask = new Task(UdpClientListenLoop);
+                                            udpClientTask.Start();
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        Console.WriteLine("who cares it still works lol");
+                                    }
+                                }
+                                symmetricConnectionUdpProbes.Add(tempUdpClient);
+                            }
+
+                            connectionAttempt.Enabled = true;
+                        }
+                        else if (receivedMessage.NATType == NATType.Symmetric)
+                        {
+                            Timer connectionAttempt = new Timer(1000)
+                            {
+                                AutoReset = true,
+                                Enabled = true
+                            };
+                            connectionAttempt.Elapsed += TryConnectToSymmetric;
+                        }
+                        else
+                        {
+                            IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                            targetPeerIp = targetPeerEndpoint.Address;
+                            targetPeerPort = targetPeerEndpoint.Port;
+                            Timer connectionAttempt = new Timer(1000)
+                            {
+                                AutoReset = true,
+                                Enabled = true
+                            };
+                            connectionAttempt.Elapsed += TryConnect;
+                        }
                     }
                     break;
                     case MediationMessageType.ServerNotAvailable:

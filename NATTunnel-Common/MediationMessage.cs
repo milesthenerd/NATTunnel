@@ -33,21 +33,40 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] Data { get; set; }
+    /// <summary>
+    ///First port for nat type detection returned by the server
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int NATTestPortOne { get; set; }
+    /// <summary>
+    ///Second port for nat type detection returned by the server
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int NATTestPortTwo { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
     }
 
+    /// <summary>
+    ///Serializes the message
+    /// </summary>
     public string Serialize()
     {
         return JsonSerializer.Serialize<MediationMessage>(this);
     }
 
+    /// <summary>
+    ///Converts the endpoint string to an IPEndPoint and returns it
+    /// </summary>
     public IPEndPoint GetEndpoint()
     {
         return IPEndPoint.Parse(EndpointString);
     }
 
+    /// <summary>
+    ///Converts an IPEndPoint to a string and sets the endpoint string to it
+    /// </summary>
     public void SetEndpoint(IPEndPoint serverEndpoint)
     {
         EndpointString = serverEndpoint.ToString();
@@ -101,7 +120,11 @@ public enum MediationMessageType
     /// <summary>
     ///Packet sent for normal NATTunnel data between clients and servers
     /// </summary>
-    NATTunnelData
+    NATTunnelData,
+    /// <summary>
+    ///Packet sent during symmetric NAT hole punch attempts
+    /// </summary>
+    SymmetricHolePunchAttempt,
 }
 
 /// <summary>

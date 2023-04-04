@@ -20,13 +20,16 @@ const msg_types = {
     ConnectionBegin: 7,
     ServerNotAvailable: 8,
     HolePunchAttempt: 9,
-    NATTunnelData: 10
+    NATTunnelData: 10,
+    SymmetricHolePunchAttempt: 11
 };
 
 var sockets = [];
 var udp_connection_info = [];
 //10 second default timeout
 var timeout = 10; 
+var nat_test_port_one = 6511;
+var nat_test_port_two = 6512;
 
 // TCP SERVER
 var tcp_server = tcp.createServer(function(socket){
@@ -39,7 +42,7 @@ var tcp_server = tcp.createServer(function(socket){
                         sockets[i].localPort = message.LocalPort;
                     }
                 }
-                socket.write(Buffer.from(JSON.stringify({"ID": msg_types.NATTestBegin})));
+                socket.write(Buffer.from(JSON.stringify({"ID": msg_types.NATTestBegin, "NATTestPortOne": nat_test_port_one, "NATTestPortTwo": nat_test_port_two})));
             break;
             case msg_types.ConnectionRequest:
                 var contains_requested_ip = false;
@@ -294,18 +297,18 @@ udp_nat_test_server.on('close', function(){
     console.log("Socket closed");
 });
 
-udp_nat_test_server.bind(6511);
+udp_nat_test_server.bind(nat_test_port_one);
 
-var udp_nat_test_server_2 = udp.createSocket({type: 'udp4', reuseAddr: true});
+var udp_nat_test_server_two = udp.createSocket({type: 'udp4', reuseAddr: true});
 
 // handle errors
-udp_nat_test_server_2.on('error', function(err){
+udp_nat_test_server_two.on('error', function(err){
     console.log(`Error: ${err}`);
-    udp_nat_test_server_2.close();
+    udp_nat_test_server_two.close();
 });
 
 // print on new udp packets
-udp_nat_test_server_2.on('message', function(msg, info){
+udp_nat_test_server_two.on('message', function(msg, info){
     console.log(`nat test 2 from ${info.address}:${info.port}`);
     for(let i=0; i<sockets.length; i++){
         if(sockets[i].ip == info.address){
@@ -321,18 +324,18 @@ udp_nat_test_server_2.on('message', function(msg, info){
 });
 
 // print when server begins listening
-udp_nat_test_server_2.on('listening', function(){
-    var address = udp_nat_test_server_2.address();
+udp_nat_test_server_two.on('listening', function(){
+    var address = udp_nat_test_server_two.address();
     var port = address.port;
     console.log(`NAT test 2 is listening at port ${port}`);
 });
 
 // print when server closes
-udp_nat_test_server_2.on('close', function(){
+udp_nat_test_server_two.on('close', function(){
     console.log("Socket closed");
 });
 
-udp_nat_test_server_2.bind(6512);
+udp_nat_test_server_two.bind(nat_test_port_two);
 
 // check every second to see if a client has wrongly disconnected
 setInterval(function timeout_loop(){

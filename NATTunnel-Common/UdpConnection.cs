@@ -144,7 +144,6 @@ public class UdpConnection
                 try
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
-                    //Easiest way to clear buffer padding
                     byte[] temp = new byte[sendSize];
                     Array.Copy(sendBytes, 0, temp, 0, sendSize);
                     message.Data = temp;
