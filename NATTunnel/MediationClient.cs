@@ -728,7 +728,8 @@ public static class MediationClient
 
                             connectionAttempt.Enabled = true;
                         }
-                        else if (receivedMessage.NATType == NATType.Symmetric)
+
+                        if (receivedMessage.NATType == NATType.Symmetric)
                         {
                             Timer connectionAttempt = new Timer(1000)
                             {
@@ -737,7 +738,8 @@ public static class MediationClient
                             };
                             connectionAttempt.Elapsed += TryConnectToSymmetric;
                         }
-                        else
+
+                        if (natType != NATType.Symmetric && receivedMessage.NATType != NATType.Symmetric)
                         {
                             IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
                             targetPeerIp = targetPeerEndpoint.Address;
