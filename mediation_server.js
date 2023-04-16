@@ -45,46 +45,52 @@ var tcp_server = tcp.createServer(function(socket){
                 socket.write(Buffer.from(JSON.stringify({"ID": msg_types.NATTestBegin, "NATTestPortOne": nat_test_port_one, "NATTestPortTwo": nat_test_port_two})));
             break;
             case msg_types.ConnectionRequest:
-                var contains_requested_ip = false;
-                var requested_ip = message.EndpointString;
-                console.log(requested_ip);
-                for(let i=0; i<sockets.length; i++){
-                    if(requested_ip.includes(sockets[i].ip)){
-                        contains_requested_ip = true;
-                        for(let f=0; f<udp_connection_info.length; f++){
-                            if(requested_ip.includes(udp_connection_info[f].ip)){
-                                let port = udp_connection_info[f].port;
-                                //Tell client the endpoint of the server
-                                socket.write(Buffer.from(JSON.stringify({
-                                    "ID": msg_types.ConnectionBegin,
-                                    "EndpointString": `${sockets[i].ip}:${port}`,
-                                    "NATType": sockets[i].natType
-                                })));
-                                console.log(JSON.stringify({
-                                    "ID": msg_types.ConnectionBegin,
-                                    "EndpointString": `${sockets[i].ip}:${port}`,
-                                    "NATType": sockets[i].natType
-                                }));
-                            }
+                if(message.hasOwnProperty('NATType')){
+                    var contains_requested_ip = false;
+                    var requested_ip = message.EndpointString;
+                    console.log(requested_ip);
+                    for(let i=0; i<sockets.length; i++){
+                        if(requested_ip.includes(sockets[i].ip)){
+                            contains_requested_ip = true;
+                            for(let f=0; f<udp_connection_info.length; f++){
+                                if(requested_ip.includes(udp_connection_info[f].ip)){
+                                    let port = udp_connection_info[f].port;
+                                    //Tell client the endpoint of the server
+                                    socket.write(Buffer.from(JSON.stringify({
+                                        "ID": msg_types.ConnectionBegin,
+                                        "EndpointString": `${sockets[i].ip}:${port}`,
+                                        "NATType": sockets[i].natType
+                                    })));
+                                    console.log('Server info');
+                                    console.log(JSON.stringify({
+                                        "ID": msg_types.ConnectionBegin,
+                                        "EndpointString": `${sockets[i].ip}:${port}`,
+                                        "NATType": sockets[i].natType
+                                    }));
+                                }
 
-                            if(socket.remoteAddress.includes(udp_connection_info[f].ip)){
-                                //Tell server the endpoint of the client
-                                let port = udp_connection_info[f].port;
-                                sockets[i].socket.write(Buffer.from(JSON.stringify({
-                                    "ID": msg_types.ConnectionBegin,
-                                    "EndpointString": `${socket.remoteAddress}:${port}`,
-                                    "NATType": message.NATType
-                                })));
-                                console.log(JSON.stringify({
-                                    "ID": msg_types.ConnectionBegin,
-                                    "EndpointString": `${socket.remoteAddress}:${port}`,
-                                    "NATType": message.NATType
-                                }));
+                                if(socket.remoteAddress.includes(udp_connection_info[f].ip)){
+                                    //Tell server the endpoint of the client
+                                    let port = udp_connection_info[f].port;
+                                    sockets[i].socket.write(Buffer.from(JSON.stringify({
+                                        "ID": msg_types.ConnectionBegin,
+                                        "EndpointString": `${socket.remoteAddress}:${port}`,
+                                        "NATType": message.NATType
+                                    })));
+                                    console.log('Client info');
+                                    console.log(JSON.stringify({
+                                        "ID": msg_types.ConnectionBegin,
+                                        "EndpointString": `${socket.remoteAddress}:${port}`,
+                                        "NATType": message.NATType
+                                    }));
+                                }
                             }
                         }
                     }
                 }
-                if(!contains_requested_ip){
+
+                if(!contains_requested_ip || !message.hasOwnProperty('NATType')){
+                    console.log(message)
                     socket.write(Buffer.from(JSON.stringify({
                         "ID": msg_types.ServerNotAvailable
                     })));

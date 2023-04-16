@@ -584,6 +584,7 @@ public static class MediationClient
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
                     message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                    message.NATType = natType;
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
@@ -731,6 +732,8 @@ public static class MediationClient
 
                         if (receivedMessage.NATType == NATType.Symmetric)
                         {
+                            IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                            targetPeerIp = targetPeerEndpoint.Address;
                             Timer connectionAttempt = new Timer(1000)
                             {
                                 AutoReset = true,
