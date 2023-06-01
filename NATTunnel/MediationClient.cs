@@ -24,9 +24,9 @@ public static class MediationClient
     private static Task tcpClientTask;
     private static CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
     private static Task udpClientTask;
-    private static readonly CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();
+    private static CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();
     private static Task udpServerTask;
-    private static readonly CancellationTokenSource udpServerTaskCancellationToken = new CancellationTokenSource();
+    private static CancellationTokenSource udpServerTaskCancellationToken = new CancellationTokenSource();
     private static readonly IPEndPoint endpoint;
     private static int natTestPortOne = 6511;
     private static int natTestPortTwo = 6512;
@@ -37,7 +37,7 @@ public static class MediationClient
     private static int holePunchReceivedCount;
     private static bool connected;
     private static readonly IPAddress remoteIp;
-    private static readonly int mediationClientPort;
+    private static int mediationClientPort;
     private static readonly bool isServer;
     private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
     private static readonly Dictionary<IPEndPoint, IPEndPoint> mappingLocalTCPtoRemote = new Dictionary<IPEndPoint, IPEndPoint>();
@@ -47,6 +47,7 @@ public static class MediationClient
     private static IPEndPoint mostRecentEndPoint = new IPEndPoint(IPAddress.Loopback, 65535);
     private static NATType natType = NATType.Unknown;
     private static List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
+    private static int currentConnectionID = 0;
 
     static MediationClient()
     {
@@ -184,8 +185,7 @@ public static class MediationClient
         //Set client targetPeerIp to remote endpoint IP
         targetPeerIp = remoteIp;
         //Begin listening
-        udpClientTask = new Task(UdpClientListenLoop);
-        udpClientTask.Start();
+        Task.Run(() => UdpClientListenLoop(udpClientTaskCancellationToken.Token));
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
         {
@@ -211,12 +211,16 @@ public static class MediationClient
         timer.Elapsed += OnTimedEvent;
     }
 
-    private static void UdpClientListenLoop()
+    private static void UdpClientListenLoop(CancellationToken token)
     {
         //Init an IPEndPoint that will be populated with the sender's info
+        int randID = new Random().Next();
+
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
-        while (true)
+        Console.WriteLine($"is this even starting {listenEndpoint}");
+        while (!token.IsCancellationRequested)
         {
+            Console.WriteLine($"ahh yes the randID for this task is {randID}");
             mostRecentEndPoint = listenEndpoint;
 
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient),"udpClient.Receive(ref listenEP)");
@@ -255,18 +259,12 @@ public static class MediationClient
                 //TODO: random hardcoded value
                 if (holePunchReceivedCount >= 5 && !connected)
                 {
-                    try
-                    {
-                        tcpClientStream.Close();
-                        tcpClientTaskCancellationToken.Cancel();
-                        tcpClient.Close();
-                        tcpClientTaskCancellationToken.Dispose();
-                    }
-                    catch (Exception e)
-                    {
-                        Console.WriteLine(e);
-                    }
-                    connected = true;
+                    MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
+                    message.ConnectionID = currentConnectionID;
+                    message.IsServer = isServer;
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    Console.WriteLine(message.Serialize());
+                    tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
             }
 
@@ -343,9 +341,9 @@ public static class MediationClient
                 }
                 break;
             }
-            if (udpClientTaskCancellationToken.Token.IsCancellationRequested)
-                return;
         }
+        
+        Console.WriteLine($"WHAT THE HECK IS GOING ON WHY ISN'T THIS HITTING rand {randID}");
     }
 
     private static void UdpServerListenLoop()
@@ -406,14 +404,12 @@ public static class MediationClient
                 holePunchReceivedCount++;
                 if (holePunchReceivedCount >= 5 && !connected)
                 {
-                    TcpClient tcpClientPassthrough = new TcpClient();
-
-                    tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, NodeOptions.LocalPort));
-
-                    NetworkStream tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
-                    Task tcpClientPassthroughThread = new Task(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
-                    tcpClientPassthroughThread.Start();
-                    connected = true;
+                    MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
+                    message.ConnectionID = currentConnectionID;
+                    message.IsServer = isServer;
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    Console.WriteLine(message.Serialize());
+                    tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
             }
 
@@ -601,10 +597,11 @@ public static class MediationClient
 
                 void TryConnectFromSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if(holePunchReceivedCount > 0 && holePunchReceivedCount <= 5)
+                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount <= 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        Console.WriteLine(udpClient.Client.LocalEndPoint);
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
 
@@ -621,7 +618,14 @@ public static class MediationClient
 
                 void TryConnectToSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if(holePunchReceivedCount <= 5)
+                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount <= 5)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    }
+
+                    if(holePunchReceivedCount < 1)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
@@ -633,6 +637,16 @@ public static class MediationClient
                         }
                     }
                 }
+
+                //When one of the clients has holePunchReceivedCount hit 5, make it send a packet to the server to set a value indicating that it has connected - done
+                //Make the other client do the same - done?
+                //When server determines both clients have connected based on these packets, drop the clients from the server and let them continue communicating - maybe done?
+
+                //Apparently the second udp client task that gets created during the first received symmetric nat packet is the one that dies when the token cancellation for the first task is called???? what...
+                //Update: first task now closes rather than the second task, BUT it's only after it receives another packet that it actually obeys the cancellation
+                //Maybe have a "shutdown" packet sent straight to the first task after cancelling to make it *actually* cancel, then I'll worry about making the second task actually receive junk locally because that doesn't work for WHATEVER REASON
+
+                //Also, add flag to prevent simultaneous connection attempts based on aforementioned packets
 
                 switch(receivedMessage.ID)
                 {
@@ -679,6 +693,7 @@ public static class MediationClient
                     case MediationMessageType.ConnectionBegin:
                     {
                         holePunchReceivedCount = 0;
+                        currentConnectionID = receivedMessage.ConnectionID;
                         if (natType == NATType.Symmetric)
                         {
                             IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
@@ -701,22 +716,34 @@ public static class MediationClient
                                 {
                                     try
                                     {
-                                        IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
-                                        byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
+                                        if(holePunchReceivedCount == 0)
+                                        {
+                                            IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
+                                            byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
 
-                                        Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
-                                        holePunchReceivedCount++;
-                                        udpClient = tempUdpClient;
-                                        NodeOptions.MediationClientPort = ((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port;
-                                        if (isServer)
-                                        {
-                                            udpServerTask = new Task(UdpServerListenLoop);
-                                            udpServerTask.Start();
-                                        }
-                                        else
-                                        {
-                                            udpClientTask = new Task(UdpClientListenLoop);
-                                            udpClientTask.Start();
+                                            Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
+                                            holePunchReceivedCount++;
+                                            udpClient = tempUdpClient;
+
+                                            udpClientTaskCancellationToken.Cancel();
+                                            //udpClientTaskCancellationToken.Dispose();
+
+                                            NodeOptions.MediationClientPort = ((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port;
+                                            mediationClientPort = NodeOptions.MediationClientPort;
+
+                                            
+                                            if (isServer)
+                                            {
+                                                Task newUdpServerTask = new Task(UdpServerListenLoop);
+                                                newUdpServerTask.Start();
+                                                Console.WriteLine("server");
+                                            }
+                                            else
+                                            {
+                                                CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
+                                                Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
+                                                Console.WriteLine("client");
+                                            }
                                         }
                                     }
                                     catch
@@ -756,6 +783,33 @@ public static class MediationClient
                         }
                     }
                     break;
+                    case MediationMessageType.ConnectionComplete:
+                    {
+                        if (isServer) {
+                            TcpClient tcpClientPassthrough = new TcpClient();
+
+                            tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, NodeOptions.LocalPort));
+
+                            NetworkStream tcpClientPassthroughStream = tcpClientPassthrough.GetStream();
+                            Task tcpClientPassthroughThread = new Task(() => TcpListenLoopPassthrough(tcpClientPassthrough, tcpClientPassthroughStream));
+                            tcpClientPassthroughThread.Start();
+                            connected = true;
+                        } else {
+                            try
+                            {
+                                tcpClientStream.Close();
+                                tcpClientTaskCancellationToken.Cancel();
+                                tcpClient.Close();
+                                tcpClientTaskCancellationToken.Dispose();
+                            }
+                            catch (Exception e)
+                            {
+                                Console.WriteLine(e);
+                            }
+                            connected = true;
+                        }
+                    }
+                    break;
                     case MediationMessageType.ServerNotAvailable:
                     {
                         Timer recheckAvailability = new Timer(3000)
@@ -773,8 +827,10 @@ public static class MediationClient
                 Console.WriteLine(e);
             }
 
-            if (tcpClientTaskCancellationToken.Token.IsCancellationRequested)
+            if (tcpClientTaskCancellationToken.Token.IsCancellationRequested){
+                Console.WriteLine("YOU GOTTA BE KIDDING ME");
                 return;
+            }
         }
     }
 

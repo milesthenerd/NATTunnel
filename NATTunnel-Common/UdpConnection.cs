@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -30,6 +31,13 @@ public class UdpConnection
     {
         this.udpSocket = udpSocket;
         this.receiveCallback = receiveCallback;
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            // ReSharper disable once IdentifierTypo - taken from here:
+            // https://docs.microsoft.com/en-us/windows/win32/winsock/winsock-ioctls#sio_udp_connreset-opcode-setting-i-t3
+            const int SIO_UDP_CONNRESET = -1744830452;
+            udpSocket.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+        }
         if (passthrough)
         {
             receiveThread = new Task(ReceivePassthroughLoop);

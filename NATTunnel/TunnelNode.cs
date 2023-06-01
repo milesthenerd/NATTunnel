@@ -249,7 +249,7 @@ public class TunnelNode
                     client.UdpEndpoint = endpoint;
                     if (client.TCPClient is not null)
                     {
-                        Console.WriteLine("OH CRAP IT'S NULL");
+                        //Console.WriteLine("OH CRAP IT'S NULL");
                         client.ReceiveData(data);
                     }
                 }

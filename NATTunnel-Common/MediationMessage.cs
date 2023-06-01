@@ -43,6 +43,16 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int NATTestPortTwo { get; set; }
+    /// <summary>
+    ///ID assigned to a server/client pair attempting to make a connection
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int ConnectionID { get; set; }
+    /// <summary>
+    ///Whether or not the peer sending the packet is a NATTunnel server
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IsServer { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
@@ -125,6 +135,14 @@ public enum MediationMessageType
     ///Packet sent during symmetric NAT hole punch attempts
     /// </summary>
     SymmetricHolePunchAttempt,
+    /// <summary>
+    ///Packet sent indicating NATTunnel client/server pair have reached each other
+    /// </summary>
+    ConnectionComplete,
+    /// <summary>
+    ///Packet sent indicating NATTunnel client/server received from peer
+    /// </summary>
+    ReceivedPeer
 }
 
 /// <summary>
