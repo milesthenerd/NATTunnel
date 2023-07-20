@@ -263,7 +263,7 @@ public static class MediationClient
                     message.ConnectionID = currentConnectionID;
                     message.IsServer = isServer;
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                    Console.WriteLine(message.Serialize());
+                    Console.WriteLine($"sending {message.Serialize()}");
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
             }
@@ -618,7 +618,7 @@ public static class MediationClient
 
                 void TryConnectToSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount <= 5)
+                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
@@ -720,17 +720,13 @@ public static class MediationClient
                                         {
                                             IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
                                             byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
+                                            byte[] shutdownBuffer = Encoding.ASCII.GetBytes("yes");
 
                                             Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
                                             holePunchReceivedCount++;
-                                            udpClient = tempUdpClient;
 
                                             udpClientTaskCancellationToken.Cancel();
                                             //udpClientTaskCancellationToken.Dispose();
-
-                                            NodeOptions.MediationClientPort = ((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port;
-                                            mediationClientPort = NodeOptions.MediationClientPort;
-
                                             
                                             if (isServer)
                                             {
@@ -740,6 +736,14 @@ public static class MediationClient
                                             }
                                             else
                                             {
+                                                //TRY DELAYING ALL OF THIS UNTIL THE ORIGINAL TASK HAS COMPLETELY DIED
+                                                tempUdpClient.Send(shutdownBuffer, shutdownBuffer.Length, new IPEndPoint(IPAddress.Loopback, 5000));
+                                                udpClient = tempUdpClient;
+                                                const int SIO_UDP_CONNRESET = -1744830452;
+                                                udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+
+                                                NodeOptions.MediationClientPort = ((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port;
+                                                mediationClientPort = NodeOptions.MediationClientPort;
                                                 CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
                                                 Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
                                                 Console.WriteLine("client");
