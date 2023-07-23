@@ -710,6 +710,8 @@ public static class MediationClient
                             while (symmetricConnectionUdpProbes.Count < 256)
                             {
                                 UdpClient tempUdpClient = new UdpClient();
+                                const int SIO_UDP_CONNRESET = -1744830452;
+                                tempUdpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
                                 tempUdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
                                 tempUdpClient.BeginReceive(new AsyncCallback(probeReceive), null);
                                 void probeReceive(IAsyncResult res)
@@ -739,10 +741,8 @@ public static class MediationClient
                                                 //TRY DELAYING ALL OF THIS UNTIL THE ORIGINAL TASK HAS COMPLETELY DIED
                                                 tempUdpClient.Send(shutdownBuffer, shutdownBuffer.Length, new IPEndPoint(IPAddress.Loopback, 5000));
                                                 udpClient = tempUdpClient;
-                                                const int SIO_UDP_CONNRESET = -1744830452;
-                                                udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
 
-                                                NodeOptions.MediationClientPort = ((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port;
+                                                NodeOptions.MediationClientPort = ((IPEndPoint) udpClient.Client.LocalEndPoint).Port;
                                                 mediationClientPort = NodeOptions.MediationClientPort;
                                                 CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
                                                 Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
