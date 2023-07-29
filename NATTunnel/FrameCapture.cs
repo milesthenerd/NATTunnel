@@ -1,14 +1,16 @@
 using SharpPcap;
 using SharpPcap.LibPcap;
+using SharpPcap.Tunneling;
 using PacketDotNet;
 using System.Net.NetworkInformation;
 using System;
-using System.Text;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Net;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace NATTunnel;
 
@@ -30,6 +32,7 @@ public class FrameCapture
     public void Start()
     {
         new Task(() => {
+            //TestUdpTunnel();
             // Print SharpPcap version
             var ver = Pcap.SharpPcapVersion;
             Console.WriteLine("SharpPcap {0}, Example4.BasicCapNoCallback.cs", ver);
@@ -112,6 +115,29 @@ public class FrameCapture
         ip.DestinationAddress = myIP;
         ip.UpdateCalculatedValues();
         ip.UpdateIPChecksum();
+
+        try{
+            UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+            udp.UpdateCalculatedValues();
+            udp.UpdateUdpChecksum();
+            ip.PayloadPacket = udp;
+        }
+        catch(Exception e)
+        {
+            Console.WriteLine(e);
+        }
+
+        try{
+            TcpPacket tcp = ip.Extract<PacketDotNet.TcpPacket>();
+            tcp.UpdateCalculatedValues();
+            tcp.UpdateTcpChecksum();
+            ip.PayloadPacket = tcp;
+        }
+        catch(Exception e)
+        {
+            Console.WriteLine(e);
+        }
+
         newPacket.PayloadPacket = ip;
         newPacket.UpdateCalculatedValues();
         device.SendPacket(newPacket);
@@ -200,5 +226,99 @@ public class FrameCapture
                 IpAddress = m.Groups[ "ip" ].Value
             };
         }
+    }
+
+    /// <summary>
+    /// Inject packets with TAP, and check them being received by Libpcap
+    /// </summary>
+    public void TestPcapTapExchange()
+    {
+        var nic = TunnelDevice.GetTunnelInterfaces().First();
+        Console.WriteLine(TunnelDevice.GetTunnelInterfaces().Length);
+        using var tapDevice = GetTunnelDevice(nic);
+        Console.WriteLine(tapDevice.ToString());
+        // Open TAP device first to ensure the virutal device is connected
+        tapDevice.Open();
+        // Wait for interface to be fully up
+        Thread.Sleep(1000);
+        var pcapInterface = PcapInterface.GetAllPcapInterfaces()
+            .First(pIf => pIf.FriendlyName == nic.Name);
+        using var pcapDevice = new LibPcapLiveDevice(pcapInterface);
+        Console.WriteLine(pcapDevice.ToString());
+        CheckExchange(tapDevice, pcapDevice);
+    }
+
+    private static TunnelDevice GetTunnelDevice(NetworkInterface nic)
+    {
+        var config = new IPAddressConfiguration
+        {
+            // Pick a range that no CI is likely to use
+            Address = IPAddress.Parse("10.5.0.1"),
+            IPv4Mask = IPAddress.Parse("255.255.255.0"),
+        };
+        return new TunnelDevice(nic, config);
+    }
+
+    internal static void CheckExchange(IInjectionDevice sender, ICaptureDevice receiver)
+    {
+        const int PacketsCount = 10;
+        var packets = new List<RawCapture>();
+        var statuses = new List<CaptureStoppedEventStatus>();
+        void Receiver_OnPacketArrival(object s, PacketCapture e)
+        {
+            packets.Add(e.GetPacket());
+        }
+        void Receiver_OnCaptureStopped(object s, CaptureStoppedEventStatus status)
+        {
+            statuses.Add(status);
+        }
+
+        // Configure sender
+        sender.Open();
+
+        // Configure receiver
+        receiver.Open(DeviceModes.MaxResponsiveness);
+        //receiver.Filter = "ether proto 0x1234";
+        receiver.OnPacketArrival += Receiver_OnPacketArrival;
+        receiver.OnCaptureStopped += Receiver_OnCaptureStopped;
+        receiver.StartCapture();
+
+        // Send the packets
+        var packet = EthernetPacket.RandomPacket();
+        packet.DestinationHardwareAddress = PhysicalAddress.Parse("FFFFFFFFFFFF");
+        packet.Type = (EthernetType)0x1234;
+        for (var i = 0; i < PacketsCount; i++)
+        {
+            Console.WriteLine(packet);
+            sender.SendPacket(packet);
+        }
+        // Wait for packets to arrive
+        Thread.Sleep(2000);
+        Console.ReadLine();
+        receiver.StopCapture();
+    }
+
+    public void TestUdpTunnel()
+    {
+        var nic = TunnelDevice.GetTunnelInterfaces().First();
+        using var tapDevice = GetTunnelDevice(nic);
+        // Open TAP device first to ensure the virutal device is connected
+        tapDevice.Open(DeviceModes.Promiscuous);
+        var tapIp = IpHelper.GetIPAddress(nic);
+
+        using var tester = new UdpTester(tapIp);
+
+        tapDevice.Filter = "udp port " + UdpTester.Port;
+
+        // Send from OS, and receive in tunnel
+        var seq1 = new byte[] { 1, 2, 3 };
+        tester.Broadcast(seq1);
+        var retval = tapDevice.GetNextPacket(out var p1);
+
+        // Send from tunnel, and receive in OS
+        var seq2 = new byte[] { 4, 5, 6 };
+        var packet = tester.GetReceivablePacket(seq2);
+        tapDevice.SendPacket(packet);
+        retval = tapDevice.GetNextPacket(out var p2);
     }
 }

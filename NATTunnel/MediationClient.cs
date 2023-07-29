@@ -48,7 +48,7 @@ public static class MediationClient
     private static NATType natType = NATType.Unknown;
     private static List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
     private static int currentConnectionID = 0;
-    public static IPAddress localIP = IPAddress.Parse("10.5.0.1");
+    public static IPAddress localIP = IPAddress.Parse("10.5.0.2");
     private static FrameCapture test;
 
     static MediationClient()
