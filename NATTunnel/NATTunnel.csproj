@@ -4,6 +4,10 @@
     <ProjectReference Include="..\NATTunnel-Common\NATTunnel-Common.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="sharppcap" Version="6.2.5" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net6.0</TargetFramework>

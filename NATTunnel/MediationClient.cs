@@ -48,9 +48,14 @@ public static class MediationClient
     private static NATType natType = NATType.Unknown;
     private static List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
     private static int currentConnectionID = 0;
+    public static IPAddress localIP = IPAddress.Parse("10.5.0.1");
+    private static FrameCapture test;
 
     static MediationClient()
     {
+        test = new FrameCapture();
+        test.Start();
+
         try
         {
             udpClient = new UdpClient(NodeOptions.MediationClientPort);
@@ -82,9 +87,24 @@ public static class MediationClient
             byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
             udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
         }
-        catch (Exception e)
+        catch (Exception ex)
         {
-            Console.WriteLine(e);
+            Console.WriteLine(ex);
+        }
+    }
+
+    public static void Send(byte[] packetData)
+    {
+        if(isServer)
+        {
+            foreach (IPEndPoint client in connectedClients)
+            {
+                udpClient.Send(packetData, packetData.Length, client);
+            }
+        }
+        else
+        {
+            udpClient.Send(packetData, packetData.Length, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}"));
         }
     }
 
@@ -240,6 +260,8 @@ public static class MediationClient
             catch
             {
                 Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
+                Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
+                test.Send(receiveBuffer);
                 continue;
             }
 
@@ -368,6 +390,9 @@ public static class MediationClient
             catch
             {
                 Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
+                Console.WriteLine($"length {timeoutClients.Count} and {connectedClients.Count}");
+                Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
+                test.Send(receiveBuffer);
                 continue;
             }
 
@@ -401,14 +426,14 @@ public static class MediationClient
             if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
-                holePunchReceivedCount++;
-                if (holePunchReceivedCount >= 5 && !connected)
+                if (holePunchReceivedCount == 0) holePunchReceivedCount++;
+                if (holePunchReceivedCount >= 1 && !connected)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
                     message.ConnectionID = currentConnectionID;
                     message.IsServer = isServer;
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                    Console.WriteLine(message.Serialize());
+                    Console.WriteLine($"sending {message.Serialize()}");
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
             }
@@ -642,11 +667,13 @@ public static class MediationClient
                 //Make the other client do the same - done?
                 //When server determines both clients have connected based on these packets, drop the clients from the server and let them continue communicating - maybe done?
 
-                //Apparently the second udp client task that gets created during the first received symmetric nat packet is the one that dies when the token cancellation for the first task is called???? what...
-                //Update: first task now closes rather than the second task, BUT it's only after it receives another packet that it actually obeys the cancellation
-                //Maybe have a "shutdown" packet sent straight to the first task after cancelling to make it *actually* cancel, then I'll worry about making the second task actually receive junk locally because that doesn't work for WHATEVER REASON
-
                 //Also, add flag to prevent simultaneous connection attempts based on aforementioned packets
+                //Add timeouts for connection attempts to allow another client to try to connect if the previous one fails
+                //Basically the server shouldn't be locked out if a client couldn't connect
+                //Also add a retry if there's no connection made after a certain amount of time
+
+                //Fix symmetric server to non-symmetric client connection?? what happened here
+                //Look into tun/tap adapters on windows and linux to turn this into a tunneling vpn
 
                 switch(receivedMessage.ID)
                 {
@@ -724,29 +751,32 @@ public static class MediationClient
                                             byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
                                             byte[] shutdownBuffer = Encoding.ASCII.GetBytes("yes");
 
-                                            Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
-                                            holePunchReceivedCount++;
-
-                                            udpClientTaskCancellationToken.Cancel();
-                                            //udpClientTaskCancellationToken.Dispose();
-                                            
-                                            if (isServer)
+                                            if(receivedEndpoint.Address.Equals(targetPeerIp))
                                             {
-                                                Task newUdpServerTask = new Task(UdpServerListenLoop);
-                                                newUdpServerTask.Start();
-                                                Console.WriteLine("server");
-                                            }
-                                            else
-                                            {
-                                                //TRY DELAYING ALL OF THIS UNTIL THE ORIGINAL TASK HAS COMPLETELY DIED
-                                                tempUdpClient.Send(shutdownBuffer, shutdownBuffer.Length, new IPEndPoint(IPAddress.Loopback, 5000));
-                                                udpClient = tempUdpClient;
+                                                Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
+                                                holePunchReceivedCount++;
 
-                                                NodeOptions.MediationClientPort = ((IPEndPoint) udpClient.Client.LocalEndPoint).Port;
-                                                mediationClientPort = NodeOptions.MediationClientPort;
-                                                CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
-                                                Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
-                                                Console.WriteLine("client");
+                                                udpClientTaskCancellationToken.Cancel();
+                                                //udpClientTaskCancellationToken.Dispose();
+                                                
+                                                if (isServer)
+                                                {
+                                                    Task newUdpServerTask = new Task(UdpServerListenLoop);
+                                                    newUdpServerTask.Start();
+                                                    Console.WriteLine("server");
+                                                }
+                                                else
+                                                {
+                                                    //TRY DELAYING ALL OF THIS UNTIL THE ORIGINAL TASK HAS COMPLETELY DIED
+                                                    tempUdpClient.Send(shutdownBuffer, shutdownBuffer.Length, new IPEndPoint(IPAddress.Loopback, 5000));
+                                                    udpClient = tempUdpClient;
+
+                                                    NodeOptions.MediationClientPort = ((IPEndPoint) udpClient.Client.LocalEndPoint).Port;
+                                                    mediationClientPort = NodeOptions.MediationClientPort;
+                                                    CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
+                                                    Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
+                                                    Console.WriteLine("client");
+                                                }
                                             }
                                         }
                                     }
@@ -790,6 +820,7 @@ public static class MediationClient
                     case MediationMessageType.ConnectionComplete:
                     {
                         if (isServer) {
+                            holePunchReceivedCount = 5;
                             TcpClient tcpClientPassthrough = new TcpClient();
 
                             tcpClientPassthrough.Connect(new IPEndPoint(IPAddress.Loopback, NodeOptions.LocalPort));
