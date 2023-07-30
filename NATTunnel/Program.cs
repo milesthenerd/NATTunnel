@@ -26,15 +26,12 @@ internal static class Program
             Environment.Exit(-1);
         }
 
-        TunnelNode tunnelNode = new TunnelNode();
-        tunnelNode.Start();
-
         MediationClient.Start();
 
         Console.WriteLine("Press Q or CTRL+C to quit.");
         bool hasConsole = true;
         //TODO: close mediationClient when shutting down / give it a stop method
-        Console.CancelKeyPress += (_, _) => { Shutdown(tunnelNode); };
+        Console.CancelKeyPress += (_, _) => { Shutdown(); };
         while (running)
         {
             if (!hasConsole)
@@ -45,7 +42,7 @@ internal static class Program
                 ConsoleKeyInfo cki = Console.ReadKey();
                 if (cki.KeyChar == 'q')
                 {
-                    Shutdown(tunnelNode);
+                    Shutdown();
                 }
             }
             catch (InvalidOperationException)
@@ -57,10 +54,9 @@ internal static class Program
         Console.WriteLine("NATTunnel exited.");
     }
 
-    private static void Shutdown(TunnelNode tunnelNode)
+    private static void Shutdown()
     {
         Console.WriteLine("\nQuitting...");
         running = false;
-        tunnelNode.Stop();
     }
 }
