@@ -42,7 +42,7 @@ public class FrameCapture
             foreach(PcapAddress address in device.Addresses)
             {
                 try {
-                    if(address.Addr.ipAddress.ToString().Contains("10.220"))
+                    if(address.Addr.ipAddress.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6)
                     {
                         myIP = address.Addr.ipAddress;
                         Console.WriteLine(myIP);
