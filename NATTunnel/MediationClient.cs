@@ -30,13 +30,11 @@ public static class MediationClient
     private static readonly IPEndPoint endpoint;
     private static int natTestPortOne = 6511;
     private static int natTestPortTwo = 6512;
-    private static readonly IPEndPoint programEndpoint;
     private static IPAddress targetPeerIp;
     private static int targetPeerPort;
     private static int holePunchReceivedCount;
     private static bool connected;
     private static readonly IPAddress remoteIp;
-    private static int mediationClientPort;
     private static readonly bool isServer;
     private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
     private static readonly Dictionary<IPAddress, IPEndPoint> privateToRemote = new Dictionary<IPAddress, IPEndPoint>();
@@ -54,7 +52,7 @@ public static class MediationClient
 
         try
         {
-            udpClient = new UdpClient(NodeOptions.MediationClientPort);
+            udpClient = new UdpClient();
         }
         catch (SocketException)
         {
@@ -72,9 +70,7 @@ public static class MediationClient
         }
 
         endpoint = NodeOptions.MediationIp;
-        programEndpoint = new IPEndPoint(IPAddress.Loopback, NodeOptions.LocalPort);
         remoteIp = NodeOptions.RemoteIp;
-        mediationClientPort = NodeOptions.MediationClientPort;
         isServer = NodeOptions.IsServer;
         if (isServer) privateIP = IPAddress.Parse("10.5.0.0");
         if (!isServer) privateIP = IPAddress.Parse("10.5.0.255");
@@ -240,7 +236,7 @@ public static class MediationClient
         //Init an IPEndPoint that will be populated with the sender's info
         int randID = new Random().Next();
 
-        IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
+        IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
         Console.WriteLine($"is this even starting {listenEndpoint}");
         while (!token.IsCancellationRequested)
         {
@@ -322,7 +318,7 @@ public static class MediationClient
 
     private static void UdpServerListenLoop()
     {
-        IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, mediationClientPort);
+        IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
         while (true)
         {
             Console.WriteLine(privateToRemote.Count);
@@ -631,8 +627,6 @@ public static class MediationClient
                                                     tempUdpClient.Send(shutdownBuffer, shutdownBuffer.Length, new IPEndPoint(IPAddress.Loopback, 5000));
                                                     udpClient = tempUdpClient;
 
-                                                    NodeOptions.MediationClientPort = ((IPEndPoint) udpClient.Client.LocalEndPoint).Port;
-                                                    mediationClientPort = NodeOptions.MediationClientPort;
                                                     CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
                                                     Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
                                                     Console.WriteLine("client");
