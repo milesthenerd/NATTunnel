@@ -53,6 +53,11 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool IsServer { get; set; }
+    /// <summary>
+    ///The private IP of a client
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string PrivateAddressString { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
@@ -80,6 +85,22 @@ public class MediationMessage
     public void SetEndpoint(IPEndPoint serverEndpoint)
     {
         EndpointString = serverEndpoint.ToString();
+    }
+
+    /// <summary>
+    ///Converts the private address string to an IPAddress and returns it
+    /// </summary>
+    public IPAddress GetPrivateAddress()
+    {
+        return IPAddress.Parse(PrivateAddressString);
+    }
+
+    /// <summary>
+    ///Converts an IPAddress to a string and sets the private address string to it
+    /// </summary>
+    public void SetPrivateAddress(IPAddress privateAddress)
+    {
+        PrivateAddressString = privateAddress.ToString();
     }
 }
 /// <summary>

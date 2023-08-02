@@ -84,14 +84,14 @@ public class FrameCapture
                         var origEthDest = eth.DestinationHardwareAddress;
                         Console.WriteLine(eth);
                         IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
-                        if(ip.DestinationAddress.Equals(MediationClient.localIP) || ip.DestinationAddress.Equals(myIP)) continue;
+                        if(ip.DestinationAddress.Equals(MediationClient.privateIP) || ip.DestinationAddress.Equals(myIP)) continue;
                         eth.SourceHardwareAddress = origEthDest;
                         eth.DestinationHardwareAddress = origEthSrc;
                         eth.UpdateCalculatedValues();
-                        ip.SourceAddress = MediationClient.localIP;
+                        ip.SourceAddress = MediationClient.privateIP;
                         ip.UpdateCalculatedValues();
                         ip.UpdateIPChecksum();
-                        MediationClient.Send(eth.Bytes);
+                        MediationClient.Send(eth.Bytes, ip.DestinationAddress);
                     }
                     catch(Exception error) {
                         Console.WriteLine(error);
@@ -110,7 +110,7 @@ public class FrameCapture
         //eth.UpdateCalculatedValues();
         EthernetPacket eth = givenPacket.Extract<PacketDotNet.EthernetPacket>();
         IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
-        //if(ip.DestinationAddress.Equals(MediationClient.localIP)) continue;
+        //if(ip.DestinationAddress.Equals(MediationClient.privateIP)) continue;
         ip.DestinationAddress = myIP;
         ip.UpdateCalculatedValues();
         ip.UpdateIPChecksum();
