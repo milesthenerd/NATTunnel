@@ -23,9 +23,7 @@ public static class MediationClient
     private static NetworkStream tcpClientStream;
     private static Task tcpClientTask;
     private static CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
-    private static Task udpClientTask;
     private static CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();
-    private static Task udpServerTask;
     private static CancellationTokenSource udpServerTaskCancellationToken = new CancellationTokenSource();
     private static readonly IPEndPoint endpoint;
     private static int natTestPortOne = 6511;
@@ -220,8 +218,7 @@ public static class MediationClient
         //Set client targetPeerIp to something no client will have
         targetPeerIp = IPAddress.None;
         //Begin listening
-        udpServerTask = new Task(UdpServerListenLoop);
-        udpServerTask.Start();
+        Task.Run(() => UdpServerListenLoop(udpServerTaskCancellationToken.Token));
         //Start timer for hole punch init and keep alive
         Timer timer = new Timer(1000)
         {
@@ -269,7 +266,6 @@ public static class MediationClient
             if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
-                holePunchReceivedCount++;
                 //TODO: random hardcoded value
                 if (holePunchReceivedCount >= 5 && !connected)
                 {
@@ -286,7 +282,14 @@ public static class MediationClient
             {
                 case MediationMessageType.HolePunchAttempt:
                 {
-                    privateIP = receivedMessage.GetPrivateAddress();
+                    holePunchReceivedCount++;
+                    try {
+                        privateIP = receivedMessage.GetPrivateAddress();
+                    }
+                    catch(Exception e)
+                    {
+                        Console.WriteLine(e);
+                    }
                     Console.WriteLine("POG");
                 }
                 break;
@@ -302,7 +305,14 @@ public static class MediationClient
                 break;
                 case MediationMessageType.SymmetricHolePunchAttempt:
                 {
-                    privateIP = receivedMessage.GetPrivateAddress();
+                    holePunchReceivedCount++;
+                    try {
+                        privateIP = receivedMessage.GetPrivateAddress();
+                    }
+                    catch(Exception e)
+                    {
+                        Console.WriteLine(e);
+                    }
                     if (natType != NATType.Symmetric)
                     {
                         targetPeerIp = listenEndpoint.Address;
@@ -316,10 +326,10 @@ public static class MediationClient
         Console.WriteLine($"WHAT THE HECK IS GOING ON WHY ISN'T THIS HITTING rand {randID}");
     }
 
-    private static void UdpServerListenLoop()
+    private static void UdpServerListenLoop(CancellationToken token)
     {
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
-        while (true)
+        while (!token.IsCancellationRequested)
         {
             Console.WriteLine(privateToRemote.Count);
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
@@ -374,7 +384,6 @@ public static class MediationClient
             if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
-                if (holePunchReceivedCount == 0) holePunchReceivedCount++;
                 if (holePunchReceivedCount >= 1 && !connected)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
@@ -386,27 +395,11 @@ public static class MediationClient
                 }
             }
 
-            /*
-            IPAddress receivedIp = null;
-            int receivedPort = 0;
-            if (Equals(receivedIp, targetPeerIp) && holePunchReceivedCount < 5)
-            {
-                targetPeerPort = receivedPort;
-                Console.WriteLine($"targetPeerIp:{targetPeerIp}");
-                Console.WriteLine($"targetPeerPort:{targetPeerPort}");
-                if (targetPeerPort != 0)
-                {
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
-                    Console.WriteLine("punching");
-                }
-            }
-            */
-
             switch(receivedMessage.ID)
             {
                 case MediationMessageType.HolePunchAttempt:
                 {
+                    if (holePunchReceivedCount == 0) holePunchReceivedCount++;
                     Console.WriteLine("POG");
                 }
                 break;
@@ -430,6 +423,7 @@ public static class MediationClient
                 break;
                 case MediationMessageType.SymmetricHolePunchAttempt:
                 {
+                    if (holePunchReceivedCount == 0) holePunchReceivedCount++;
                     if (natType != NATType.Symmetric)
                     {
                         targetPeerIp = listenEndpoint.Address;
@@ -438,8 +432,6 @@ public static class MediationClient
                 }
                 break;
             }
-            if (udpServerTaskCancellationToken.Token.IsCancellationRequested)
-                return;
         }
     }
 
@@ -478,7 +470,7 @@ public static class MediationClient
 
                 void TryConnectFromSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount <= 5)
+                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         if (isServer) message.SetPrivateAddress(GetKeyFromValue(privateToRemote, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")));
@@ -531,7 +523,6 @@ public static class MediationClient
                 //Also add a retry if there's no connection made after a certain amount of time
 
                 //Fix symmetric server to non-symmetric client connection?? what happened here
-                //Look into tun/tap adapters on windows and linux to turn this into a tunneling vpn
 
                 switch(receivedMessage.ID)
                 {
@@ -613,18 +604,18 @@ public static class MediationClient
                                                 holePunchReceivedCount++;
 
                                                 udpClientTaskCancellationToken.Cancel();
-                                                //udpClientTaskCancellationToken.Dispose();
+                                                udpServerTaskCancellationToken.Cancel();
                                                 
                                                 if (isServer)
                                                 {
-                                                    Task newUdpServerTask = new Task(UdpServerListenLoop);
-                                                    newUdpServerTask.Start();
+                                                    udpClient = tempUdpClient;
+
+                                                    CancellationTokenSource newUdpServerTaskCancellationToken = new CancellationTokenSource();
+                                                    Task.Run(() => UdpServerListenLoop(newUdpServerTaskCancellationToken.Token));
                                                     Console.WriteLine("server");
                                                 }
                                                 else
                                                 {
-                                                    //TRY DELAYING ALL OF THIS UNTIL THE ORIGINAL TASK HAS COMPLETELY DIED
-                                                    tempUdpClient.Send(shutdownBuffer, shutdownBuffer.Length, new IPEndPoint(IPAddress.Loopback, 5000));
                                                     udpClient = tempUdpClient;
 
                                                     CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
