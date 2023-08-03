@@ -522,7 +522,7 @@ public static class MediationClient
                 //Basically the server shouldn't be locked out if a client couldn't connect
                 //Also add a retry if there's no connection made after a certain amount of time
 
-                //Fix symmetric server to non-symmetric client connection?? what happened here
+                //Need to find out why server doesn't let another connection complete after the first client disconnects
 
                 switch(receivedMessage.ID)
                 {
@@ -592,36 +592,32 @@ public static class MediationClient
                                 {
                                     try
                                     {
-                                        if(holePunchReceivedCount == 0)
+                                        IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
+                                        byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
+                                        holePunchReceivedCount++;
+
+                                        if(receivedEndpoint.Address.Equals(targetPeerIp) && holePunchReceivedCount == 1)
                                         {
-                                            IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
-                                            byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
-                                            byte[] shutdownBuffer = Encoding.ASCII.GetBytes("yes");
+                                            Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
 
-                                            if(receivedEndpoint.Address.Equals(targetPeerIp))
+                                            udpClientTaskCancellationToken.Cancel();
+                                            udpServerTaskCancellationToken.Cancel();
+                                            
+                                            if (isServer)
                                             {
-                                                Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint) tempUdpClient.Client.LocalEndPoint).Port}");
-                                                holePunchReceivedCount++;
+                                                udpClient = tempUdpClient;
 
-                                                udpClientTaskCancellationToken.Cancel();
-                                                udpServerTaskCancellationToken.Cancel();
-                                                
-                                                if (isServer)
-                                                {
-                                                    udpClient = tempUdpClient;
+                                                CancellationTokenSource newUdpServerTaskCancellationToken = new CancellationTokenSource();
+                                                Task.Run(() => UdpServerListenLoop(newUdpServerTaskCancellationToken.Token));
+                                                Console.WriteLine("server");
+                                            }
+                                            else
+                                            {
+                                                udpClient = tempUdpClient;
 
-                                                    CancellationTokenSource newUdpServerTaskCancellationToken = new CancellationTokenSource();
-                                                    Task.Run(() => UdpServerListenLoop(newUdpServerTaskCancellationToken.Token));
-                                                    Console.WriteLine("server");
-                                                }
-                                                else
-                                                {
-                                                    udpClient = tempUdpClient;
-
-                                                    CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
-                                                    Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
-                                                    Console.WriteLine("client");
-                                                }
+                                                CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
+                                                Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
+                                                Console.WriteLine("client");
                                             }
                                         }
                                     }

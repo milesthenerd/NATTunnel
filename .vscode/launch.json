@@ -5,17 +5,6 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Client (GUI)",
-            "type": "coreclr",
-            "request": "launch",
-            "preLaunchTask": "build",
-            "program": "${workspaceFolder}/NATTunnel-GUI/bin/Debug/net5.0/NATTunnel.dll",
-            "args": [],
-            "cwd": "${workspaceFolder}/NATTunnel-GUI/bin/Debug/net5.0/",
-            "console": "internalConsole",
-            "stopAtEntry": false
-        },
-        {
             "name": "Client",
             "type": "coreclr",
             "request": "launch",
