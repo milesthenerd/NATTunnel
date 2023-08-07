@@ -84,14 +84,14 @@ public class FrameCapture
                         var origEthDest = eth.DestinationHardwareAddress;
                         Console.WriteLine(eth);
                         IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
-                        if(ip.DestinationAddress.Equals(MediationClient.privateIP) || ip.DestinationAddress.Equals(myIP)) continue;
+                        if(ip.DestinationAddress.Equals(Tunnel.privateIP) || ip.DestinationAddress.Equals(myIP)) continue;
                         eth.SourceHardwareAddress = origEthDest;
                         eth.DestinationHardwareAddress = origEthSrc;
                         eth.UpdateCalculatedValues();
-                        ip.SourceAddress = MediationClient.privateIP;
+                        ip.SourceAddress = Tunnel.privateIP;
                         ip.UpdateCalculatedValues();
                         ip.UpdateIPChecksum();
-                        MediationClient.Send(eth.Bytes, ip.DestinationAddress);
+                        Tunnel.Send(eth.Bytes, ip.DestinationAddress);
                     }
                     catch(Exception error) {
                         Console.WriteLine(error);
@@ -110,7 +110,7 @@ public class FrameCapture
         //eth.UpdateCalculatedValues();
         EthernetPacket eth = givenPacket.Extract<PacketDotNet.EthernetPacket>();
         IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
-        //if(ip.DestinationAddress.Equals(MediationClient.privateIP)) continue;
+        //if(ip.DestinationAddress.Equals(Tunnel.privateIP)) continue;
         ip.DestinationAddress = myIP;
         ip.UpdateCalculatedValues();
         ip.UpdateIPChecksum();
@@ -159,8 +159,6 @@ public class FrameCapture
             }
             if (friendlyName == "virbr0-nic")
             {
-                // Semaphore CI have this interface, and it's always down
-                // OperationalStatus does not detect it correctly
                 continue;
             }
             var nic = nics.FirstOrDefault(ni => ni.Name == friendlyName);

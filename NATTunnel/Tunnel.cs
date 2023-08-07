@@ -14,7 +14,7 @@ using System.Threading.Tasks;
 
 namespace NATTunnel;
 
-public static class MediationClient
+public static class Tunnel
 {
     //TODO: entire class should get reviewed and eventually split up into smaller classes
     //TODO: do we really want to have this static? Why not just a normal class, with normal constructor?
@@ -34,16 +34,13 @@ public static class MediationClient
     private static bool connected;
     private static readonly IPAddress remoteIp;
     private static readonly bool isServer;
-    private static readonly List<IPEndPoint> connectedClients = new List<IPEndPoint>();
-    private static readonly Dictionary<IPAddress, IPEndPoint> privateToRemote = new Dictionary<IPAddress, IPEndPoint>();
-    private static readonly Dictionary<IPEndPoint, int> timeoutClients = new Dictionary<IPEndPoint, int>();
     private static NATType natType = NATType.Unknown;
     private static List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
     private static int currentConnectionID = 0;
     public static IPAddress privateIP = null;
     private static FrameCapture capture;
 
-    static MediationClient()
+    static Tunnel()
     {
         capture = new FrameCapture();
         capture.Start();
@@ -89,13 +86,14 @@ public static class MediationClient
     {
         if (isServer)
         {
-            if (privateToRemote.ContainsKey(privateAddress))
+            Client client = Clients.GetClient(privateAddress);
+            if (client != null)
             {
                 MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
                 message.Data = packetData;
                 message.SetPrivateAddress(privateAddress);
                 byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                udpClient.Send(sendBuffer, sendBuffer.Length, privateToRemote[privateAddress]);
+                udpClient.Send(sendBuffer, sendBuffer.Length, client.GetEndPoint());
             }
         }
         else
@@ -106,29 +104,6 @@ public static class MediationClient
             byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
             udpClient.Send(sendBuffer, sendBuffer.Length, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}"));
         }
-    }
-
-    public static void AddIP(IPEndPoint remoteEndpoint)
-    {
-        if (!privateToRemote.ContainsValue(remoteEndpoint))
-            privateToRemote.Add(IPAddress.Parse($"10.5.0.{connectedClients.Count + 1}"), remoteEndpoint);
-    }
-
-    public static void RemoveIP(IPEndPoint remoteEndpoint)
-    {
-        privateToRemote.Remove(GetKeyFromValue(privateToRemote, remoteEndpoint));
-    }
-
-    public static IPAddress GetKeyFromValue(Dictionary<IPAddress, IPEndPoint> dict, IPEndPoint endpoint)
-    {
-        foreach(var pair in dict)
-        {
-            if(pair.Value.Equals(endpoint))
-            {
-                return pair.Key;
-            }
-        }
-        return null;
     }
 
     private static void OnTimedEvent(object source, ElapsedEventArgs e)
@@ -142,37 +117,36 @@ public static class MediationClient
             Console.WriteLine("Sent");
         }
         //If connected to remote endpoint, send keep alive message
-        if (connected)
+        if (isServer)
         {
-            if (isServer)
+            foreach (Client client in Clients.GetAll())
             {
-                foreach (IPEndPoint client in connectedClients)
+                if (client.Connected)
                 {
-                    udpClient.Send(sendBuffer, sendBuffer.Length, client);
+                    udpClient.Send(sendBuffer, sendBuffer.Length, client.GetEndPoint());
                 }
             }
-            else
+        }
+        else
+        {
+            if (connected)
             {
                 udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                Console.WriteLine("Keep alive");
             }
-            Console.WriteLine("Keep alive");
         }
 
-        foreach ((IPEndPoint key, int value) in timeoutClients)
+        foreach (Client client in Clients.GetAll())
         {
-            Console.WriteLine($"time left: {value}");
-            if (value >= 1)
+            Console.WriteLine($"time left: {client.Timeout}");
+            if (client.Timeout >= 1)
             {
-                int timeRemaining = value;
-                timeRemaining--;
-                timeoutClients[key] = timeRemaining;
+                client.Tick();
             }
             else
             {
-                Console.WriteLine($"timed out {key}");
-                connectedClients.Remove(key);
-                timeoutClients.Remove(key);
-                RemoveIP(key);
+                Console.WriteLine($"timed out {client}");
+                Clients.Remove(client);
             }
         }
     }
@@ -256,8 +230,6 @@ public static class MediationClient
             catch
             {
                 Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
-                //Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
-                //capture.Send(receiveBuffer);
                 continue;
             }
 
@@ -331,7 +303,7 @@ public static class MediationClient
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
         while (!token.IsCancellationRequested)
         {
-            Console.WriteLine(privateToRemote.Count);
+            Console.WriteLine(Clients.Count);
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
 
             string receivedString = Encoding.ASCII.GetString(receiveBuffer);
@@ -348,43 +320,28 @@ public static class MediationClient
             catch
             {
                 Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
-                //Console.WriteLine($"length {timeoutClients.Count} and {connectedClients.Count}");
-                //Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
-                //capture.Send(receiveBuffer);
                 continue;
             }
 
-            foreach ((IPEndPoint key, int _) in timeoutClients)
-            {
-                bool exists = connectedClients.Any(value2 => Equals(key, value2));
+            Client _client = Clients.GetClient(listenEndpoint);
 
-                if (!exists)
-                {
-                    Console.WriteLine($"removing {key}");
-                    timeoutClients.Remove(key);
-                    RemoveIP(key);
-                }
+            if (_client != null)
+                _client.ResetTimeout();
 
-                Console.WriteLine($"{key} and {listenEndpoint}");
-                if (key.Address.ToString() == listenEndpoint.Address.ToString())
-                    timeoutClients[key] = 5;
-            }
-
-            Console.WriteLine($"length {timeoutClients.Count} and {connectedClients.Count}");
+            Console.WriteLine($"length {Clients.Count}");
             Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
-            if (!connectedClients.Exists(element => element.Address.ToString() == listenEndpoint.Address.ToString()) && Equals(listenEndpoint.Address, targetPeerIp))
+            if (Clients.GetClient(listenEndpoint) == null && Equals(listenEndpoint.Address, targetPeerIp))
             {
-                connectedClients.Add(listenEndpoint);
-                timeoutClients.Add(listenEndpoint, 5);
-                AddIP(listenEndpoint);
+                Client client = new Client(listenEndpoint, IPAddress.Parse($"10.5.0.{Clients.Count + 1}"));
+                Clients.Add(client);
                 Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
             }
 
             if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
-                if (holePunchReceivedCount >= 1 && !connected)
+                if (holePunchReceivedCount >= 1 && !Clients.GetClient(listenEndpoint).Connected)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
                     message.ConnectionID = currentConnectionID;
@@ -409,7 +366,7 @@ public static class MediationClient
                     IPAddress targetPrivateAddress = receivedMessage.GetPrivateAddress();
                     Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
 
-                    if (!connected) continue;
+                    if (!Clients.GetClient(listenEndpoint).Connected) continue;
 
                     if (targetPrivateAddress.Equals(privateIP))
                     {
@@ -462,7 +419,7 @@ public static class MediationClient
                     if(holePunchReceivedCount <= 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
-                        if (isServer) message.SetPrivateAddress(GetKeyFromValue(privateToRemote, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")));
+                        if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
@@ -473,7 +430,7 @@ public static class MediationClient
                     if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (isServer) message.SetPrivateAddress(GetKeyFromValue(privateToRemote, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")));
+                        if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         Console.WriteLine(udpClient.Client.LocalEndPoint);
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
@@ -495,7 +452,7 @@ public static class MediationClient
                     if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (isServer) message.SetPrivateAddress(GetKeyFromValue(privateToRemote, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")));
+                        if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
@@ -521,8 +478,6 @@ public static class MediationClient
                 //Add timeouts for connection attempts to allow another client to try to connect if the previous one fails
                 //Basically the server shouldn't be locked out if a client couldn't connect
                 //Also add a retry if there's no connection made after a certain amount of time
-
-                //Need to find out why server doesn't let another connection complete after the first client disconnects
 
                 switch(receivedMessage.ID)
                 {
@@ -662,7 +617,7 @@ public static class MediationClient
                     {
                         if (isServer) {
                             holePunchReceivedCount = 5;
-                            connected = true;
+                            Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).Connected = true;
                         } else {
                             try
                             {

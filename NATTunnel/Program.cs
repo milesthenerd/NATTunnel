@@ -21,7 +21,7 @@ internal static class Program
             Environment.Exit(-1);
         }
 
-        MediationClient.Start();
+        Tunnel.Start();
 
         Console.WriteLine("Press any key to quit");
         while (Console.KeyAvailable == false)
