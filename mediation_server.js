@@ -68,54 +68,64 @@ var tcp_server = tcp.createServer(function(socket){
                         console.log(requested_ip);
                         for(let i=0; i<sockets.length; i++){
                             if(requested_ip.includes(sockets[i].ip)){
-                                var server_info = "0.0.0.0:0";
-                                var client_info = "0.0.0.0:0";
+                                var server_info = "0.0.0.0";
+                                var client_info = "0.0.0.0";
                                 var id = connection_id++;
+                                let is_cancelled = false;
                                 contains_requested_ip = true;
-                                for(let f=0; f<udp_connection_info.length; f++){
-                                    if(requested_ip.includes(udp_connection_info[f].ip) && udp_connection_info[f].status.type != status_types.Busy){
-                                        let port = udp_connection_info[f].port;
-                                        //Tell client the endpoint of the server
-                                        socket.write(Buffer.from(JSON.stringify({
-                                            "ID": msg_types.ConnectionBegin,
-                                            "EndpointString": `${sockets[i].ip}:${port}`,
-                                            "NATType": sockets[i].natType,
-                                            "ConnectionID": id
-                                        })));
-                                        console.log('Server info');
-                                        console.log(JSON.stringify({
-                                            "ID": msg_types.ConnectionBegin,
-                                            "EndpointString": `${sockets[i].ip}:${port}`,
-                                            "NATType": sockets[i].natType,
-                                            "ConnectionID": id
-                                        }));
-                                        server_info = `${sockets[i].ip}`;
-                                        udp_connection_info[f].status.id = id;
-                                        udp_connection_info[f].status.type = status_types.Busy;
-                                    }
-    
-                                    if(socket.remoteAddress.includes(udp_connection_info[f].ip) && udp_connection_info[f].status.type != status_types.Busy){
-                                        //Tell server the endpoint of the client
-                                        let port = udp_connection_info[f].port;
-                                        sockets[i].socket.write(Buffer.from(JSON.stringify({
-                                            "ID": msg_types.ConnectionBegin,
-                                            "EndpointString": `${socket.remoteAddress}:${port}`,
-                                            "NATType": message.NATType,
-                                            "ConnectionID": id
-                                        })));
-                                        console.log('Client info');
-                                        console.log(JSON.stringify({
-                                            "ID": msg_types.ConnectionBegin,
-                                            "EndpointString": `${socket.remoteAddress}:${port}`,
-                                            "NATType": message.NATType,
-                                            "ConnectionID": id
-                                        }));
-                                        client_info = `${socket.remoteAddress}`;
-                                        udp_connection_info[f].status.id = id;
-                                        udp_connection_info[f].status.type = status_types.Busy;
+
+                                for(let d=0; d<udp_connection_info.length; d++){
+                                    if(requested_ip.includes(udp_connection_info[d].ip) && udp_connection_info[d].status.type == status_types.Busy){
+                                        is_cancelled = true;
                                     }
                                 }
-                                current_connection_pairs[id] = {"server_info": server_info, "client_info": client_info, "server_connected": false, "client_connected": false};
+
+                                if(!is_cancelled) {
+                                    for(let f=0; f<udp_connection_info.length; f++){
+                                        if(requested_ip.includes(udp_connection_info[f].ip) && udp_connection_info[f].status.type != status_types.Busy){
+                                            let port = udp_connection_info[f].port;
+                                            //Tell client the endpoint of the server
+                                            socket.write(Buffer.from(JSON.stringify({
+                                                "ID": msg_types.ConnectionBegin,
+                                                "EndpointString": `${sockets[i].ip}:${port}`,
+                                                "NATType": sockets[i].natType,
+                                                "ConnectionID": id
+                                            })));
+                                            console.log('Server info');
+                                            console.log(JSON.stringify({
+                                                "ID": msg_types.ConnectionBegin,
+                                                "EndpointString": `${sockets[i].ip}:${port}`,
+                                                "NATType": sockets[i].natType,
+                                                "ConnectionID": id
+                                            }));
+                                            server_info = `${sockets[i].ip}`;
+                                            udp_connection_info[f].status.id = id;
+                                            udp_connection_info[f].status.type = status_types.Busy;
+                                        }
+        
+                                        if(socket.remoteAddress.includes(udp_connection_info[f].ip) && udp_connection_info[f].status.type != status_types.Busy){
+                                            //Tell server the endpoint of the client
+                                            let port = udp_connection_info[f].port;
+                                            sockets[i].socket.write(Buffer.from(JSON.stringify({
+                                                "ID": msg_types.ConnectionBegin,
+                                                "EndpointString": `${socket.remoteAddress}:${port}`,
+                                                "NATType": message.NATType,
+                                                "ConnectionID": id
+                                            })));
+                                            console.log('Client info');
+                                            console.log(JSON.stringify({
+                                                "ID": msg_types.ConnectionBegin,
+                                                "EndpointString": `${socket.remoteAddress}:${port}`,
+                                                "NATType": message.NATType,
+                                                "ConnectionID": id
+                                            }));
+                                            client_info = `${socket.remoteAddress}`;
+                                            udp_connection_info[f].status.id = id;
+                                            udp_connection_info[f].status.type = status_types.Busy;
+                                        }
+                                    }
+                                    current_connection_pairs[id] = {"server_info": server_info, "client_info": client_info, "server_connected": false, "client_connected": false};
+                                }
                             }
                         }
                     }
@@ -130,17 +140,21 @@ var tcp_server = tcp.createServer(function(socket){
                         }));
                     } else {
                         if(contains_requested_ip) {
-                            udp_connection_info.forEach((client) => {
-                                if(requested_ip.includes(client.ip)) {
-                                    if(client.status.id != connection_id && client.status.type == status_types.Busy) {
-                                        console.log(message);
-                                        socket.write(Buffer.from(JSON.stringify({
-                                            "ID": msg_types.ServerNotAvailable
-                                        })));
-                                        console.log(JSON.stringify({
-                                            "ID": msg_types.ServerNotAvailable
-                                        }));
-                                    }
+                            udp_connection_info.forEach((server) => {
+                                if(requested_ip.includes(server.ip)) {
+                                    udp_connection_info.forEach((client) => {
+                                        if(socket.remoteAddress.includes(client.ip)) {
+                                            if(server.status.id != client.status.id || server.status.type == status_types.Busy) {
+                                                console.log(message);
+                                                socket.write(Buffer.from(JSON.stringify({
+                                                    "ID": msg_types.ServerNotAvailable
+                                                })));
+                                                console.log(JSON.stringify({
+                                                    "ID": msg_types.ServerNotAvailable
+                                                }));
+                                            }
+                                        }
+                                    });
                                 }
                             });
                         }

@@ -362,8 +362,9 @@ public static class Tunnel
             Console.WriteLine($"length {Clients.Count}");
             Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
-            if (Clients.GetClient(listenEndpoint) == null && Clients.GetClient(currentConnectionID) == null && Equals(listenEndpoint.Address, targetPeerIp))
+            if (Clients.GetClient(listenEndpoint) == null && Equals(listenEndpoint.Address, targetPeerIp))
             {
+                if (Clients.GetClient(currentConnectionID) != null) continue;
                 Client client = new Client(listenEndpoint, IPAddress.Parse($"10.5.0.{Clients.Count + 1}"), currentConnectionID);
                 Clients.Add(client);
                 Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
@@ -450,14 +451,16 @@ public static class Tunnel
                             byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                             tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                         }
-
-                        if(!initialConnectionTimer.Enabled)
+                        else
                         {
-                            MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
-                            message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
-                            message.NATType = natType;
-                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                            tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                            if(!initialConnectionTimer.Enabled)
+                            {
+                                MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
+                                message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                                message.NATType = natType;
+                                byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                                tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                            }
                         }
                     }
                 }
@@ -518,8 +521,6 @@ public static class Tunnel
                     }
                 }
 
-                //When server determines both clients have connected based on these packets, drop the clients from the server and let them continue communicating - maybe done?
-
                 //Also, add flag to prevent simultaneous connection attempts based on aforementioned packets
                 //Add timeouts for connection attempts to allow another client to try to connect if the previous one fails
                 //Basically the server shouldn't be locked out if a client couldn't connect
@@ -568,6 +569,7 @@ public static class Tunnel
                     case MediationMessageType.ConnectionBegin:
                     {
                         holePunchReceivedCount = 0;
+                        connectionTimeout = maxConnectionTimeout;
                         initialConnectionTimer.Enabled = true;
                         currentConnectionID = receivedMessage.ConnectionID;
                         if (natType == NATType.Symmetric)
@@ -666,6 +668,7 @@ public static class Tunnel
                             holePunchReceivedCount = 5;
                             Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).Connected = true;
                             initialConnectionTimer.Enabled = false;
+                            Console.WriteLine("Completed");
                         } else {
                             try
                             {
@@ -680,6 +683,7 @@ public static class Tunnel
                             }
                             connected = true;
                             initialConnectionTimer.Enabled = false;
+                            Console.WriteLine("Completed");
                         }
                     }
                     break;
