@@ -32,6 +32,16 @@ public static class Clients
         return null;
     }
 
+    public static Client GetClient(int connectionID)
+    {
+        int clientIndex = ClientList.FindIndex(c => c.ConnectionID.Equals(connectionID));
+        if(!clientIndex.Equals(-1))
+        {
+            return ClientList.Find(c => c.ConnectionID.Equals(connectionID));
+        }
+        return null;
+    }
+
     public static void Add(Client client)
     {
         int clientIndex = ClientList.FindIndex(c => c.Equals(client));

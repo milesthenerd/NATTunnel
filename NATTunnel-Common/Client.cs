@@ -4,16 +4,18 @@ namespace NATTunnel.Common;
 
 public class Client
 {
-    private IPEndPoint Endpoint;
-    private IPAddress PrivateAddress;
+    private readonly IPEndPoint Endpoint;
+    private readonly IPAddress PrivateAddress;
     public bool Connected = false;
     private int MaxTimeout = 5;
     public int Timeout = 5;
+    public readonly int ConnectionID;
 
-    public Client(IPEndPoint endpoint, IPAddress privateAddress)
+    public Client(IPEndPoint endpoint, IPAddress privateAddress, int connectionID)
     {
         Endpoint = endpoint;
         PrivateAddress = privateAddress;
+        ConnectionID = connectionID;
     }
 
     public IPEndPoint GetEndPoint()

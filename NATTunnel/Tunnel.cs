@@ -39,6 +39,10 @@ public static class Tunnel
     private static int currentConnectionID = 0;
     public static IPAddress privateIP = null;
     private static FrameCapture capture;
+    private static int maxConnectionTimeout = 15;
+    private static int connectionTimeout = maxConnectionTimeout;
+    private static Timer initialConnectionTimer;
+    private static Timer connectionAttempt;
 
     static Tunnel()
     {
@@ -80,6 +84,13 @@ public static class Tunnel
         {
             Console.WriteLine(ex);
         }
+
+        initialConnectionTimer = new Timer(1000)
+        {
+            AutoReset = true,
+            Enabled = false
+        };
+        initialConnectionTimer.Elapsed += ConnectionTimer;
     }
 
     public static void Send(byte[] packetData, IPAddress privateAddress)
@@ -147,6 +158,24 @@ public static class Tunnel
             {
                 Console.WriteLine($"timed out {client}");
                 Clients.Remove(client);
+            }
+        }
+    }
+
+    private static void ConnectionTimer(object source, ElapsedEventArgs e)
+    {
+        if(initialConnectionTimer.Enabled)
+        {
+            if (connectionTimeout > 0) connectionTimeout--;
+            Console.WriteLine($"connectionTimeout: {connectionTimeout}");
+            if (connectionTimeout == 0)
+            {
+                MediationMessage message = new MediationMessage(MediationMessageType.ConnectionTimeout);
+                byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                Console.WriteLine($"sending {message.Serialize()}");
+                tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                connectionAttempt.Enabled = false;
+                initialConnectionTimer.Enabled = false;
             }
         }
     }
@@ -255,6 +284,7 @@ public static class Tunnel
                 case MediationMessageType.HolePunchAttempt:
                 {
                     holePunchReceivedCount++;
+                    connectionTimeout = maxConnectionTimeout;
                     try {
                         privateIP = receivedMessage.GetPrivateAddress();
                     }
@@ -278,6 +308,7 @@ public static class Tunnel
                 case MediationMessageType.SymmetricHolePunchAttempt:
                 {
                     holePunchReceivedCount++;
+                    connectionTimeout = maxConnectionTimeout;
                     try {
                         privateIP = receivedMessage.GetPrivateAddress();
                     }
@@ -331,9 +362,9 @@ public static class Tunnel
             Console.WriteLine($"length {Clients.Count}");
             Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
-            if (Clients.GetClient(listenEndpoint) == null && Equals(listenEndpoint.Address, targetPeerIp))
+            if (Clients.GetClient(listenEndpoint) == null && Clients.GetClient(currentConnectionID) == null && Equals(listenEndpoint.Address, targetPeerIp))
             {
-                Client client = new Client(listenEndpoint, IPAddress.Parse($"10.5.0.{Clients.Count + 1}"));
+                Client client = new Client(listenEndpoint, IPAddress.Parse($"10.5.0.{Clients.Count + 1}"), currentConnectionID);
                 Clients.Add(client);
                 Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
             }
@@ -357,6 +388,7 @@ public static class Tunnel
                 case MediationMessageType.HolePunchAttempt:
                 {
                     if (holePunchReceivedCount == 0) holePunchReceivedCount++;
+                    connectionTimeout = maxConnectionTimeout;
                     Console.WriteLine("POG");
                 }
                 break;
@@ -381,6 +413,7 @@ public static class Tunnel
                 case MediationMessageType.SymmetricHolePunchAttempt:
                 {
                     if (holePunchReceivedCount == 0) holePunchReceivedCount++;
+                    connectionTimeout = maxConnectionTimeout;
                     if (natType != NATType.Symmetric)
                     {
                         targetPeerIp = listenEndpoint.Address;
@@ -407,11 +440,26 @@ public static class Tunnel
 
                 void PollForAvailableServer(object source, ElapsedEventArgs e)
                 {
-                    MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
-                    message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
-                    message.NATType = natType;
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                    tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                    if(!connected)
+                    {
+                        if(initialConnectionTimer.Enabled && connectionTimeout <= 0)
+                        {
+                            MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
+                            message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                            message.NATType = natType;
+                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                        }
+
+                        if(!initialConnectionTimer.Enabled)
+                        {
+                            MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
+                            message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                            message.NATType = natType;
+                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                        }
+                    }
                 }
 
                 void TryConnect(object source, ElapsedEventArgs e)
@@ -470,8 +518,6 @@ public static class Tunnel
                     }
                 }
 
-                //When one of the clients has holePunchReceivedCount hit 5, make it send a packet to the server to set a value indicating that it has connected - done
-                //Make the other client do the same - done?
                 //When server determines both clients have connected based on these packets, drop the clients from the server and let them continue communicating - maybe done?
 
                 //Also, add flag to prevent simultaneous connection attempts based on aforementioned packets
@@ -522,6 +568,7 @@ public static class Tunnel
                     case MediationMessageType.ConnectionBegin:
                     {
                         holePunchReceivedCount = 0;
+                        initialConnectionTimer.Enabled = true;
                         currentConnectionID = receivedMessage.ConnectionID;
                         if (natType == NATType.Symmetric)
                         {
@@ -529,7 +576,7 @@ public static class Tunnel
                             targetPeerIp = targetPeerEndpoint.Address;
                             targetPeerPort = targetPeerEndpoint.Port;
 
-                            Timer connectionAttempt = new Timer(1000)
+                            connectionAttempt = new Timer(1000)
                             {
                                 AutoReset = true,
                                 Enabled = false
@@ -591,7 +638,7 @@ public static class Tunnel
                         {
                             IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
                             targetPeerIp = targetPeerEndpoint.Address;
-                            Timer connectionAttempt = new Timer(1000)
+                            connectionAttempt = new Timer(1000)
                             {
                                 AutoReset = true,
                                 Enabled = true
@@ -604,7 +651,7 @@ public static class Tunnel
                             IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
                             targetPeerIp = targetPeerEndpoint.Address;
                             targetPeerPort = targetPeerEndpoint.Port;
-                            Timer connectionAttempt = new Timer(1000)
+                            connectionAttempt = new Timer(1000)
                             {
                                 AutoReset = true,
                                 Enabled = true
@@ -618,6 +665,7 @@ public static class Tunnel
                         if (isServer) {
                             holePunchReceivedCount = 5;
                             Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).Connected = true;
+                            initialConnectionTimer.Enabled = false;
                         } else {
                             try
                             {
@@ -631,6 +679,7 @@ public static class Tunnel
                                 Console.WriteLine(e);
                             }
                             connected = true;
+                            initialConnectionTimer.Enabled = false;
                         }
                     }
                     break;

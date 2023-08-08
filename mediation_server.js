@@ -23,8 +23,14 @@ const msg_types = {
     NATTunnelData: 10,
     SymmetricHolePunchAttempt: 11,
     ConnectionComplete: 12,
-    ReceivedPeer: 13
+    ReceivedPeer: 13,
+    ConnectionTimeout: 14
 };
+
+const status_types = {
+    Free: 0,
+    Busy: 1
+}
 
 var sockets = [];
 var udp_connection_info = [];
@@ -67,7 +73,7 @@ var tcp_server = tcp.createServer(function(socket){
                                 var id = connection_id++;
                                 contains_requested_ip = true;
                                 for(let f=0; f<udp_connection_info.length; f++){
-                                    if(requested_ip.includes(udp_connection_info[f].ip)){
+                                    if(requested_ip.includes(udp_connection_info[f].ip) && udp_connection_info[f].status.type != status_types.Busy){
                                         let port = udp_connection_info[f].port;
                                         //Tell client the endpoint of the server
                                         socket.write(Buffer.from(JSON.stringify({
@@ -84,9 +90,11 @@ var tcp_server = tcp.createServer(function(socket){
                                             "ConnectionID": id
                                         }));
                                         server_info = `${sockets[i].ip}`;
+                                        udp_connection_info[f].status.id = id;
+                                        udp_connection_info[f].status.type = status_types.Busy;
                                     }
     
-                                    if(socket.remoteAddress.includes(udp_connection_info[f].ip)){
+                                    if(socket.remoteAddress.includes(udp_connection_info[f].ip) && udp_connection_info[f].status.type != status_types.Busy){
                                         //Tell server the endpoint of the client
                                         let port = udp_connection_info[f].port;
                                         sockets[i].socket.write(Buffer.from(JSON.stringify({
@@ -103,6 +111,8 @@ var tcp_server = tcp.createServer(function(socket){
                                             "ConnectionID": id
                                         }));
                                         client_info = `${socket.remoteAddress}`;
+                                        udp_connection_info[f].status.id = id;
+                                        udp_connection_info[f].status.type = status_types.Busy;
                                     }
                                 }
                                 current_connection_pairs[id] = {"server_info": server_info, "client_info": client_info, "server_connected": false, "client_connected": false};
@@ -118,6 +128,22 @@ var tcp_server = tcp.createServer(function(socket){
                         console.log(JSON.stringify({
                             "ID": msg_types.ServerNotAvailable
                         }));
+                    } else {
+                        if(contains_requested_ip) {
+                            udp_connection_info.forEach((client) => {
+                                if(requested_ip.includes(client.ip)) {
+                                    if(client.status.id != connection_id && client.status.type == status_types.Busy) {
+                                        console.log(message);
+                                        socket.write(Buffer.from(JSON.stringify({
+                                            "ID": msg_types.ServerNotAvailable
+                                        })));
+                                        console.log(JSON.stringify({
+                                            "ID": msg_types.ServerNotAvailable
+                                        }));
+                                    }
+                                }
+                            });
+                        }
                     }
                 break;
                 case msg_types.ReceivedPeer:
@@ -137,6 +163,12 @@ var tcp_server = tcp.createServer(function(socket){
                                 sockets[i].socket.write(Buffer.from(JSON.stringify({
                                     "ID": msg_types.ConnectionComplete
                                 })));
+
+                                for(let f=0; f<udp_connection_info.length; f++){
+                                    if(current_connection_pairs[message.ConnectionID].server_info.includes(udp_connection_info[f].ip)){
+                                        udp_connection_info[f].status.type = status_types.Free;
+                                    }
+                                }
                             }
                             if(current_connection_pairs[message.ConnectionID].client_info.includes(sockets[i].ip)){
                                 console.log(current_connection_pairs[message.ConnectionID].client_info);
@@ -144,7 +176,20 @@ var tcp_server = tcp.createServer(function(socket){
                                 sockets[i].socket.write(Buffer.from(JSON.stringify({
                                     "ID": msg_types.ConnectionComplete
                                 })));
+
+                                for(let f=0; f<udp_connection_info.length; f++){
+                                    if(current_connection_pairs[message.ConnectionID].client_info.includes(udp_connection_info[f].ip)){
+                                        udp_connection_info[f].status.type = status_types.Free;
+                                    }
+                                }
                             }
+                        }
+                    }
+                break;
+                case msg_types.ConnectionTimeout:
+                    for(let i=0; i<udp_connection_info.length; i++){
+                        if(socket.remoteAddress.includes(udp_connection_info[i].ip)){
+                            udp_connection_info[i].status.type = status_types.Free;
                         }
                     }
                 break;
@@ -244,7 +289,7 @@ udp_server.on('message', function(msg, info){
     }
 
     if(add_ip){
-        udp_connection_info.push({ip: info.address, port: info.port});
+        udp_connection_info.push({ip: info.address, port: info.port, status: {id: connection_id, type: status_types.Free}});
     }
 
     var message;
@@ -259,44 +304,6 @@ udp_server.on('message', function(msg, info){
             
         }
     }
-
-    /*
-    if(!contains_intended_ip){
-        intended_ip = info.address;
-        intended_port = info.port.toString();
-    } else {
-        var buf = Buffer.from(`${info.address}:${info.port}:clientreq`);
-
-        udp_server.send(buf, intended_port, intended_ip, function(err){
-            if(err){
-                udp_server.close();
-            } else {
-                console.log('Data sent to server for client connection');
-            }
-        });
-        
-        buf = Buffer.from(`${intended_ip}:${intended_port}`);
-
-        udp_server.send(buf, info.port, info.address, function(err){
-            if(err){
-                udp_server.close();
-            } else {
-                console.log('Data sent to client for server connection');
-            }
-        });
-    }
-
-    var buf = Buffer.from(`${intended_ip}:${intended_port}`);
-
-    // sending data
-    udp_server.send(buf, info.port, info.address, function(err){
-        if(err){
-            udp_server.close();
-        } else {
-            console.log('Data sent to client');
-        }
-    });
-    */
 });
 
 // print when server begins listening

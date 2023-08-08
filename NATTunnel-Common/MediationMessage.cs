@@ -163,7 +163,11 @@ public enum MediationMessageType
     /// <summary>
     ///Packet sent indicating NATTunnel client/server received from peer
     /// </summary>
-    ReceivedPeer
+    ReceivedPeer,
+    /// <summary>
+    ///Packet sent to timeout connection attempt after failed communication
+    /// </summary>
+    ConnectionTimeout
 }
 
 /// <summary>
