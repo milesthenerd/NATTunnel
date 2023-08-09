@@ -29,7 +29,7 @@ const msg_types = {
     PublicKeyResponse: 16,
     SymmetricKeyRequest: 17,
     SymmetricKeyResponse: 18,
-    KeyExchangeTest: 19
+    SymmetricKeyConfirm: 19
 };
 
 const status_types = {

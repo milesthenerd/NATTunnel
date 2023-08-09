@@ -12,7 +12,10 @@ public class Client
     public int Timeout = 5;
     public readonly int ConnectionID;
     public RSA rsa = RSA.Create();
-    public RSAParameters rsaKeyInfo = new RSAParameters();
+    public RSAParameters RsaKeyInfo = new RSAParameters();
+    public AesGcm aes;
+    public bool HasPublicKey = false;
+    public bool HasSymmetricKey = false;
 
     public Client(IPEndPoint endpoint, IPAddress privateAddress, int connectionID)
     {
@@ -45,8 +48,15 @@ public class Client
 
     public void ImportRSA(byte[] modulus, byte[] exponent)
     {
-        rsaKeyInfo.Modulus = modulus;
-        rsaKeyInfo.Exponent = exponent;
-        rsa.ImportParameters(rsaKeyInfo);
+        RsaKeyInfo.Modulus = modulus;
+        RsaKeyInfo.Exponent = exponent;
+        rsa.ImportParameters(RsaKeyInfo);
+        HasPublicKey = true;
+    }
+
+    public void ImportAes(byte[] key)
+    {
+        aes = new AesGcm(key);
+        HasSymmetricKey = true;
     }
 }

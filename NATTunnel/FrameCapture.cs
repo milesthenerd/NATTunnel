@@ -91,7 +91,7 @@ public class FrameCapture
                         ip.SourceAddress = Tunnel.privateIP;
                         ip.UpdateCalculatedValues();
                         ip.UpdateIPChecksum();
-                        Tunnel.Send(eth.Bytes, ip.DestinationAddress);
+                        Tunnel.SendFrame(eth.Bytes, ip.DestinationAddress);
                     }
                     catch(Exception error) {
                         Console.WriteLine(error);

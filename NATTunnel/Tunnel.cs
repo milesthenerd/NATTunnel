@@ -50,21 +50,21 @@ public static class Tunnel
     private static byte[] keyExponent = rsaKeyInfo.Exponent;
     private static RSA rsaServer = RSA.Create();
     private static RSAParameters rsaKeyInfoServer = new RSAParameters();
+    private static AesGcm aes;
+    private static bool hasServerPublicKey = false;
+    private static bool serverHasSymmetricKey = false;
+    private static byte[] symmetricKey = new byte[32];
 
     static Tunnel()
     {
+        RandomNumberGenerator.Fill(symmetricKey);
+
+        aes = new AesGcm(symmetricKey);
+
         capture = new FrameCapture();
         capture.Start();
 
-        try
-        {
-            udpClient = new UdpClient();
-        }
-        catch (SocketException)
-        {
-            Console.WriteLine("Can only run one instance of NATTunnel, because every Socket can only be used once.");
-            Environment.Exit(-1);
-        }
+        udpClient = new UdpClient();
 
         // Windows-specific udpClient switch
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -100,27 +100,62 @@ public static class Tunnel
         initialConnectionTimer.Elapsed += ConnectionTimer;
     }
 
-    public static void Send(byte[] packetData, IPAddress privateAddress)
+    public static void Send(byte[] packetData, IPEndPoint endpoint, IPAddress privateAddress, Client client=null)
+    {
+        if (isServer)
+        {
+            if (client != null)
+            {
+                if (client.HasSymmetricKey)
+                {
+                    byte[] nonce = new byte[AesGcm.NonceByteSizes.MaxSize];
+                    RandomNumberGenerator.Fill(nonce);
+                    byte[] encryptedData = new byte[packetData.Length];
+                    byte[] tag = new byte[AesGcm.TagByteSizes.MaxSize];
+                    client.aes.Encrypt(nonce, packetData, encryptedData, tag);
+                    MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
+                    message.Data = encryptedData;
+                    message.Nonce = nonce;
+                    message.AuthTag = tag;
+                    message.SetPrivateAddress(privateAddress);
+                    byte[] encryptedPacket = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
+                }
+            }
+        }
+        else
+        {
+            if (serverHasSymmetricKey)
+            {
+                byte[] nonce = new byte[AesGcm.NonceByteSizes.MaxSize];
+                RandomNumberGenerator.Fill(nonce);
+                byte[] encryptedData = new byte[packetData.Length];
+                byte[] tag = new byte[AesGcm.TagByteSizes.MaxSize];
+                aes.Encrypt(nonce, packetData, encryptedData, tag);
+                MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
+                message.Data = encryptedData;
+                message.Nonce = nonce;
+                message.AuthTag = tag;
+                message.SetPrivateAddress(privateAddress);
+                byte[] encryptedPacket = Encoding.ASCII.GetBytes(message.Serialize());
+                udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
+            }
+        }
+    }
+
+    public static void SendFrame(byte[] packetData, IPAddress privateAddress)
     {
         if (isServer)
         {
             Client client = Clients.GetClient(privateAddress);
             if (client != null)
             {
-                MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
-                message.Data = packetData;
-                message.SetPrivateAddress(privateAddress);
-                byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                udpClient.Send(sendBuffer, sendBuffer.Length, client.GetEndPoint());
+                Send(packetData, client.GetEndPoint(), privateAddress, client);
             }
         }
         else
         {
-            MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
-            message.Data = packetData;
-            message.SetPrivateAddress(privateAddress);
-            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-            udpClient.Send(sendBuffer, sendBuffer.Length, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}"));
+            Send(packetData, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}"), privateAddress);
         }
     }
 
@@ -255,8 +290,6 @@ public static class Tunnel
 
             MediationMessage receivedMessage;
 
-            byte[] tunnelData = new byte[1500];
-
             try
             {
                 receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
@@ -277,14 +310,16 @@ public static class Tunnel
                 //TODO: random hardcoded value
                 if (holePunchReceivedCount >= 5 && !connected)
                 {
-                    MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
-                    message.ConnectionID = currentConnectionID;
-                    message.IsServer = isServer;
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                    Console.WriteLine($"sending {message.Serialize()}");
+                    MediationMessage _message = new MediationMessage(MediationMessageType.ReceivedPeer);
+                    _message.ConnectionID = currentConnectionID;
+                    _message.IsServer = isServer;
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
+                    Console.WriteLine($"sending {_message.Serialize()}");
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
             }
+
+            MediationMessage message;
 
             switch(receivedMessage.ID)
             {
@@ -303,15 +338,15 @@ public static class Tunnel
                 }
                 break;
                 case MediationMessageType.KeepAlive:
-                    if (rsaKeyInfoServer.Exponent == null && rsaKeyInfoServer.Modulus == null)
+                    if (!hasServerPublicKey)
                     {
-                        MediationMessage _message = new MediationMessage(MediationMessageType.PublicKeyRequest);
-                        byte[] _sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
+                        message = new MediationMessage(MediationMessageType.PublicKeyRequest);
+                        byte[] _sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(_sendBuffer, _sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
                 break;
                 case MediationMessageType.PublicKeyRequest:
-                    MediationMessage message = new MediationMessage(MediationMessageType.PublicKeyResponse);
+                    message = new MediationMessage(MediationMessageType.PublicKeyResponse);
                     message.Modulus = keyModulus;
                     message.Exponent = keyExponent;
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
@@ -321,24 +356,32 @@ public static class Tunnel
                     rsaKeyInfoServer.Modulus = receivedMessage.Modulus;
                     rsaKeyInfoServer.Exponent = receivedMessage.Exponent;
                     rsaServer.ImportParameters(rsaKeyInfoServer);
-                    MediationMessage m = new MediationMessage(MediationMessageType.KeyExchangeTest);
-                    m.Data = rsaServer.Encrypt(Encoding.ASCII.GetBytes("hello"), RSAEncryptionPadding.Pkcs1);
-                    byte[] s = Encoding.ASCII.GetBytes(m.Serialize());
-                    udpClient.Send(s, s.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    hasServerPublicKey = true;
                 break;
-                case MediationMessageType.KeyExchangeTest:
+                case MediationMessageType.SymmetricKeyRequest:
                 {
-                    Console.WriteLine(Encoding.ASCII.GetString(rsa.Decrypt(receivedMessage.Data, RSAEncryptionPadding.Pkcs1)));
+                    message = new MediationMessage(MediationMessageType.SymmetricKeyResponse);
+                    message.SymmetricKey = rsaServer.Encrypt(symmetricKey, RSAEncryptionPadding.Pkcs1);
+                    byte[] _s = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpClient.Send(_s, _s.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                }
+                break;
+                case MediationMessageType.SymmetricKeyConfirm:
+                {
+                    serverHasSymmetricKey = true;
                 }
                 break;
                 case MediationMessageType.NATTunnelData:
                 {
-                    tunnelData = receivedMessage.Data;
-                    IPAddress targetPrivateAddress = receivedMessage.GetPrivateAddress();
-                    Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+                    if (serverHasSymmetricKey)
+                    {
+                        byte[] tunnelData = new byte[receivedMessage.Data.Length];
+                        aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
+                        Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
 
-                    if (!connected) continue;
-                    capture.Send(tunnelData);
+                        if (!connected) continue;
+                        capture.Send(tunnelData);
+                    }
                 }
                 break;
                 case MediationMessageType.SymmetricHolePunchAttempt:
@@ -377,12 +420,11 @@ public static class Tunnel
 
             MediationMessage receivedMessage;
 
-            byte[] tunnelData = new byte[1500];
-
             try
             {
                 receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
                 Console.WriteLine("VALID?");
+                Console.WriteLine(receivedString);
             }
             catch
             {
@@ -406,16 +448,17 @@ public static class Tunnel
                 Console.WriteLine("pog");
                 if (holePunchReceivedCount >= 1 && !Clients.GetClient(listenEndpoint).Connected)
                 {
-                    MediationMessage message = new MediationMessage(MediationMessageType.ReceivedPeer);
-                    message.ConnectionID = currentConnectionID;
-                    message.IsServer = isServer;
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                    Console.WriteLine($"sending {message.Serialize()}");
+                    MediationMessage _message = new MediationMessage(MediationMessageType.ReceivedPeer);
+                    _message.ConnectionID = currentConnectionID;
+                    _message.IsServer = isServer;
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
+                    Console.WriteLine($"sending {_message.Serialize()}");
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                 }
             }
 
             Client c = Clients.GetClient(listenEndpoint);
+            MediationMessage message;
 
             if (c != null)
                 c.ResetTimeout();
@@ -430,17 +473,20 @@ public static class Tunnel
                 }
                 break;
                 case MediationMessageType.KeepAlive:
-                    if (c != null && c.rsaKeyInfo.Modulus == null && c.rsaKeyInfo.Exponent == null)
+                    if (c != null)
                     {
-                        MediationMessage _message = new MediationMessage(MediationMessageType.PublicKeyRequest);
-                        byte[] _sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
-                        udpClient.Send(_sendBuffer, _sendBuffer.Length, c.GetEndPoint());
+                        if (!c.HasPublicKey)
+                        {
+                            message = new MediationMessage(MediationMessageType.PublicKeyRequest);
+                            byte[] _sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            udpClient.Send(_sendBuffer, _sendBuffer.Length, c.GetEndPoint());
+                        }
                     }
                 break;
                 case MediationMessageType.PublicKeyRequest:
-                    if (c != null && c.rsaKeyInfo.Modulus == null && c.rsaKeyInfo.Exponent == null)
+                    if (c != null)
                     {
-                        MediationMessage message = new MediationMessage(MediationMessageType.PublicKeyResponse);
+                        message = new MediationMessage(MediationMessageType.PublicKeyResponse);
                         message.Modulus = keyModulus;
                         message.Exponent = keyExponent;
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
@@ -448,38 +494,44 @@ public static class Tunnel
                     }
                 break;
                 case MediationMessageType.PublicKeyResponse:
-                    if (c != null && c.rsaKeyInfo.Modulus == null && c.rsaKeyInfo.Exponent == null)
+                    if (c != null && !c.HasSymmetricKey)
                     {
                         c.ImportRSA(receivedMessage.Modulus, receivedMessage.Exponent);
-                        MediationMessage message = new MediationMessage(MediationMessageType.KeyExchangeTest);
-                        message.Data = c.rsa.Encrypt(Encoding.ASCII.GetBytes("hello"), RSAEncryptionPadding.Pkcs1);
+                        message = new MediationMessage(MediationMessageType.SymmetricKeyRequest);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
                     }
                 break;
-                case MediationMessageType.KeyExchangeTest:
+                case MediationMessageType.SymmetricKeyResponse:
                 {
-                    if (c != null)
+                    if (c != null && !c.HasSymmetricKey)
                     {
-                        Console.WriteLine(Encoding.ASCII.GetString(rsa.Decrypt(receivedMessage.Data, RSAEncryptionPadding.Pkcs1)));
+                        c.ImportAes(rsa.Decrypt(receivedMessage.SymmetricKey, RSAEncryptionPadding.Pkcs1));
+                        message = new MediationMessage(MediationMessageType.SymmetricKeyConfirm);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
                     }
                 }
                 break;
                 case MediationMessageType.NATTunnelData:
                 {
-                    tunnelData = receivedMessage.Data;
-                    IPAddress targetPrivateAddress = receivedMessage.GetPrivateAddress();
-                    Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
-
-                    if (!Clients.GetClient(listenEndpoint).Connected) continue;
-
-                    if (targetPrivateAddress.Equals(privateIP))
+                    if (c != null && c.HasSymmetricKey)
                     {
-                        capture.Send(tunnelData);
-                    }
-                    else
-                    {
-                        Send(tunnelData, targetPrivateAddress);
+                        byte[] tunnelData = new byte[receivedMessage.Data.Length];
+                        c.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
+                        IPAddress targetPrivateAddress = receivedMessage.GetPrivateAddress();
+                        Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+
+                        if (!Clients.GetClient(listenEndpoint).Connected) continue;
+
+                        if (targetPrivateAddress.Equals(privateIP))
+                        {
+                            capture.Send(tunnelData);
+                        }
+                        else
+                        {
+                            SendFrame(tunnelData, targetPrivateAddress);
+                        }
                     }
                 }
                 break;

@@ -68,6 +68,21 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] Exponent { get; set; }
+    /// <summary>
+    ///Symmetric key
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] SymmetricKey { get; set; }
+    /// <summary>
+    ///One-time use value
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] Nonce { get; set; }
+    /// <summary>
+    ///Authentication tag generated when encrypting with AES-GCM
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] AuthTag { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
@@ -195,9 +210,9 @@ public enum MediationMessageType
     /// </summary>
     SymmetricKeyResponse,
     /// <summary>
-    ///Encrypted packet containing string that should be used to test decryption on the other end
+    ///Packet sent to confirm server received client's symmetric key
     /// </summary>
-    KeyExchangeTest
+    SymmetricKeyConfirm
 }
 
 /// <summary>
