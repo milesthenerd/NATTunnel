@@ -24,7 +24,12 @@ const msg_types = {
     SymmetricHolePunchAttempt: 11,
     ConnectionComplete: 12,
     ReceivedPeer: 13,
-    ConnectionTimeout: 14
+    ConnectionTimeout: 14,
+    PublicKeyRequest: 15,
+    PublicKeyResponse: 16,
+    SymmetricKeyRequest: 17,
+    SymmetricKeyResponse: 18,
+    KeyExchangeTest: 19
 };
 
 const status_types = {

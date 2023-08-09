@@ -1,4 +1,5 @@
 using System.Net;
+using System.Security.Cryptography;
 
 namespace NATTunnel.Common;
 
@@ -10,6 +11,8 @@ public class Client
     private int MaxTimeout = 5;
     public int Timeout = 5;
     public readonly int ConnectionID;
+    public RSA rsa = RSA.Create();
+    public RSAParameters rsaKeyInfo = new RSAParameters();
 
     public Client(IPEndPoint endpoint, IPAddress privateAddress, int connectionID)
     {
@@ -38,5 +41,12 @@ public class Client
     public void ResetTimeout()
     {
         Timeout = MaxTimeout;
+    }
+
+    public void ImportRSA(byte[] modulus, byte[] exponent)
+    {
+        rsaKeyInfo.Modulus = modulus;
+        rsaKeyInfo.Exponent = exponent;
+        rsa.ImportParameters(rsaKeyInfo);
     }
 }

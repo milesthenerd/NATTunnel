@@ -11,6 +11,7 @@ using Timer = System.Timers.Timer;
 using NATTunnel.Common;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using System.Security.Cryptography;
 
 namespace NATTunnel;
 
@@ -43,6 +44,12 @@ public static class Tunnel
     private static int connectionTimeout = maxConnectionTimeout;
     private static Timer initialConnectionTimer;
     private static Timer connectionAttempt;
+    private static RSACryptoServiceProvider rsa = new RSACryptoServiceProvider();
+    private static RSAParameters rsaKeyInfo = rsa.ExportParameters(false);
+    private static byte[] keyModulus = rsaKeyInfo.Modulus;
+    private static byte[] keyExponent = rsaKeyInfo.Exponent;
+    private static RSA rsaServer = RSA.Create();
+    private static RSAParameters rsaKeyInfoServer = new RSAParameters();
 
     static Tunnel()
     {
@@ -295,6 +302,35 @@ public static class Tunnel
                     Console.WriteLine("POG");
                 }
                 break;
+                case MediationMessageType.KeepAlive:
+                    if (rsaKeyInfoServer.Exponent == null && rsaKeyInfoServer.Modulus == null)
+                    {
+                        MediationMessage _message = new MediationMessage(MediationMessageType.PublicKeyRequest);
+                        byte[] _sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
+                        udpClient.Send(_sendBuffer, _sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    }
+                break;
+                case MediationMessageType.PublicKeyRequest:
+                    MediationMessage message = new MediationMessage(MediationMessageType.PublicKeyResponse);
+                    message.Modulus = keyModulus;
+                    message.Exponent = keyExponent;
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                break;
+                case MediationMessageType.PublicKeyResponse:
+                    rsaKeyInfoServer.Modulus = receivedMessage.Modulus;
+                    rsaKeyInfoServer.Exponent = receivedMessage.Exponent;
+                    rsaServer.ImportParameters(rsaKeyInfoServer);
+                    MediationMessage m = new MediationMessage(MediationMessageType.KeyExchangeTest);
+                    m.Data = rsaServer.Encrypt(Encoding.ASCII.GetBytes("hello"), RSAEncryptionPadding.Pkcs1);
+                    byte[] s = Encoding.ASCII.GetBytes(m.Serialize());
+                    udpClient.Send(s, s.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                break;
+                case MediationMessageType.KeyExchangeTest:
+                {
+                    Console.WriteLine(Encoding.ASCII.GetString(rsa.Decrypt(receivedMessage.Data, RSAEncryptionPadding.Pkcs1)));
+                }
+                break;
                 case MediationMessageType.NATTunnelData:
                 {
                     tunnelData = receivedMessage.Data;
@@ -354,11 +390,6 @@ public static class Tunnel
                 continue;
             }
 
-            Client _client = Clients.GetClient(listenEndpoint);
-
-            if (_client != null)
-                _client.ResetTimeout();
-
             Console.WriteLine($"length {Clients.Count}");
             Console.WriteLine("Received UDP: {0} bytes from {1}:{2}", receiveBuffer.Length, listenEndpoint.Address, listenEndpoint.Port);
 
@@ -384,6 +415,11 @@ public static class Tunnel
                 }
             }
 
+            Client c = Clients.GetClient(listenEndpoint);
+
+            if (c != null)
+                c.ResetTimeout();
+
             switch(receivedMessage.ID)
             {
                 case MediationMessageType.HolePunchAttempt:
@@ -391,6 +427,42 @@ public static class Tunnel
                     if (holePunchReceivedCount == 0) holePunchReceivedCount++;
                     connectionTimeout = maxConnectionTimeout;
                     Console.WriteLine("POG");
+                }
+                break;
+                case MediationMessageType.KeepAlive:
+                    if (c != null && c.rsaKeyInfo.Modulus == null && c.rsaKeyInfo.Exponent == null)
+                    {
+                        MediationMessage _message = new MediationMessage(MediationMessageType.PublicKeyRequest);
+                        byte[] _sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
+                        udpClient.Send(_sendBuffer, _sendBuffer.Length, c.GetEndPoint());
+                    }
+                break;
+                case MediationMessageType.PublicKeyRequest:
+                    if (c != null && c.rsaKeyInfo.Modulus == null && c.rsaKeyInfo.Exponent == null)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.PublicKeyResponse);
+                        message.Modulus = keyModulus;
+                        message.Exponent = keyExponent;
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
+                    }
+                break;
+                case MediationMessageType.PublicKeyResponse:
+                    if (c != null && c.rsaKeyInfo.Modulus == null && c.rsaKeyInfo.Exponent == null)
+                    {
+                        c.ImportRSA(receivedMessage.Modulus, receivedMessage.Exponent);
+                        MediationMessage message = new MediationMessage(MediationMessageType.KeyExchangeTest);
+                        message.Data = c.rsa.Encrypt(Encoding.ASCII.GetBytes("hello"), RSAEncryptionPadding.Pkcs1);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
+                    }
+                break;
+                case MediationMessageType.KeyExchangeTest:
+                {
+                    if (c != null)
+                    {
+                        Console.WriteLine(Encoding.ASCII.GetString(rsa.Decrypt(receivedMessage.Data, RSAEncryptionPadding.Pkcs1)));
+                    }
                 }
                 break;
                 case MediationMessageType.NATTunnelData:

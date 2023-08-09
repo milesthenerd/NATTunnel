@@ -58,6 +58,16 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string PrivateAddressString { get; set; }
+    /// <summary>
+    ///Public key modulus
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] Modulus { get; set; }
+    /// <summary>
+    ///Public key exponent
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] Exponent { get; set; }
     public MediationMessage(MediationMessageType id)
     {
         ID = id;
@@ -167,7 +177,27 @@ public enum MediationMessageType
     /// <summary>
     ///Packet sent to timeout connection attempt after failed communication
     /// </summary>
-    ConnectionTimeout
+    ConnectionTimeout,
+    /// <summary>
+    ///Packet sent to peer requesting public key
+    /// </summary>
+    PublicKeyRequest,
+    /// <summary>
+    ///Packet sent to peer containing public key
+    /// </summary>
+    PublicKeyResponse,
+    /// <summary>
+    ///Encrypted packet sent to peer requesting symmetric key
+    /// </summary>
+    SymmetricKeyRequest,
+    /// <summary>
+    ///Encrypted packet sent to peer containing symmetric key
+    /// </summary>
+    SymmetricKeyResponse,
+    /// <summary>
+    ///Encrypted packet containing string that should be used to test decryption on the other end
+    /// </summary>
+    KeyExchangeTest
 }
 
 /// <summary>
