@@ -100,6 +100,31 @@ public static class Tunnel
         initialConnectionTimer.Elapsed += ConnectionTimer;
     }
 
+    public static void Ping(IPEndPoint privateAddressEndpoint, Client client=null)
+    {
+        if (isServer)
+        {
+            if (client != null)
+            {
+                if (client.HasSymmetricKey)
+                {
+                    MediationMessage message = new MediationMessage(MediationMessageType.KeepAlive);
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpClient.Send(sendBuffer, sendBuffer.Length, privateAddressEndpoint);
+                }
+            }
+        }
+        else
+        {
+            if (serverHasSymmetricKey)
+            {
+                MediationMessage message = new MediationMessage(MediationMessageType.KeepAlive);
+                byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                udpClient.Send(sendBuffer, sendBuffer.Length, privateAddressEndpoint);
+            }
+        }
+    }
+
     public static void Send(byte[] packetData, IPEndPoint endpoint, IPAddress privateAddress, Client client=null)
     {
         if (isServer)
@@ -177,6 +202,7 @@ public static class Tunnel
                 if (client.Connected)
                 {
                     udpClient.Send(sendBuffer, sendBuffer.Length, client.GetEndPoint());
+                    Ping(new IPEndPoint(client.GetPrivateAddress(), 0), client);
                 }
             }
         }
@@ -185,10 +211,14 @@ public static class Tunnel
             if (connected)
             {
                 udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                Ping(IPEndPoint.Parse("10.5.0.0:0")); //yes this is hardcoded, just cry about it until full p2p
                 Console.WriteLine("Keep alive");
             }
         }
 
+        //Removal must be deferred to prevent an exception when iterating a modified list
+        bool deferredRemoval = false;
+        Client deferredClient = null;
         foreach (Client client in Clients.GetAll())
         {
             Console.WriteLine($"time left: {client.Timeout}");
@@ -198,9 +228,15 @@ public static class Tunnel
             }
             else
             {
-                Console.WriteLine($"timed out {client}");
-                Clients.Remove(client);
+                Console.WriteLine($"timed out {client.GetEndPoint()}/{client.GetPrivateAddress()}");
+                deferredRemoval = true;
+                deferredClient = client;
             }
+        }
+
+        if (deferredRemoval)
+        {
+            Clients.Remove(deferredClient);
         }
     }
 
@@ -591,10 +627,17 @@ public static class Tunnel
 
                 void TryConnect(object source, ElapsedEventArgs e)
                 {
-                    if(holePunchReceivedCount <= 5)
+                    if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                         if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    }
+
+                    if(holePunchReceivedCount < 1)
+                    {
+                        MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }

@@ -8,8 +8,8 @@ public class Client
     private readonly IPEndPoint Endpoint;
     private readonly IPAddress PrivateAddress;
     public bool Connected = false;
-    private int MaxTimeout = 5;
-    public int Timeout = 5;
+    private int MaxTimeout = 20;
+    public int Timeout = 20;
     public readonly int ConnectionID;
     public RSA rsa = RSA.Create();
     public RSAParameters RsaKeyInfo = new RSAParameters();

@@ -24,7 +24,7 @@ internal static class Program
         Tunnel.Start();
 
         Console.WriteLine("Press any key to quit");
-        while (Console.KeyAvailable == false)
+        while (Console.In.Peek() != -1)
         {
 
         }
