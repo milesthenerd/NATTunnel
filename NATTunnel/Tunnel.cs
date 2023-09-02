@@ -12,6 +12,7 @@ using NATTunnel.Common;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Security.Cryptography;
+using System.Collections;
 
 namespace NATTunnel;
 
@@ -54,6 +55,7 @@ public static class Tunnel
     private static bool hasServerPublicKey = false;
     private static bool serverHasSymmetricKey = false;
     private static byte[] symmetricKey = new byte[32];
+    private static SHA256 shaHashGen = SHA256.Create();
 
     static Tunnel()
     {
@@ -385,19 +387,26 @@ public static class Tunnel
                     message = new MediationMessage(MediationMessageType.PublicKeyResponse);
                     message.Modulus = keyModulus;
                     message.Exponent = keyExponent;
+                    message.ModulusHash = shaHashGen.ComputeHash(message.Modulus);
+                    message.ExponentHash = shaHashGen.ComputeHash(message.Exponent);
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 break;
                 case MediationMessageType.PublicKeyResponse:
-                    rsaKeyInfoServer.Modulus = receivedMessage.Modulus;
-                    rsaKeyInfoServer.Exponent = receivedMessage.Exponent;
-                    rsaServer.ImportParameters(rsaKeyInfoServer);
-                    hasServerPublicKey = true;
+                    if (StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.ModulusHash, shaHashGen.ComputeHash(receivedMessage.Modulus)) && 
+                        StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.ExponentHash, shaHashGen.ComputeHash(receivedMessage.Exponent)))
+                    {
+                        rsaKeyInfoServer.Modulus = receivedMessage.Modulus;
+                        rsaKeyInfoServer.Exponent = receivedMessage.Exponent;
+                        rsaServer.ImportParameters(rsaKeyInfoServer);
+                        hasServerPublicKey = true;
+                    }
                 break;
                 case MediationMessageType.SymmetricKeyRequest:
                 {
                     message = new MediationMessage(MediationMessageType.SymmetricKeyResponse);
                     message.SymmetricKey = rsaServer.Encrypt(symmetricKey, RSAEncryptionPadding.Pkcs1);
+                    message.SymmetricKeyHash = shaHashGen.ComputeHash(message.SymmetricKey);
                     byte[] _s = Encoding.ASCII.GetBytes(message.Serialize());
                     udpClient.Send(_s, _s.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 }
@@ -517,6 +526,13 @@ public static class Tunnel
                             byte[] _sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                             udpClient.Send(_sendBuffer, _sendBuffer.Length, c.GetEndPoint());
                         }
+
+                        if (c.HasPublicKey && !c.HasSymmetricKey)
+                        {
+                            message = new MediationMessage(MediationMessageType.SymmetricKeyRequest);
+                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
+                        }
                     }
                 break;
                 case MediationMessageType.PublicKeyRequest:
@@ -525,6 +541,8 @@ public static class Tunnel
                         message = new MediationMessage(MediationMessageType.PublicKeyResponse);
                         message.Modulus = keyModulus;
                         message.Exponent = keyExponent;
+                        message.ModulusHash = shaHashGen.ComputeHash(message.Modulus);
+                        message.ExponentHash = shaHashGen.ComputeHash(message.Exponent);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
                     }
@@ -532,20 +550,24 @@ public static class Tunnel
                 case MediationMessageType.PublicKeyResponse:
                     if (c != null && !c.HasSymmetricKey)
                     {
-                        c.ImportRSA(receivedMessage.Modulus, receivedMessage.Exponent);
-                        message = new MediationMessage(MediationMessageType.SymmetricKeyRequest);
-                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                        udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
+                        if (StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.ModulusHash, shaHashGen.ComputeHash(receivedMessage.Modulus)) && 
+                            StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.ExponentHash, shaHashGen.ComputeHash(receivedMessage.Exponent)))
+                        {
+                            c.ImportRSA(receivedMessage.Modulus, receivedMessage.Exponent);
+                        }
                     }
                 break;
                 case MediationMessageType.SymmetricKeyResponse:
                 {
                     if (c != null && !c.HasSymmetricKey)
                     {
-                        c.ImportAes(rsa.Decrypt(receivedMessage.SymmetricKey, RSAEncryptionPadding.Pkcs1));
-                        message = new MediationMessage(MediationMessageType.SymmetricKeyConfirm);
-                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                        udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
+                        if (StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.SymmetricKeyHash, shaHashGen.ComputeHash(receivedMessage.SymmetricKey)))
+                        {
+                            c.ImportAes(rsa.Decrypt(receivedMessage.SymmetricKey, RSAEncryptionPadding.Pkcs1));
+                            message = new MediationMessage(MediationMessageType.SymmetricKeyConfirm);
+                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
+                        }
                     }
                 }
                 break;

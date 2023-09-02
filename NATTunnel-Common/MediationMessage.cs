@@ -82,6 +82,21 @@ public class MediationMessage
     ///Authentication tag generated when encrypting with AES-GCM
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] ModulusHash { get; set; }
+    /// <summary>
+    ///SHA256 hash to verify that public key modulus is intact after being transported
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] ExponentHash { get; set; }
+    /// <summary>
+    ///SHA256 hash to verify that public key exponent is intact after being transported
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] SymmetricKeyHash { get; set; }
+    /// <summary>
+    ///SHA256 hash to verify that symmetric key is intact after being transported
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] AuthTag { get; set; }
     public MediationMessage(MediationMessageType id)
     {
