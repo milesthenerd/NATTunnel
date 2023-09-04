@@ -1,7 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 
-namespace NATTunnel.Common;
+namespace NATTunnel;
 
 public class Client
 {
@@ -16,6 +16,7 @@ public class Client
     public AesGcm aes;
     public bool HasPublicKey = false;
     public bool HasSymmetricKey = false;
+    public FrameCapture capture;
 
     public Client(IPEndPoint endpoint, IPAddress privateAddress, int connectionID)
     {

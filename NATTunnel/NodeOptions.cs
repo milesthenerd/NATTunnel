@@ -1,7 +1,7 @@
 using System.Net;
 using System.Net.NetworkInformation;
 
-namespace NATTunnel.Common;
+namespace NATTunnel;
 
 /// <summary>
 /// Class that holds option values for various parts for NATTunnel.

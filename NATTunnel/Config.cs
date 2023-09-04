@@ -4,7 +4,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 
-namespace NATTunnel.Common;
+namespace NATTunnel;
 
 /// <summary>
 /// Class to access configuration files.

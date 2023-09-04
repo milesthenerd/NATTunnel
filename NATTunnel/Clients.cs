@@ -1,7 +1,7 @@
 using System.Collections.Generic;
 using System.Net;
 
-namespace NATTunnel.Common;
+namespace NATTunnel;
 
 public static class Clients
 {
@@ -49,6 +49,8 @@ public static class Clients
         {
             ClientList.Add(client);
             Count = ClientList.Count;
+            client.capture = new FrameCapture(CaptureMode.Public, client.GetEndPoint().Address.ToString());
+            client.capture.Start();
         }
     }
 
@@ -57,6 +59,7 @@ public static class Clients
         int clientIndex = ClientList.FindIndex(c => c.Equals(client));
         if(!clientIndex.Equals(-1))
         {
+            client.capture.Stop();
             ClientList.Remove(ClientList.Find(c => c.Equals(client)));
             Count = ClientList.Count;
         }

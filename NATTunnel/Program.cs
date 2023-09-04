@@ -1,5 +1,4 @@
-﻿using NATTunnel.Common;
-using System;
+﻿using System;
 
 namespace NATTunnel;
 

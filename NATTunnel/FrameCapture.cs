@@ -5,6 +5,7 @@ using PacketDotNet;
 using System.Net.NetworkInformation;
 using System;
 using System.Diagnostics;
+using System.Text;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Net;
@@ -20,6 +21,18 @@ public struct MacIpPair
     public string IpAddress;
 }
 
+public enum CaptureMode
+{
+    /// <summary>
+    ///Normal mode, captures and handles packets destined for a private IP address
+    /// </summary>
+    Private,
+    /// <summary>
+    ///Alternative mode for capturing data packets from a public endpoint
+    /// </summary>
+    Public
+}
+
 public class FrameCapture
 {
     private bool running = true;
@@ -27,7 +40,14 @@ public class FrameCapture
     private PhysicalAddress defaultGatewayMac;
     private IPAddress myIP;
     private LibPcapLiveDevice device;
-    public FrameCapture() {}
+    private CaptureMode captureMode;
+    private string sourceAddress;
+    private int count = 0;
+    public FrameCapture(CaptureMode mode = CaptureMode.Private, string address = "10.5.0.0")
+    {
+        captureMode = mode;
+        sourceAddress = address;
+    }
 
     public void Start()
     {
@@ -55,12 +75,18 @@ public class FrameCapture
             }
 
             // Open the device for capturing
-            device.Open(DeviceModes.MaxResponsiveness, 0);
-            device.Filter = "net 10.5.0.0/24";
+            device.Open(DeviceModes.Promiscuous, -1);
+            if (captureMode == CaptureMode.Private)
+            {
+                device.Filter = $"net {sourceAddress}/24";
+            }
+            else
+            {
+                device.Filter = $"src host {sourceAddress}";
+            }
 
             Console.WriteLine();
-            Console.WriteLine("-- Listening on {0}...",
-                device.Description);
+            Console.WriteLine("-- Listening on {0}...", device.Description);
 
             RawCapture rawPacket;
 
@@ -76,25 +102,96 @@ public class FrameCapture
                     // Prints the time and length of each received packet
                     var time = rawPacket.Timeval.Date;
                     var len = rawPacket.Data.Length;
-                    Console.WriteLine("{0}:{1}:{2},{3} Len={4}",
-                        time.Hour, time.Minute, time.Second, time.Millisecond, len);
+                    Console.WriteLine("{0}:{1}:{2},{3} Len={4}", time.Hour, time.Minute, time.Second, time.Millisecond, len);
                     try {
                         EthernetPacket eth = packet.Extract<PacketDotNet.EthernetPacket>();
                         var origEthSrc = eth.SourceHardwareAddress;
                         var origEthDest = eth.DestinationHardwareAddress;
                         Console.WriteLine(eth);
                         IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
-                        if(ip.DestinationAddress.Equals(Tunnel.privateIP) || ip.DestinationAddress.Equals(myIP)) continue;
-                        eth.SourceHardwareAddress = origEthDest;
-                        eth.DestinationHardwareAddress = origEthSrc;
-                        eth.UpdateCalculatedValues();
-                        ip.SourceAddress = Tunnel.privateIP;
-                        ip.UpdateCalculatedValues();
-                        ip.UpdateIPChecksum();
-                        Tunnel.SendFrame(eth.Bytes, ip.DestinationAddress);
+
+                        if (captureMode == CaptureMode.Private)
+                        {
+                            if(ip.DestinationAddress.Equals(Tunnel.privateIP) || ip.DestinationAddress.Equals(myIP)) continue;
+                            eth.SourceHardwareAddress = origEthDest;
+                            eth.DestinationHardwareAddress = origEthSrc;
+                            eth.UpdateCalculatedValues();
+                            ip.SourceAddress = Tunnel.privateIP;
+                            ip.UpdateCalculatedValues();
+                            ip.UpdateIPChecksum();
+                            Tunnel.SendFrame(eth.Bytes, ip.DestinationAddress);
+                        }
+                        else
+                        {
+                            if(!ip.DestinationAddress.Equals(myIP)) continue;
+                            UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+                            MediationMessage receivedMessage;
+                            try
+                            {
+                                receivedMessage = new MediationMessage();
+                                Console.WriteLine(udp.PayloadData.Length);
+                                receivedMessage.DeserializeBytes(udp.PayloadData);
+                                
+                                switch(receivedMessage.ID)
+                                {
+                                    case MediationMessageType.NATTunnelData:
+                                    {
+                                        Console.WriteLine(count++);
+                                        IPEndPoint clientSourceEndpoint = new IPEndPoint(ip.SourceAddress, udp.SourcePort);
+                                        Client c = Clients.GetClient(clientSourceEndpoint);
+                                        if (NodeOptions.IsServer)
+                                        {
+                                            Console.WriteLine("mah");
+                                            if (c != null && c.HasSymmetricKey)
+                                            {
+                                                c.ResetTimeout();
+                                                byte[] tunnelData = new byte[receivedMessage.Data.Length];
+                                                c.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
+
+                                                Packet givenPacket = PacketDotNet.Packet.ParsePacket(LinkLayers.Ethernet, tunnelData);
+                                                EthernetPacket ethExtracted = givenPacket.Extract<PacketDotNet.EthernetPacket>();
+                                                IPv4Packet ipExtracted = ethExtracted.Extract<PacketDotNet.IPv4Packet>();
+
+                                                IPAddress targetPrivateAddress = ipExtracted.DestinationAddress;
+                                                Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+
+                                                if (!c.Connected) continue;
+
+                                                if (targetPrivateAddress.Equals(Tunnel.privateIP))
+                                                {
+                                                    Send(tunnelData);
+                                                }
+                                                else
+                                                {
+                                                    Tunnel.SendFrame(tunnelData, targetPrivateAddress);
+                                                }
+                                            }
+                                        }
+                                        else
+                                        {
+                                            Console.WriteLine("mah");
+                                            if (Tunnel.serverHasSymmetricKey)
+                                            {
+                                                byte[] tunnelData = new byte[receivedMessage.Data.Length];
+                                                Tunnel.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
+                                                Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+
+                                                if (!Tunnel.connected) continue;
+                                                Send(tunnelData);
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+                            }
+                            catch(Exception err)
+                            {
+                                //Console.WriteLine(err);
+                            }
+                        }
                     }
                     catch(Exception error) {
-                        Console.WriteLine(error);
+                        //Console.WriteLine(error);
                     }
                 }
             }
@@ -123,7 +220,7 @@ public class FrameCapture
         }
         catch(Exception e)
         {
-            Console.WriteLine(e);
+            //Console.WriteLine(e);
         }
 
         try{
@@ -134,12 +231,13 @@ public class FrameCapture
         }
         catch(Exception e)
         {
-            Console.WriteLine(e);
+            //Console.WriteLine(e);
         }
 
         newPacket.PayloadPacket = ip;
         newPacket.UpdateCalculatedValues();
         device.SendPacket(newPacket);
+        Console.WriteLine("oh");
     }
 
     public void Stop()

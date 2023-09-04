@@ -8,11 +8,13 @@ using System.Text.Json;
 using System.Threading;
 using System.Timers;
 using Timer = System.Timers.Timer;
-using NATTunnel.Common;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Security.Cryptography;
 using System.Collections;
+using System.IO;
+using Snappier;
+using PacketDotNet;
 
 namespace NATTunnel;
 
@@ -33,7 +35,7 @@ public static class Tunnel
     private static IPAddress targetPeerIp;
     private static int targetPeerPort;
     private static int holePunchReceivedCount;
-    private static bool connected;
+    public static bool connected;
     private static readonly IPAddress remoteIp;
     private static readonly bool isServer;
     private static NATType natType = NATType.Unknown;
@@ -41,6 +43,7 @@ public static class Tunnel
     private static int currentConnectionID = 0;
     public static IPAddress privateIP = null;
     private static FrameCapture capture;
+    private static FrameCapture clientPublicCapture;
     private static int maxConnectionTimeout = 15;
     private static int connectionTimeout = maxConnectionTimeout;
     private static Timer initialConnectionTimer;
@@ -51,9 +54,9 @@ public static class Tunnel
     private static byte[] keyExponent = rsaKeyInfo.Exponent;
     private static RSA rsaServer = RSA.Create();
     private static RSAParameters rsaKeyInfoServer = new RSAParameters();
-    private static AesGcm aes;
-    private static bool hasServerPublicKey = false;
-    private static bool serverHasSymmetricKey = false;
+    public static AesGcm aes;
+    public static bool hasServerPublicKey = false;
+    public static bool serverHasSymmetricKey = false;
     private static byte[] symmetricKey = new byte[32];
     private static SHA256 shaHashGen = SHA256.Create();
 
@@ -67,6 +70,7 @@ public static class Tunnel
         capture.Start();
 
         udpClient = new UdpClient();
+        udpClient.Client.ReceiveBufferSize = 128000;
 
         // Windows-specific udpClient switch
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -82,6 +86,12 @@ public static class Tunnel
         isServer = NodeOptions.IsServer;
         if (isServer) privateIP = IPAddress.Parse("10.5.0.0");
         if (!isServer) privateIP = IPAddress.Parse("10.5.0.255");
+
+        if (!isServer)
+        {
+            clientPublicCapture = new FrameCapture(CaptureMode.Public, remoteIp.ToString());
+            clientPublicCapture.Start();
+        }
 
         //Try to send initial msg to mediator
         try
@@ -140,12 +150,26 @@ public static class Tunnel
                     byte[] encryptedData = new byte[packetData.Length];
                     byte[] tag = new byte[AesGcm.TagByteSizes.MaxSize];
                     client.aes.Encrypt(nonce, packetData, encryptedData, tag);
+
+                    byte[] buffer = new byte[Snappy.GetMaxCompressedLength(packetData.Length)];
+                    int compressedLength = Snappy.Compress(packetData, buffer);
+                    Console.WriteLine(compressedLength);
+
+                    byte[] buffer2 = new byte[Snappy.GetMaxCompressedLength(nonce.Length)];
+                    int compressedLength2 = Snappy.Compress(nonce, buffer2);
+                    Console.WriteLine(compressedLength2);
+
+                    byte[] buffer3 = new byte[Snappy.GetMaxCompressedLength(tag.Length)];
+                    int compressedLength3 = Snappy.Compress(tag, buffer3);
+                    Console.WriteLine(compressedLength3);
+
                     MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
                     message.Data = encryptedData;
                     message.Nonce = nonce;
                     message.AuthTag = tag;
-                    message.SetPrivateAddress(privateAddress);
-                    byte[] encryptedPacket = Encoding.ASCII.GetBytes(message.Serialize());
+                    Console.WriteLine(packetData.Length);
+                    Console.WriteLine(message.SerializeBytes().Length);
+                    byte[] encryptedPacket = message.SerializeBytes();
                     udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
                 }
             }
@@ -163,8 +187,7 @@ public static class Tunnel
                 message.Data = encryptedData;
                 message.Nonce = nonce;
                 message.AuthTag = tag;
-                message.SetPrivateAddress(privateAddress);
-                byte[] encryptedPacket = Encoding.ASCII.GetBytes(message.Serialize());
+                byte[] encryptedPacket = message.SerializeBytes();
                 udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
             }
         }
@@ -336,8 +359,18 @@ public static class Tunnel
             }
             catch
             {
-                Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
-                continue;
+                try
+                {
+                    receivedMessage = new MediationMessage();
+                    receivedMessage.DeserializeBytes(receiveBuffer);
+                    Console.WriteLine("Handled by FrameCapture");
+                    continue;
+                }
+                catch
+                {
+                    Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
+                    continue;
+                }
             }
 
             Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
@@ -418,6 +451,8 @@ public static class Tunnel
                 break;
                 case MediationMessageType.NATTunnelData:
                 {
+                    /*
+                    Console.WriteLine("mah");
                     if (serverHasSymmetricKey)
                     {
                         byte[] tunnelData = new byte[receivedMessage.Data.Length];
@@ -427,6 +462,7 @@ public static class Tunnel
                         if (!connected) continue;
                         capture.Send(tunnelData);
                     }
+                    */
                 }
                 break;
                 case MediationMessageType.SymmetricHolePunchAttempt:
@@ -473,8 +509,18 @@ public static class Tunnel
             }
             catch
             {
-                Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
-                continue;
+                try
+                {
+                    receivedMessage = new MediationMessage();
+                    receivedMessage.DeserializeBytes(receiveBuffer);
+                    Console.WriteLine("Handled by FrameCapture");
+                    continue;
+                }
+                catch
+                {
+                    Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
+                    continue;
+                }
             }
 
             Console.WriteLine($"length {Clients.Count}");
@@ -573,11 +619,18 @@ public static class Tunnel
                 break;
                 case MediationMessageType.NATTunnelData:
                 {
+                    /*
+                    Console.WriteLine("mah");
                     if (c != null && c.HasSymmetricKey)
                     {
                         byte[] tunnelData = new byte[receivedMessage.Data.Length];
                         c.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
-                        IPAddress targetPrivateAddress = receivedMessage.GetPrivateAddress();
+
+                        Packet givenPacket = PacketDotNet.Packet.ParsePacket(LinkLayers.Ethernet, tunnelData);
+                        EthernetPacket eth = givenPacket.Extract<PacketDotNet.EthernetPacket>();
+                        IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
+
+                        IPAddress targetPrivateAddress = ip.DestinationAddress;
                         Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
 
                         if (!Clients.GetClient(listenEndpoint).Connected) continue;
@@ -590,7 +643,7 @@ public static class Tunnel
                         {
                             SendFrame(tunnelData, targetPrivateAddress);
                         }
-                    }
+                    */
                 }
                 break;
                 case MediationMessageType.SymmetricHolePunchAttempt:
@@ -652,7 +705,10 @@ public static class Tunnel
                     if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
-                        if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
+                        {
+                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        }
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
@@ -670,7 +726,10 @@ public static class Tunnel
                     if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
+                        {
+                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        }
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         Console.WriteLine(udpClient.Client.LocalEndPoint);
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
@@ -692,7 +751,10 @@ public static class Tunnel
                     if(holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
+                        {
+                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        }
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
@@ -777,6 +839,7 @@ public static class Tunnel
                             while (symmetricConnectionUdpProbes.Count < 256)
                             {
                                 UdpClient tempUdpClient = new UdpClient();
+                                tempUdpClient.Client.ReceiveBufferSize = 128000;
                                 const int SIO_UDP_CONNRESET = -1744830452;
                                 tempUdpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
                                 tempUdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
@@ -864,7 +927,6 @@ public static class Tunnel
                                 tcpClientStream.Close();
                                 tcpClientTaskCancellationToken.Cancel();
                                 tcpClient.Close();
-                                tcpClientTaskCancellationToken.Dispose();
                             }
                             catch (Exception e)
                             {

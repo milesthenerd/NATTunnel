@@ -1,8 +1,11 @@
+using System;
+using System.Data.SqlTypes;
+using System.Linq;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace NATTunnel.Common;
+namespace NATTunnel;
 
 /// <summary>
 ///Class for the messages sent to and received from the mediation server
@@ -82,23 +85,23 @@ public class MediationMessage
     ///Authentication tag generated when encrypting with AES-GCM
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] ModulusHash { get; set; }
+    public byte[] AuthTag { get; set; }
     /// <summary>
     ///SHA256 hash to verify that public key modulus is intact after being transported
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] ExponentHash { get; set; }
+    public byte[] ModulusHash { get; set; }
     /// <summary>
     ///SHA256 hash to verify that public key exponent is intact after being transported
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] SymmetricKeyHash { get; set; }
+    public byte[] ExponentHash { get; set; }
     /// <summary>
     ///SHA256 hash to verify that symmetric key is intact after being transported
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] AuthTag { get; set; }
-    public MediationMessage(MediationMessageType id)
+    public byte[] SymmetricKeyHash { get; set; }
+    public MediationMessage(MediationMessageType id=0)
     {
         ID = id;
     }
@@ -109,6 +112,46 @@ public class MediationMessage
     public string Serialize()
     {
         return JsonSerializer.Serialize<MediationMessage>(this);
+    }
+
+    /// <summary>
+    ///Construct byte[] representation rather than JSON (only used for NATTunnelData type)
+    /// </summary>
+    public byte[] SerializeBytes()
+    {
+        //No need to include nonce and auth tag length as they are always 12 and 16 bytes respectively
+        byte[] id = BitConverter.GetBytes((ushort)ID);
+        byte[] dataLength = BitConverter.GetBytes((ushort)Data.Length);
+        byte[] header = id.Concat(dataLength).ToArray();
+        byte[] message = header.Concat(Nonce).Concat(AuthTag).Concat(Data).ToArray();
+        return message;
+    }
+
+    /// <summary>
+    ///Construct MediationMessage from byte[] representation (only used for NATTunnelData type)
+    /// </summary>
+    public void DeserializeBytes(byte[] messageBytes)
+    {
+        int offset = 0;
+
+        ID = (MediationMessageType)BitConverter.ToUInt16(messageBytes, offset);
+        offset += 2;
+
+        ushort dataLength = BitConverter.ToUInt16(messageBytes, offset);
+        offset += 2;
+
+        //12 byte nonce length
+        Nonce = new byte[12];
+        Array.Copy(messageBytes, offset, Nonce, 0, 12);
+        offset += 12;
+
+        //16 byte auth tag length
+        AuthTag = new byte[16];
+        Array.Copy(messageBytes, offset, AuthTag, 0, 16);
+        offset += 16;
+
+        Data = new byte[dataLength];
+        Array.Copy(messageBytes, offset, Data, 0, dataLength);
     }
 
     /// <summary>

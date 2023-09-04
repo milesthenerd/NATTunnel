@@ -1,11 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <ProjectReference Include="..\NATTunnel-Common\NATTunnel-Common.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
     <PackageReference Include="sharppcap" Version="6.2.5" />
+    <PackageReference Include="snappier" Version="1.1.1" />
   </ItemGroup>
 
   <PropertyGroup>
