@@ -13,7 +13,6 @@ using System.Threading.Tasks;
 using System.Security.Cryptography;
 using System.Collections;
 using System.IO;
-using Snappier;
 using PacketDotNet;
 
 namespace NATTunnel;
@@ -151,24 +150,10 @@ public static class Tunnel
                     byte[] tag = new byte[AesGcm.TagByteSizes.MaxSize];
                     client.aes.Encrypt(nonce, packetData, encryptedData, tag);
 
-                    byte[] buffer = new byte[Snappy.GetMaxCompressedLength(packetData.Length)];
-                    int compressedLength = Snappy.Compress(packetData, buffer);
-                    Console.WriteLine(compressedLength);
-
-                    byte[] buffer2 = new byte[Snappy.GetMaxCompressedLength(nonce.Length)];
-                    int compressedLength2 = Snappy.Compress(nonce, buffer2);
-                    Console.WriteLine(compressedLength2);
-
-                    byte[] buffer3 = new byte[Snappy.GetMaxCompressedLength(tag.Length)];
-                    int compressedLength3 = Snappy.Compress(tag, buffer3);
-                    Console.WriteLine(compressedLength3);
-
                     MediationMessage message = new MediationMessage(MediationMessageType.NATTunnelData);
                     message.Data = encryptedData;
                     message.Nonce = nonce;
                     message.AuthTag = tag;
-                    Console.WriteLine(packetData.Length);
-                    Console.WriteLine(message.SerializeBytes().Length);
                     byte[] encryptedPacket = message.SerializeBytes();
                     udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
                 }

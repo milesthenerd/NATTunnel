@@ -2,7 +2,6 @@
 
   <ItemGroup>
     <PackageReference Include="sharppcap" Version="6.2.5" />
-    <PackageReference Include="snappier" Version="1.1.1" />
   </ItemGroup>
 
   <PropertyGroup>
