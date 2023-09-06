@@ -12,6 +12,7 @@ using System.Net;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading;
+using PacketDotNet.Utils;
 
 namespace NATTunnel;
 
@@ -119,7 +120,7 @@ public class FrameCapture
                             ip.SourceAddress = Tunnel.privateIP;
                             ip.UpdateCalculatedValues();
                             ip.UpdateIPChecksum();
-                            Tunnel.SendFrame(eth.Bytes, ip.DestinationAddress);
+                            Tunnel.SendFrame(ip.Bytes, ip.DestinationAddress);
                         }
                         else
                         {
@@ -148,9 +149,7 @@ public class FrameCapture
                                                 byte[] tunnelData = new byte[receivedMessage.Data.Length];
                                                 c.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
 
-                                                Packet givenPacket = PacketDotNet.Packet.ParsePacket(LinkLayers.Ethernet, tunnelData);
-                                                EthernetPacket ethExtracted = givenPacket.Extract<PacketDotNet.EthernetPacket>();
-                                                IPv4Packet ipExtracted = ethExtracted.Extract<PacketDotNet.IPv4Packet>();
+                                                IPv4Packet ipExtracted = new IPv4Packet(new ByteArraySegment(tunnelData));
 
                                                 IPAddress targetPrivateAddress = ipExtracted.DestinationAddress;
                                                 Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
@@ -200,13 +199,11 @@ public class FrameCapture
 
     public void Send(byte[] packetData)
     {
-        var givenPacket = PacketDotNet.Packet.ParsePacket(LinkLayers.Ethernet, packetData);
-        var newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
+        EthernetPacket newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
         //eth.DestinationHardwareAddress = defaultInterface.GetPhysicalAddress();
         //eth.SourceHardwareAddress = defaultGatewayMac;
         //eth.UpdateCalculatedValues();
-        EthernetPacket eth = givenPacket.Extract<PacketDotNet.EthernetPacket>();
-        IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
+        IPv4Packet ip = new IPv4Packet(new ByteArraySegment(packetData));
         //if(ip.DestinationAddress.Equals(Tunnel.privateIP)) continue;
         ip.DestinationAddress = myIP;
         ip.UpdateCalculatedValues();
