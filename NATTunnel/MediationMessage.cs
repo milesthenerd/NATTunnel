@@ -101,6 +101,21 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] SymmetricKeyHash { get; set; }
+    /// <summary>
+    ///ID of a fragmented packet
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] FragmentID { get; set; }
+    /// <summary>
+    ///Data offset of a fragmented packet
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] FragmentOffset { get; set; }
+    /// <summary>
+    ///Variable to determine if there are more fragments
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] MoreFragments { get; set; }
     public MediationMessage(MediationMessageType id=0)
     {
         ID = id;
@@ -119,10 +134,13 @@ public class MediationMessage
     /// </summary>
     public byte[] SerializeBytes()
     {
+        if (FragmentID == null) FragmentID = BitConverter.GetBytes((ushort)0);
+        if (FragmentOffset == null) FragmentOffset = BitConverter.GetBytes((ushort)0);
+        if (MoreFragments == null) MoreFragments = BitConverter.GetBytes((ushort)0);
         //No need to include nonce and auth tag length as they are always 12 and 16 bytes respectively
         byte[] id = BitConverter.GetBytes((ushort)ID);
         byte[] dataLength = BitConverter.GetBytes((ushort)Data.Length);
-        byte[] header = id.Concat(dataLength).ToArray();
+        byte[] header = id.Concat(dataLength).Concat(FragmentID).Concat(FragmentOffset).Concat(MoreFragments).Concat(GetPrivateAddress().GetAddressBytes()).ToArray();
         byte[] message = header.Concat(Nonce).Concat(AuthTag).Concat(Data).ToArray();
         return message;
     }
@@ -139,6 +157,24 @@ public class MediationMessage
 
         ushort dataLength = BitConverter.ToUInt16(messageBytes, offset);
         offset += 2;
+
+        FragmentID = new byte[2];
+        Array.Copy(messageBytes, offset, FragmentID, 0, 2);
+        offset += 2;
+
+        FragmentOffset = new byte[2];
+        Array.Copy(messageBytes, offset, FragmentOffset, 0, 2);
+        offset += 2;
+
+        MoreFragments = new byte[2];
+        Array.Copy(messageBytes, offset, MoreFragments, 0, 2);
+        offset += 2;
+        
+        //IPv4 private address conversion
+        byte[] address = new byte[4];
+        Array.Copy(messageBytes, offset, address, 0, 4);
+        SetPrivateAddress(new IPAddress(address));
+        offset += 4;
 
         //12 byte nonce length
         Nonce = new byte[12];

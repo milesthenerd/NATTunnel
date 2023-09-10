@@ -13,6 +13,8 @@ using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using System.Threading;
 using PacketDotNet.Utils;
+using PacketDotNet.DhcpV4;
+using SharpPcap.WinDivert;
 
 namespace NATTunnel;
 
@@ -44,6 +46,9 @@ public class FrameCapture
     private CaptureMode captureMode;
     private string sourceAddress;
     private int count = 0;
+    private List<IPv4Packet> fragmentPacketList = new List<IPv4Packet>();
+    private List<Fragment> fragmentMessageList = new List<Fragment>();
+    private int enforcedMTU = 1280;
     public FrameCapture(CaptureMode mode = CaptureMode.Private, string address = "10.5.0.0")
     {
         captureMode = mode;
@@ -103,12 +108,12 @@ public class FrameCapture
                     // Prints the time and length of each received packet
                     var time = rawPacket.Timeval.Date;
                     var len = rawPacket.Data.Length;
-                    Console.WriteLine("{0}:{1}:{2},{3} Len={4}", time.Hour, time.Minute, time.Second, time.Millisecond, len);
+                    //Console.WriteLine("{0}:{1}:{2},{3} Len={4}", time.Hour, time.Minute, time.Second, time.Millisecond, len);
                     try {
                         EthernetPacket eth = packet.Extract<PacketDotNet.EthernetPacket>();
                         var origEthSrc = eth.SourceHardwareAddress;
                         var origEthDest = eth.DestinationHardwareAddress;
-                        Console.WriteLine(eth);
+                        //Console.WriteLine(eth);
                         IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
 
                         if (captureMode == CaptureMode.Private)
@@ -120,7 +125,66 @@ public class FrameCapture
                             ip.SourceAddress = Tunnel.privateIP;
                             ip.UpdateCalculatedValues();
                             ip.UpdateIPChecksum();
-                            Tunnel.SendFrame(ip.Bytes, ip.DestinationAddress);
+                            //1 = more fragments
+                            if (ip.FragmentOffset > 0 || ip.FragmentFlags == 1)
+                            {
+                                fragmentPacketList.Insert(0, ip);
+                                if (ip.FragmentFlags == 0)
+                                {
+                                    ushort id = ip.Id;
+                                    byte[] fragmentPayloadBytes = new byte[0];
+                                    for (int i=fragmentPacketList.Count - 1; i>=0; i--)
+                                    {
+                                        IPv4Packet tempPacket = fragmentPacketList[i];
+                                        if (tempPacket.Id == id)
+                                        {
+                                            Console.WriteLine("why?");
+                                            fragmentPayloadBytes = fragmentPayloadBytes.Concat(tempPacket.Bytes).ToArray();
+                                            fragmentPacketList.RemoveAt(i);
+                                        }
+                                    }
+
+                                    int currentOffset = 0;
+                                    int remainderOffset = 0;
+                                    bool run = true;
+                                    while (run)
+                                    {
+                                        if (currentOffset < fragmentPayloadBytes.Length)
+                                        {
+                                            Console.WriteLine("okay?");
+                                            Console.WriteLine(currentOffset);
+
+                                            byte[] fragmentBytes;
+                                            ushort moreFragments;
+
+                                            if ((currentOffset + enforcedMTU) < fragmentPayloadBytes.Length)
+                                            {
+                                                fragmentBytes = new byte[enforcedMTU];
+                                                Array.Copy(fragmentPayloadBytes, currentOffset, fragmentBytes, 0, enforcedMTU);
+                                                moreFragments = 1;
+                                            }
+                                            else
+                                            {
+                                                remainderOffset = fragmentPayloadBytes.Length - currentOffset;
+                                                Console.WriteLine("built correctly?");
+                                                fragmentBytes = new byte[remainderOffset];
+                                                Array.Copy(fragmentPayloadBytes, currentOffset, fragmentBytes, 0, remainderOffset);
+                                                run = false;
+                                                Console.WriteLine("is now false?");
+                                                moreFragments = 0;
+                                            }                                            
+                                            
+                                            Tunnel.SendFrame(fragmentBytes, ip.DestinationAddress, BitConverter.GetBytes(id), BitConverter.GetBytes((ushort)currentOffset), BitConverter.GetBytes(moreFragments));
+
+                                            currentOffset += enforcedMTU;
+                                        }
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                Tunnel.SendFrame(ip.Bytes, ip.DestinationAddress);
+                            }
                         }
                         else
                         {
@@ -137,46 +201,45 @@ public class FrameCapture
                                 {
                                     case MediationMessageType.NATTunnelData:
                                     {
-                                        Console.WriteLine(count++);
+                                        //Console.WriteLine(count++);
                                         IPEndPoint clientSourceEndpoint = new IPEndPoint(ip.SourceAddress, udp.SourcePort);
                                         Client c = Clients.GetClient(clientSourceEndpoint);
                                         if (NodeOptions.IsServer)
                                         {
-                                            Console.WriteLine("mah");
                                             if (c != null && c.HasSymmetricKey)
                                             {
                                                 c.ResetTimeout();
                                                 byte[] tunnelData = new byte[receivedMessage.Data.Length];
                                                 c.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
 
-                                                IPv4Packet ipExtracted = new IPv4Packet(new ByteArraySegment(tunnelData));
-
-                                                IPAddress targetPrivateAddress = ipExtracted.DestinationAddress;
-                                                Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+                                                IPAddress targetPrivateAddress = receivedMessage.GetPrivateAddress();
+                                                //Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
 
                                                 if (!c.Connected) continue;
 
+                                                Console.WriteLine("step 0.5?");
                                                 if (targetPrivateAddress.Equals(Tunnel.privateIP))
                                                 {
-                                                    Send(tunnelData);
+                                                    Console.WriteLine("step 0.9?");
+                                                    Send(tunnelData, receivedMessage.FragmentID, receivedMessage.FragmentOffset, receivedMessage.MoreFragments);
                                                 }
                                                 else
                                                 {
-                                                    Tunnel.SendFrame(tunnelData, targetPrivateAddress);
+                                                    Tunnel.SendFrame(tunnelData, targetPrivateAddress, receivedMessage.FragmentID, receivedMessage.FragmentOffset, receivedMessage.MoreFragments);
                                                 }
                                             }
                                         }
                                         else
                                         {
-                                            Console.WriteLine("mah");
                                             if (Tunnel.serverHasSymmetricKey)
                                             {
                                                 byte[] tunnelData = new byte[receivedMessage.Data.Length];
                                                 Tunnel.aes.Decrypt(receivedMessage.Nonce, receivedMessage.Data, receivedMessage.AuthTag, tunnelData);
-                                                Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
+                                                //Console.WriteLine(Encoding.ASCII.GetString(tunnelData));
 
                                                 if (!Tunnel.connected) continue;
-                                                Send(tunnelData);
+                                                
+                                                Send(tunnelData, receivedMessage.FragmentID, receivedMessage.FragmentOffset, receivedMessage.MoreFragments);
                                             }
                                         }
                                     }
@@ -185,56 +248,170 @@ public class FrameCapture
                             }
                             catch(Exception err)
                             {
-                                //Console.WriteLine(err);
+                                Console.WriteLine(err);
                             }
                         }
                     }
                     catch(Exception error) {
-                        //Console.WriteLine(error);
+                        Console.WriteLine(error);
                     }
                 }
             }
         }).Start();
     }
 
-    public void Send(byte[] packetData)
+    public void Send(byte[] packetData, byte[] fragmentID, byte[] fragmentOffset, byte[] moreFragments)
     {
-        EthernetPacket newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
-        //eth.DestinationHardwareAddress = defaultInterface.GetPhysicalAddress();
-        //eth.SourceHardwareAddress = defaultGatewayMac;
-        //eth.UpdateCalculatedValues();
-        IPv4Packet ip = new IPv4Packet(new ByteArraySegment(packetData));
-        //if(ip.DestinationAddress.Equals(Tunnel.privateIP)) continue;
-        ip.DestinationAddress = myIP;
-        ip.UpdateCalculatedValues();
-        ip.UpdateIPChecksum();
-
-        try{
-            UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
-            udp.UpdateCalculatedValues();
-            udp.UpdateUdpChecksum();
-            ip.PayloadPacket = udp;
-        }
-        catch(Exception e)
+        if (BitConverter.ToUInt16(fragmentID) != 0)
         {
-            //Console.WriteLine(e);
-        }
+            Console.WriteLine("step 1?");
+            fragmentMessageList.Insert(0, new Fragment(packetData, fragmentID, fragmentOffset, moreFragments));
+            if (BitConverter.ToUInt16(fragmentOffset) > 0 && BitConverter.ToUInt16(moreFragments) == 0)
+            {
+                Console.WriteLine("step 2?");
+                ushort id = BitConverter.ToUInt16(fragmentID);
+                byte[] fragmentPayloadBytes = new byte[0];
+                for (int i=fragmentMessageList.Count - 1; i>=0; i--)
+                {
+                    Console.WriteLine("step 3?");
+                    Fragment tempFragment = fragmentMessageList[i];
+                    if (BitConverter.ToUInt16(tempFragment.ID) == id)
+                    {
+                        Console.WriteLine("step 4?");
+                        fragmentPayloadBytes = fragmentPayloadBytes.Concat(tempFragment.Bytes).ToArray();
+                        fragmentMessageList.RemoveAt(i);
+                    }
+                }
 
-        try{
-            TcpPacket tcp = ip.Extract<PacketDotNet.TcpPacket>();
-            tcp.UpdateCalculatedValues();
-            tcp.UpdateTcpChecksum();
-            ip.PayloadPacket = tcp;
+                byte[] tempBytes = new byte[enforcedMTU];
+                Array.Copy(fragmentPayloadBytes, 0, tempBytes, 0, enforcedMTU);
+                IPv4Packet tempIP = new IPv4Packet(new ByteArraySegment(tempBytes));
+
+                int originalLength = tempIP.TotalLength;
+                int currentOffset = 0;
+                bool run = true;
+                while (run)
+                {
+                    if (currentOffset < fragmentPayloadBytes.Length)
+                    {
+                        Console.WriteLine("step 5?");
+                        Console.WriteLine(currentOffset);
+
+                        byte[] fragmentBytes;
+
+                        if ((currentOffset + originalLength) < fragmentPayloadBytes.Length)
+                        {
+                            fragmentBytes = new byte[originalLength];
+                            Array.Copy(fragmentPayloadBytes, currentOffset, fragmentBytes, 0, originalLength);
+                        }
+                        else
+                        {
+                            int remainderOffset = fragmentPayloadBytes.Length - currentOffset;
+                            Console.WriteLine("built correctly?");
+                            fragmentBytes = new byte[remainderOffset];
+                            Array.Copy(fragmentPayloadBytes, currentOffset, fragmentBytes, 0, remainderOffset);
+                            run = false;
+                            Console.WriteLine("is now false?");
+                        }
+                        
+                        Console.WriteLine("step 5?");
+                        EthernetPacket newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
+                        //eth.DestinationHardwareAddress = defaultInterface.GetPhysicalAddress();
+                        //eth.SourceHardwareAddress = defaultGatewayMac;
+                        //eth.UpdateCalculatedValues();
+                        IPv4Packet ip = new IPv4Packet(new ByteArraySegment(fragmentBytes));
+                        Console.WriteLine(fragmentPayloadBytes.Length);
+                        Console.WriteLine(ip.Protocol);
+                        Console.WriteLine(ip.SourceAddress.ToString());
+                        Console.WriteLine(ip.DestinationAddress.ToString());
+                        Console.WriteLine(ip.Id);
+                        Console.WriteLine(ip.ValidChecksum);
+                        Console.WriteLine(ip.ValidIPChecksum);
+                        Console.WriteLine(ip.HasPayloadData);
+                        Console.WriteLine(ip.HasPayloadPacket);
+                        Console.WriteLine(ip.TotalLength);
+                        Console.WriteLine(ip.PayloadLength);
+                        //if(ip.DestinationAddress.Equals(Tunnel.privateIP)) continue;
+                        ip.DestinationAddress = myIP;
+                        ip.UpdateCalculatedValues();
+                        ip.UpdateIPChecksum();
+
+                        try
+                        {
+                            UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+                            udp.UpdateCalculatedValues();
+                            udp.UpdateUdpChecksum();
+                            ip.PayloadPacket = udp;
+                        }
+                        catch(Exception e)
+                        {
+                            //Console.WriteLine(e);
+                        }
+
+                        try
+                        {
+                            TcpPacket tcp = ip.Extract<PacketDotNet.TcpPacket>();
+                            tcp.UpdateCalculatedValues();
+                            tcp.UpdateTcpChecksum();
+                            ip.PayloadPacket = tcp;
+                        }
+                        catch(Exception e)
+                        {
+                            //Console.WriteLine(e);
+                        }
+
+                        newPacket.PayloadPacket = ip;
+                        newPacket.UpdateCalculatedValues();
+                        device.SendPacket(newPacket);
+                        Console.WriteLine("oh YEAH BABY LET'S GOOOOO");
+
+                        currentOffset += originalLength;
+                    }
+                }
+            }
         }
-        catch(Exception e)
+        else
         {
-            //Console.WriteLine(e);
-        }
+            Console.WriteLine("pls work like should?");
+            EthernetPacket newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
+            //eth.DestinationHardwareAddress = defaultInterface.GetPhysicalAddress();
+            //eth.SourceHardwareAddress = defaultGatewayMac;
+            //eth.UpdateCalculatedValues();
+            IPv4Packet ip = new IPv4Packet(new ByteArraySegment(packetData));
+            //if(ip.DestinationAddress.Equals(Tunnel.privateIP)) continue;
+            ip.DestinationAddress = myIP;
+            ip.UpdateCalculatedValues();
+            ip.UpdateIPChecksum();
 
-        newPacket.PayloadPacket = ip;
-        newPacket.UpdateCalculatedValues();
-        device.SendPacket(newPacket);
-        Console.WriteLine("oh");
+            try
+            {
+                UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+                udp.UpdateCalculatedValues();
+                udp.UpdateUdpChecksum();
+                ip.PayloadPacket = udp;
+            }
+            catch(Exception e)
+            {
+                //Console.WriteLine(e);
+            }
+
+            try
+            {
+                TcpPacket tcp = ip.Extract<PacketDotNet.TcpPacket>();
+                tcp.UpdateCalculatedValues();
+                tcp.UpdateTcpChecksum();
+                ip.PayloadPacket = tcp;
+            }
+            catch(Exception e)
+            {
+                //Console.WriteLine(e);
+            }
+
+            newPacket.PayloadPacket = ip;
+            newPacket.UpdateCalculatedValues();
+            device.SendPacket(newPacket);
+            Console.WriteLine("oh");
+        }
     }
 
     public void Stop()

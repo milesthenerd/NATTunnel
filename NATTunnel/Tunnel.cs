@@ -136,8 +136,12 @@ public static class Tunnel
         }
     }
 
-    public static void Send(byte[] packetData, IPEndPoint endpoint, IPAddress privateAddress, Client client=null)
+    public static void Send(byte[] packetData, IPEndPoint endpoint, IPAddress privateAddress, byte[] fragmentID, byte[] fragmentOffset, byte[] moreFragments, Client client=null)
     {
+        byte[] fID = fragmentID;
+        byte[] fOffset = fragmentOffset;
+        byte[] fMore = moreFragments;
+
         if (isServer)
         {
             if (client != null)
@@ -154,6 +158,10 @@ public static class Tunnel
                     message.Data = encryptedData;
                     message.Nonce = nonce;
                     message.AuthTag = tag;
+                    message.FragmentID = fID;
+                    message.FragmentOffset = fOffset;
+                    message.MoreFragments = fMore;
+                    message.SetPrivateAddress(privateAddress);
                     byte[] encryptedPacket = message.SerializeBytes();
                     udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
                 }
@@ -172,25 +180,29 @@ public static class Tunnel
                 message.Data = encryptedData;
                 message.Nonce = nonce;
                 message.AuthTag = tag;
+                message.FragmentID = fID;
+                message.FragmentOffset = fOffset;
+                message.MoreFragments = fMore;
+                message.SetPrivateAddress(privateAddress);
                 byte[] encryptedPacket = message.SerializeBytes();
                 udpClient.Send(encryptedPacket, encryptedPacket.Length, endpoint);
             }
         }
     }
 
-    public static void SendFrame(byte[] packetData, IPAddress privateAddress)
+    public static void SendFrame(byte[] packetData, IPAddress privateAddress, byte[] fragmentID=null, byte[] fragmentOffset=null, byte[] moreFragments=null)
     {
         if (isServer)
         {
             Client client = Clients.GetClient(privateAddress);
             if (client != null)
             {
-                Send(packetData, client.GetEndPoint(), privateAddress, client);
+                Send(packetData, client.GetEndPoint(), privateAddress, fragmentID, fragmentOffset, moreFragments, client);
             }
         }
         else
         {
-            Send(packetData, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}"), privateAddress);
+            Send(packetData, IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}"), privateAddress, fragmentID, fragmentOffset, moreFragments);
         }
     }
 
@@ -339,23 +351,13 @@ public static class Tunnel
             try
             {
                 receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
-                Console.WriteLine("VALID?");
+                //Console.WriteLine("VALID?");
                 Console.WriteLine(receivedString);
             }
             catch
             {
-                try
-                {
-                    receivedMessage = new MediationMessage();
-                    receivedMessage.DeserializeBytes(receiveBuffer);
-                    Console.WriteLine("Handled by FrameCapture");
-                    continue;
-                }
-                catch
-                {
-                    Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
-                    continue;
-                }
+                Console.WriteLine("Handled by FrameCapture");
+                continue;
             }
 
             Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
@@ -489,23 +491,13 @@ public static class Tunnel
             try
             {
                 receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
-                Console.WriteLine("VALID?");
+                //Console.WriteLine("VALID?");
                 Console.WriteLine(receivedString);
             }
             catch
             {
-                try
-                {
-                    receivedMessage = new MediationMessage();
-                    receivedMessage.DeserializeBytes(receiveBuffer);
-                    Console.WriteLine("Handled by FrameCapture");
-                    continue;
-                }
-                catch
-                {
-                    Console.WriteLine("INVALID MESSAGE RECEIVED, IGNORING");
-                    continue;
-                }
+                Console.WriteLine("Handled by FrameCapture");
+                continue;
             }
 
             Console.WriteLine($"length {Clients.Count}");
