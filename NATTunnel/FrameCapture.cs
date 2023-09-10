@@ -138,7 +138,6 @@ public class FrameCapture
                                         IPv4Packet tempPacket = fragmentPacketList[i];
                                         if (tempPacket.Id == id)
                                         {
-                                            Console.WriteLine("why?");
                                             fragmentPayloadBytes = fragmentPayloadBytes.Concat(tempPacket.Bytes).ToArray();
                                             fragmentPacketList.RemoveAt(i);
                                         }
@@ -151,7 +150,6 @@ public class FrameCapture
                                     {
                                         if (currentOffset < fragmentPayloadBytes.Length)
                                         {
-                                            Console.WriteLine("okay?");
                                             Console.WriteLine(currentOffset);
 
                                             byte[] fragmentBytes;
@@ -166,11 +164,9 @@ public class FrameCapture
                                             else
                                             {
                                                 remainderOffset = fragmentPayloadBytes.Length - currentOffset;
-                                                Console.WriteLine("built correctly?");
                                                 fragmentBytes = new byte[remainderOffset];
                                                 Array.Copy(fragmentPayloadBytes, currentOffset, fragmentBytes, 0, remainderOffset);
                                                 run = false;
-                                                Console.WriteLine("is now false?");
                                                 moreFragments = 0;
                                             }                                            
                                             
@@ -217,10 +213,8 @@ public class FrameCapture
 
                                                 if (!c.Connected) continue;
 
-                                                Console.WriteLine("step 0.5?");
                                                 if (targetPrivateAddress.Equals(Tunnel.privateIP))
                                                 {
-                                                    Console.WriteLine("step 0.9?");
                                                     Send(tunnelData, receivedMessage.FragmentID, receivedMessage.FragmentOffset, receivedMessage.MoreFragments);
                                                 }
                                                 else
@@ -264,20 +258,16 @@ public class FrameCapture
     {
         if (BitConverter.ToUInt16(fragmentID) != 0)
         {
-            Console.WriteLine("step 1?");
             fragmentMessageList.Insert(0, new Fragment(packetData, fragmentID, fragmentOffset, moreFragments));
             if (BitConverter.ToUInt16(fragmentOffset) > 0 && BitConverter.ToUInt16(moreFragments) == 0)
             {
-                Console.WriteLine("step 2?");
                 ushort id = BitConverter.ToUInt16(fragmentID);
                 byte[] fragmentPayloadBytes = new byte[0];
                 for (int i=fragmentMessageList.Count - 1; i>=0; i--)
                 {
-                    Console.WriteLine("step 3?");
                     Fragment tempFragment = fragmentMessageList[i];
                     if (BitConverter.ToUInt16(tempFragment.ID) == id)
                     {
-                        Console.WriteLine("step 4?");
                         fragmentPayloadBytes = fragmentPayloadBytes.Concat(tempFragment.Bytes).ToArray();
                         fragmentMessageList.RemoveAt(i);
                     }
@@ -294,7 +284,6 @@ public class FrameCapture
                 {
                     if (currentOffset < fragmentPayloadBytes.Length)
                     {
-                        Console.WriteLine("step 5?");
                         Console.WriteLine(currentOffset);
 
                         byte[] fragmentBytes;
@@ -307,30 +296,16 @@ public class FrameCapture
                         else
                         {
                             int remainderOffset = fragmentPayloadBytes.Length - currentOffset;
-                            Console.WriteLine("built correctly?");
                             fragmentBytes = new byte[remainderOffset];
                             Array.Copy(fragmentPayloadBytes, currentOffset, fragmentBytes, 0, remainderOffset);
                             run = false;
-                            Console.WriteLine("is now false?");
                         }
                         
-                        Console.WriteLine("step 5?");
                         EthernetPacket newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
                         //eth.DestinationHardwareAddress = defaultInterface.GetPhysicalAddress();
                         //eth.SourceHardwareAddress = defaultGatewayMac;
                         //eth.UpdateCalculatedValues();
                         IPv4Packet ip = new IPv4Packet(new ByteArraySegment(fragmentBytes));
-                        Console.WriteLine(fragmentPayloadBytes.Length);
-                        Console.WriteLine(ip.Protocol);
-                        Console.WriteLine(ip.SourceAddress.ToString());
-                        Console.WriteLine(ip.DestinationAddress.ToString());
-                        Console.WriteLine(ip.Id);
-                        Console.WriteLine(ip.ValidChecksum);
-                        Console.WriteLine(ip.ValidIPChecksum);
-                        Console.WriteLine(ip.HasPayloadData);
-                        Console.WriteLine(ip.HasPayloadPacket);
-                        Console.WriteLine(ip.TotalLength);
-                        Console.WriteLine(ip.PayloadLength);
                         //if(ip.DestinationAddress.Equals(Tunnel.privateIP)) continue;
                         ip.DestinationAddress = myIP;
                         ip.UpdateCalculatedValues();
@@ -363,7 +338,6 @@ public class FrameCapture
                         newPacket.PayloadPacket = ip;
                         newPacket.UpdateCalculatedValues();
                         device.SendPacket(newPacket);
-                        Console.WriteLine("oh YEAH BABY LET'S GOOOOO");
 
                         currentOffset += originalLength;
                     }
@@ -372,7 +346,6 @@ public class FrameCapture
         }
         else
         {
-            Console.WriteLine("pls work like should?");
             EthernetPacket newPacket = new EthernetPacket(defaultGatewayMac, defaultInterface.GetPhysicalAddress(), EthernetType.IPv4);
             //eth.DestinationHardwareAddress = defaultInterface.GetPhysicalAddress();
             //eth.SourceHardwareAddress = defaultGatewayMac;
@@ -410,7 +383,6 @@ public class FrameCapture
             newPacket.PayloadPacket = ip;
             newPacket.UpdateCalculatedValues();
             device.SendPacket(newPacket);
-            Console.WriteLine("oh");
         }
     }
 
