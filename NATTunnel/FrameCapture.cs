@@ -120,6 +120,7 @@ public class FrameCapture
                             ip.SourceAddress = Tunnel.privateIP;
                             ip.UpdateCalculatedValues();
                             ip.UpdateIPChecksum();
+
                             //1 = more fragments
                             if (ip.FragmentOffset > 0 || ip.FragmentFlags == 1)
                             {
@@ -195,7 +196,7 @@ public class FrameCapture
                                         //Console.WriteLine(count++);
                                         IPEndPoint clientSourceEndpoint = new IPEndPoint(ip.SourceAddress, udp.SourcePort);
                                         Client c = Clients.GetClient(clientSourceEndpoint);
-                                        if (NodeOptions.IsServer)
+                                        if (TunnelOptions.IsServer)
                                         {
                                             if (c != null && c.HasSymmetricKey)
                                             {
@@ -312,6 +313,16 @@ public class FrameCapture
                             udp.UpdateCalculatedValues();
                             udp.UpdateUdpChecksum();
                             ip.PayloadPacket = udp;
+                            if (TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(udp.DestinationPort))
+                            {
+                                Console.WriteLine("BRO WHAT 1");
+                                continue;
+                            }
+                            if (!TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(udp.SourcePort))
+                            {
+                                Console.WriteLine("BRO WHAT 1");
+                                continue;
+                            }
                         }
                         catch(Exception e)
                         {
@@ -324,6 +335,16 @@ public class FrameCapture
                             tcp.UpdateCalculatedValues();
                             tcp.UpdateTcpChecksum();
                             ip.PayloadPacket = tcp;
+                            if (TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(tcp.DestinationPort))
+                            {
+                                Console.WriteLine("BRO WHAT 2");
+                                continue;
+                            }
+                            if (!TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(tcp.SourcePort))
+                            {
+                                Console.WriteLine("BRO WHAT 2");
+                                continue;
+                            }
                         }
                         catch(Exception e)
                         {
@@ -357,6 +378,20 @@ public class FrameCapture
                 udp.UpdateCalculatedValues();
                 udp.UpdateUdpChecksum();
                 ip.PayloadPacket = udp;
+                if (TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(udp.DestinationPort))
+                {
+                    Console.WriteLine(udp.DestinationPort);
+                    Console.WriteLine(TunnelOptions.WhitelistedPorts[0]);
+                    Console.WriteLine("BRO WHAT 3");
+                    return;
+                }
+                if (!TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(udp.SourcePort))
+                {
+                    Console.WriteLine(udp.DestinationPort);
+                    Console.WriteLine(TunnelOptions.WhitelistedPorts[0]);
+                    Console.WriteLine("BRO WHAT 3");
+                    return;
+                }
             }
             catch(Exception e)
             {
@@ -369,6 +404,20 @@ public class FrameCapture
                 tcp.UpdateCalculatedValues();
                 tcp.UpdateTcpChecksum();
                 ip.PayloadPacket = tcp;
+                if (TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(tcp.DestinationPort))
+                {
+                    Console.WriteLine(tcp.DestinationPort);
+                    Console.WriteLine(TunnelOptions.WhitelistedPorts[0]);
+                    Console.WriteLine("BRO WHAT 4");
+                    return;
+                }
+                if (!TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(tcp.SourcePort))
+                {
+                    Console.WriteLine(tcp.DestinationPort);
+                    Console.WriteLine(TunnelOptions.WhitelistedPorts[0]);
+                    Console.WriteLine("BRO WHAT 4");
+                    return;
+                }
             }
             catch(Exception e)
             {

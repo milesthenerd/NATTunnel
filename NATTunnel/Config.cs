@@ -40,6 +40,16 @@ public static class Config
     /// </summary>
     private const string RemoteIp = "remoteIP";
 
+    /// <summary>
+    /// Text string for "usingWhitelist" in the config.
+    /// </summary>
+    private const string UsingWhitelist = "usingWhitelist";
+
+    /// <summary>
+    /// Text string for "whitelistedPorts" in the config.
+    /// </summary>
+    private const string WhitelistedPorts = "whitelistedPorts";
+
     #endregion
 
     /// <summary>
@@ -63,17 +73,17 @@ public static class Config
                 return false;
             }
             //If valid, set IsServer
-            NodeOptions.IsServer = (string)model[Mode] == Server;
+            TunnelOptions.IsServer = (string)model[Mode] == Server;
         }
         catch
         {
-            Console.Error.WriteLine("Something went wrong reading the mode field.");
+            Console.Error.WriteLine($"Something went wrong reading the {Mode} field!");
             return false;
         }
 
         try
         {
-            //If no port is specified, error out.
+            //If no port is specified, error out
             string endpointString = (string)model[MediationEndpoint];
             int colonIndex = endpointString.IndexOf(':');
             if (colonIndex <= 0)
@@ -93,23 +103,46 @@ public static class Config
             }
 
             //Try to parse mediationEndpoint with DNS lookup
-            NodeOptions.MediationEndpoint = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
+            TunnelOptions.MediationEndpoint = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
         }
         catch
         {
             //Throw error if parsing fails
-            Console.Error.WriteLine("Failed to parse the mediationEndpoint.");
+            Console.Error.WriteLine($"Failed to parse the {MediationEndpoint}!");
             return false;
         }
 
-        // If the IP can't be resolved, error out.
+        // If the IP can't be resolved, error out
         try
         {
-            NodeOptions.RemoteIp = GetIPFromDnsResolve((string)model[RemoteIp]);
+            TunnelOptions.RemoteIp = GetIPFromDnsResolve((string)model[RemoteIp]);
         }
         catch
         {
             Console.Error.WriteLine($"Could not resolve '{RemoteIp}' to an IP address!");
+            return false;
+        }
+
+        try
+        {
+            //If usingWhitelist is not valid, exit
+            TunnelOptions.UsingWhitelist = (bool)model[UsingWhitelist];
+        }
+        catch
+        {
+            Console.Error.WriteLine($"Something went wrong reading the {UsingWhitelist} field!");
+            return false;
+        }
+
+        //Try to parse whitelist into TomlArray
+        try
+        {
+            TunnelOptions.WhitelistedPorts = ((TomlArray)model[WhitelistedPorts]).Select(i => Convert.ToInt32(i)).ToList();
+        }
+        catch(Exception e)
+        {
+            Console.WriteLine(e);
+            Console.Error.WriteLine($"Failed to parse the {WhitelistedPorts} field! Make sure all entered values are numbers!");
             return false;
         }
 
@@ -127,7 +160,7 @@ public static class Config
         IPAddress ipToReturn = null;
 
         // If we support ipv6, return the first ipv6 ip (if it exists), otherwise return the first ipv4 ip.
-        if (NodeOptions.IsIPv6Supported)
+        if (TunnelOptions.IsIPv6Supported)
             ipToReturn = ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetworkV6);
 
         ipToReturn ??= ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetwork);
@@ -144,12 +177,20 @@ public static class Config
     public static void CreateNewConfig()
     {
         //Yes this looks weird but it's what works
-        String defaultConfigString = $@"#mode: Set to server if you want to allow others to connect to you, client if you want to connect to someone else
-mode = ""{(NodeOptions.IsServer ? Server : Client)}""
-#mediationEndpoint: The public IP and port of the matchmaking/holepunching server you want to connect to
-mediationEndpoint = ""{NodeOptions.MediationEndpoint}""
-#remoteIP: The public IP of the peer you want to connect to (unused for servers)
-remoteIP = ""{NodeOptions.RemoteIp}""";
+        String defaultConfigString = $@"#{Mode}: Set to server if you want to allow others to connect to you, client if you want to connect to someone else
+{Mode} = ""{(TunnelOptions.IsServer ? Server : Client)}""
+
+#{MediationEndpoint}: The public IP and port of the matchmaking/holepunching server you want to connect to
+{MediationEndpoint} = ""{TunnelOptions.MediationEndpoint}""
+
+#{RemoteIp}: The public IP of the peer you want to connect to (unused for servers)
+{RemoteIp} = ""{TunnelOptions.RemoteIp}""
+
+#{UsingWhitelist}: Set true if you want to only expose a defined list of ports, false if you want to allow access to all ports
+{UsingWhitelist} = true
+
+#{WhitelistedPorts}: Array of whitelisted ports. If you want to define several, write it like an array such as [64198, 50000, 62415]
+{WhitelistedPorts} = [{TunnelOptions.DefaultPort}]";
 
         using StreamWriter sw = new StreamWriter(GetConfigFilePath());
         sw.WriteLine(defaultConfigString);
@@ -180,13 +221,13 @@ remoteIP = ""{NodeOptions.RemoteIp}""";
         {
             case 'c':
             {
-                NodeOptions.IsServer = false;
+                TunnelOptions.IsServer = false;
                 CreateNewConfig();
                 return true;
             }
             case 's':
             {
-                NodeOptions.IsServer = true;
+                TunnelOptions.IsServer = true;
                 CreateNewConfig();
                 return true;
             }

@@ -80,9 +80,9 @@ public static class Tunnel
             udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
         }
 
-        endpoint = NodeOptions.MediationEndpoint;
-        remoteIp = NodeOptions.RemoteIp;
-        isServer = NodeOptions.IsServer;
+        endpoint = TunnelOptions.MediationEndpoint;
+        remoteIp = TunnelOptions.RemoteIp;
+        isServer = TunnelOptions.IsServer;
         if (isServer) privateIP = IPAddress.Parse("10.5.0.0");
         if (!isServer) privateIP = IPAddress.Parse("10.5.0.255");
 

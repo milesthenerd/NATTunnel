@@ -1,12 +1,15 @@
+using System.Collections;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.NetworkInformation;
+using Tomlyn.Model;
 
 namespace NATTunnel;
 
 /// <summary>
 /// Class that holds option values for various parts for NATTunnel.
 /// </summary>
-public static class NodeOptions
+public static class TunnelOptions
 {
     //TODO: documentation needed
     /// <summary>
@@ -25,6 +28,21 @@ public static class NodeOptions
     public static IPAddress RemoteIp = IPAddress.Loopback;
 
     /// <summary>
+    /// Indicates whether the port whitelist is in use.
+    /// </summary>
+    public static bool UsingWhitelist = true;
+
+    /// <summary>
+    /// The whitelisted ports.
+    /// </summary>
+    public static List<int> WhitelistedPorts = new List<int>();
+
+    /// <summary>
+    /// Default port number
+    /// </summary>
+    public static int DefaultPort = 64198;
+
+    /// <summary>
     /// Indicated whether IPv6 is supported.
     /// </summary>
     public static bool IsIPv6Supported { get; }
@@ -34,9 +52,10 @@ public static class NodeOptions
     /// </summary>
     public static bool IsIPv4Supported { get; }
 
-    // Constructor for Node options, determines whether ipv6 and ipv4 are supported.
-    static NodeOptions()
+    // Constructor for Tunnel options, determines whether ipv6 and ipv4 are supported.
+    static TunnelOptions()
     {
+        WhitelistedPorts.Add(DefaultPort);
         NetworkInterface[] nets = NetworkInterface.GetAllNetworkInterfaces();
 
         foreach (NetworkInterface net in nets)
