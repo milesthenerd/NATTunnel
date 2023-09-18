@@ -3,6 +3,8 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using Tomlyn;
+using Tomlyn.Model;
 
 namespace NATTunnel;
 
@@ -29,9 +31,9 @@ public static class Config
     private const string Server = "server";
 
     /// <summary>
-    /// Text string for "mediationIP" in the config.
+    /// Text string for "mediationEndpoint" in the config.
     /// </summary>
-    private const string MediationIp = "mediationIP";
+    private const string MediationEndpoint = "mediationEndpoint";
 
     /// <summary>
     /// Text string for "remoteIP" in the config.
@@ -46,77 +48,71 @@ public static class Config
     /// <returns>Returns <see langword="true"/> if loading was successful, <see langword="false"/> if it wasn't.</returns>
     public static bool TryLoadConfig()
     {
-        using StreamReader streamReader = new StreamReader(GetConfigFilePath());
-        string currentLine;
-        while ((currentLine = streamReader.ReadLine()) != null)
+        string configString = File.ReadAllText(GetConfigFilePath());
+        
+        TomlTable model = Toml.ToModel(configString);
+
+        Console.WriteLine(Toml.FromModel(model));
+
+        try
         {
-            // Skip all lines which don't have contents or are commented out.
-            if ((currentLine.Length > 1) && (currentLine[0] == '#')) continue;
-
-            // If the current line has no '=', or it's at the beginning, skip.
-            int splitIndex = currentLine.IndexOf("=", StringComparison.Ordinal);
-            if (splitIndex <= 0) continue;
-
-            string leftSide = currentLine[..splitIndex].Trim();
-            string rightSide = currentLine[(splitIndex + 1)..].Trim();
-            switch (leftSide)
+            //If mode is not valid, exit
+            if (!(model[Mode].Equals(Server) || model[Mode].Equals(Client)))
             {
-                case Mode:
-                    // If the Mode is neither Server nor Client, exit.
-                    if (!(rightSide.Equals(Server) || rightSide.Equals(Client)))
-                    {
-                        Console.Error.WriteLine($"Unknown option '{rightSide}' for {Mode}!");
-                        return false;
-                    }
-                    // Otherwise, assign IsServer
-                    NodeOptions.IsServer = rightSide == Server;
-                    break;
-                case MediationIp:
-                    // If no port is specified, error out.
-                    int colonIndex = rightSide.IndexOf(':');
-                    if (colonIndex <= 0)
-                    {
-                        Console.Error.WriteLine($"{MediationIp} must have a port specified!");
-                        return false;
-                    }
-
-                    string ip = rightSide[..colonIndex];
-                    string port = rightSide[(colonIndex + 1)..];
-                    int portForMediationIP;
-
-                    if (!Int32.TryParse(port, out portForMediationIP))
-                    {
-                        Console.Error.WriteLine($"Invalid port for {MediationIp}!");
-                        return false;
-                    }
-
-                    try
-                    {
-                        NodeOptions.MediationIp = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
-                    }
-                    catch
-                    {
-                        Console.Error.WriteLine($"Could not resolve '{ip}' to an IP address!");
-                        return false;
-                    }
-                    break;
-                case RemoteIp:
-                    // If the IP can't be resolved, error out.
-                    try
-                    {
-                        NodeOptions.RemoteIp = GetIPFromDnsResolve(rightSide);
-                    }
-                    catch
-                    {
-                        Console.Error.WriteLine($"Could not resolve '{rightSide}' to an IP address!");
-                        return false;
-                    }
-                    break;
-                default:
-                    Console.WriteLine($"Unknown config option {leftSide}!");
-                    break;
+                Console.Error.WriteLine($"Unknown option '{model[Mode]}' for {Mode}!");
+                return false;
             }
+            //If valid, set IsServer
+            NodeOptions.IsServer = (string)model[Mode] == Server;
         }
+        catch
+        {
+            Console.Error.WriteLine("Something went wrong reading the mode field.");
+            return false;
+        }
+
+        try
+        {
+            //If no port is specified, error out.
+            string endpointString = (string)model[MediationEndpoint];
+            int colonIndex = endpointString.IndexOf(':');
+            if (colonIndex <= 0)
+            {
+                Console.Error.WriteLine($"{MediationEndpoint} must have a port specified!");
+                return false;
+            }
+
+            string ip = endpointString[..colonIndex];
+            string port = endpointString[(colonIndex + 1)..];
+            int portForMediationIP;
+
+            if (!Int32.TryParse(port, out portForMediationIP))
+            {
+                Console.Error.WriteLine($"Invalid port for {MediationEndpoint}!");
+                return false;
+            }
+
+            //Try to parse mediationEndpoint with DNS lookup
+            NodeOptions.MediationEndpoint = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
+        }
+        catch
+        {
+            //Throw error if parsing fails
+            Console.Error.WriteLine("Failed to parse the mediationEndpoint.");
+            return false;
+        }
+
+        // If the IP can't be resolved, error out.
+        try
+        {
+            NodeOptions.RemoteIp = GetIPFromDnsResolve((string)model[RemoteIp]);
+        }
+        catch
+        {
+            Console.Error.WriteLine($"Could not resolve '{RemoteIp}' to an IP address!");
+            return false;
+        }
+
         return true;
     }
 
@@ -147,16 +143,16 @@ public static class Config
     /// </summary>
     public static void CreateNewConfig()
     {
+        //Yes this looks weird but it's what works
+        String defaultConfigString = $@"#mode: Set to server if you want to allow others to connect to you, client if you want to connect to someone else
+mode = ""{(NodeOptions.IsServer ? Server : Client)}""
+#mediationEndpoint: The public IP and port of the matchmaking/holepunching server you want to connect to
+mediationEndpoint = ""{NodeOptions.MediationEndpoint}""
+#remoteIP: The public IP of the peer you want to connect to (unused for servers)
+remoteIP = ""{NodeOptions.RemoteIp}""";
+
         using StreamWriter sw = new StreamWriter(GetConfigFilePath());
-        sw.WriteLine("#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP.");
-        sw.WriteLine($"{Mode}={(NodeOptions.IsServer ? Server : Client)}");
-        sw.WriteLine();
-        sw.WriteLine("#mediationIP: The public IP and port of the mediation server you want to connect to.");
-        sw.WriteLine($"{MediationIp}={NodeOptions.MediationIp}");
-        sw.WriteLine();
-        sw.WriteLine("#remoteIP, clients: The public IP of the peer you want to connect to.");
-        sw.WriteLine($"{RemoteIp}={NodeOptions.RemoteIp}");
-        sw.WriteLine();
+        sw.WriteLine(defaultConfigString);
     }
 
 
@@ -174,7 +170,7 @@ public static class Config
             return true;
 
         if (!doesFileExist)
-            Console.WriteLine("Unable to find config.txt");
+            Console.WriteLine("Unable to find config.toml");
         Console.WriteLine("Creating a default:");
         Console.WriteLine("c) Create a client config file");
         Console.WriteLine("s) Create a server config file");
@@ -212,7 +208,7 @@ public static class Config
         {
             string natTunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + "/NATTunnel";
             Directory.CreateDirectory(natTunnelDir);
-            return natTunnelDir + "/config.txt";
+            return natTunnelDir + "/config.toml";
         }
 
         // Special case for macos, because the applicationData folder is currently bugged on macos+.net
@@ -220,7 +216,7 @@ public static class Config
         {
             string natTunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/Library/Application Support/NATTunnel";
             Directory.CreateDirectory(natTunnelDir);
-            return natTunnelDir + "/config.txt";
+            return natTunnelDir + "/config.toml";
         }
 
         return null;

@@ -80,7 +80,7 @@ public static class Tunnel
             udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
         }
 
-        endpoint = NodeOptions.MediationIp;
+        endpoint = NodeOptions.MediationEndpoint;
         remoteIp = NodeOptions.RemoteIp;
         isServer = NodeOptions.IsServer;
         if (isServer) privateIP = IPAddress.Parse("10.5.0.0");
@@ -649,8 +649,8 @@ public static class Tunnel
                 //TODO: sometimes fails here
                 int bytesRead = tcpClientStream.Read(receiveBuffer, 0, tcpClient.ReceiveBufferSize);
                 string receivedString = Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead);
-                MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
                 Console.WriteLine("Received: " + receivedString);
+                MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
 
                 void PollForAvailableServer(object source, ElapsedEventArgs e)
                 {

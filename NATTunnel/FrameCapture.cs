@@ -1,20 +1,14 @@
 using SharpPcap;
 using SharpPcap.LibPcap;
-using SharpPcap.Tunneling;
 using PacketDotNet;
 using System.Net.NetworkInformation;
 using System;
-using System.Diagnostics;
-using System.Text;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Net;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
-using System.Threading;
 using PacketDotNet.Utils;
-using PacketDotNet.DhcpV4;
-using SharpPcap.WinDivert;
 
 namespace NATTunnel;
 
@@ -48,6 +42,7 @@ public class FrameCapture
     private int count = 0;
     private List<IPv4Packet> fragmentPacketList = new List<IPv4Packet>();
     private List<Fragment> fragmentMessageList = new List<Fragment>();
+    //ipv6 minimum mtu, even though ipv6 isn't even currently supported
     private int enforcedMTU = 1280;
     public FrameCapture(CaptureMode mode = CaptureMode.Private, string address = "10.5.0.0")
     {
@@ -242,12 +237,12 @@ public class FrameCapture
                             }
                             catch(Exception err)
                             {
-                                Console.WriteLine(err);
+                                //Console.WriteLine(err);
                             }
                         }
                     }
                     catch(Exception error) {
-                        Console.WriteLine(error);
+                        //Console.WriteLine(error);
                     }
                 }
             }

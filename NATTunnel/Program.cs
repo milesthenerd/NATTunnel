@@ -14,7 +14,7 @@ internal static class Program
 
         if (!Config.TryLoadConfig())
         {
-            Console.WriteLine("Failed to load config.txt");
+            Console.WriteLine("Failed to load config.toml");
             Console.WriteLine("Press any key to exit...");
             Console.ReadKey();
             Environment.Exit(-1);

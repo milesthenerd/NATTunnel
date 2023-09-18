@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <PackageReference Include="sharppcap" Version="6.2.5" />
+    <PackageReference Include="tomlyn" Version="0.16.2" />
   </ItemGroup>
 
   <PropertyGroup>

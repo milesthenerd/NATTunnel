@@ -17,7 +17,7 @@ public static class NodeOptions
     /// <summary>
     /// The public IP of the mediation server you want to connect to.
     /// </summary>
-    public static IPEndPoint MediationIp = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
+    public static IPEndPoint MediationEndpoint = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
 
     /// <summary>
     /// The public IP of the server Tunnel you want to connect to. Only used as a client.

@@ -15,18 +15,18 @@ Aside from the original info above, this fork is intended to be used with an acc
 Here is an example config: 
 
 ```
-#mode: Set to server if you want to host a local server over UDP, client if you want to connect to a server over UDP
-mode=client
+#mode: Set to server if you want to allow others to connect to you, client if you want to connect to someone else
+mode = "server"
 
-#mediationIP: The public IP and port of the mediation server you are connecting to.
-mediationIP=sync.milesthenerd.net:6510
+#mediationEndpoint: The public IP and port of the matchmaking/holepunching server you want to connect to
+mediationEndpoint = "sync.milesthenerd.net:6510"
 
-#remoteIP, clients: The public IP of the peer you want to connect to.
-remoteIP=127.0.0.1
+#remoteIP: The public IP of the peer you want to connect to (unused for servers)
+remoteIP = "127.0.0.1"
 ```
 
-__mode__: should be set to "client" if you are a client, and "server" if you are running a game server
+__mode__: should be set to "client" if you are a client, and "server" if you are running a NATTunnel server
 
-__mediationIP__: this should be the public IP address and port of the mediation server; set if you are a client or server
+__mediationEndpoit__: this should be the public IP address and port of the mediation server; set if you are a client or server
 
 __remoteIP__: this should be the public IP address of the peer you want to connect to; only set for clients
