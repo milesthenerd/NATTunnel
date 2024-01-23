@@ -116,7 +116,7 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] MoreFragments { get; set; }
-    public MediationMessage(MediationMessageType id=0)
+    public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;
     }
@@ -169,7 +169,7 @@ public class MediationMessage
         MoreFragments = new byte[2];
         Array.Copy(messageBytes, offset, MoreFragments, 0, 2);
         offset += 2;
-        
+
         //IPv4 private address conversion
         byte[] address = new byte[4];
         Array.Copy(messageBytes, offset, address, 0, 4);
