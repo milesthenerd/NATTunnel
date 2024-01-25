@@ -9,6 +9,8 @@ using System.Net;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using PacketDotNet.Utils;
+using PacketDotNet.Tcp;
+using System.Text;
 
 namespace NATTunnel;
 
@@ -41,7 +43,7 @@ public class FrameCapture
     private string sourceAddress;
     private int count = 0;
     private List<IPv4Packet> fragmentPacketList = new List<IPv4Packet>();
-    private List<Fragment> fragmentMessageList = new List<Fragment>();
+    private List<IPFragment> fragmentMessageList = new List<IPFragment>();
     //ipv6 minimum mtu, even though ipv6 isn't even currently supported
     private int enforcedMTU = 1280;
     public FrameCapture(CaptureMode mode = CaptureMode.Private, string address = "10.5.0.0")
@@ -59,8 +61,6 @@ public class FrameCapture
             Console.WriteLine("SharpPcap {0}", ver);
 
             device = GetPcapDevice();
-
-            Console.WriteLine("WHAT {0}", device);
             defaultGatewayMac = PhysicalAddress.Parse(GetMacByIp(defaultInterface.GetIPProperties().GatewayAddresses.Select(g => g?.Address).Where(a => a.AddressFamily != System.Net.Sockets.AddressFamily.InterNetworkV6).FirstOrDefault().ToString()));
 
             foreach (PcapAddress address in device.Addresses)
@@ -108,7 +108,7 @@ public class FrameCapture
                 if ((retVal = device.GetNextPacket(out e)) == GetPacketStatus.PacketRead)
                 {
                     rawPacket = e.GetPacket();
-                    var packet = PacketDotNet.Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
+                    var packet = Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
 
                     // Prints the time and length of each received packet
                     var time = rawPacket.Timeval.Date;
@@ -116,11 +116,28 @@ public class FrameCapture
                     //Console.WriteLine("{0}:{1}:{2},{3} Len={4}", time.Hour, time.Minute, time.Second, time.Millisecond, len);
                     try
                     {
-                        EthernetPacket eth = packet.Extract<PacketDotNet.EthernetPacket>();
+                        EthernetPacket eth = packet.Extract<EthernetPacket>();
                         var origEthSrc = eth.SourceHardwareAddress;
                         var origEthDest = eth.DestinationHardwareAddress;
                         //Console.WriteLine(eth);
-                        IPv4Packet ip = eth.Extract<PacketDotNet.IPv4Packet>();
+                        IPv4Packet ip = eth.Extract<IPv4Packet>();
+
+                        bool isTCP = false;
+                        try
+                        {
+                            TcpPacket tcp = ip.Extract<TcpPacket>();
+                            isTCP = true;
+
+                            List<TcpOption> options = tcp.OptionsCollection;
+                            int index = options.FindIndex(o => o.Kind == OptionTypes.MaximumSegmentSize);
+                            if (index != -1)
+                            {
+                                ((MaximumSegmentSizeOption)options[index]).Value = (ushort)(enforcedMTU - ip.HeaderLength - tcp.HeaderData.Length);
+
+                                tcp.OptionsCollection = options;
+                            }
+                        }
+                        catch { }
 
                         if (captureMode == CaptureMode.Private)
                         {
@@ -136,7 +153,7 @@ public class FrameCapture
                             if (ip.FragmentOffset > 0 || ip.FragmentFlags == 1)
                             {
                                 fragmentPacketList.Insert(0, ip);
-                                if (ip.FragmentFlags == 0)
+                                if (ip.FragmentFlags == 0 || ip.FragmentFlags == 3)
                                 {
                                     ushort id = ip.Id;
                                     byte[] fragmentPayloadBytes = new byte[0];
@@ -157,7 +174,7 @@ public class FrameCapture
                                     {
                                         if (currentOffset < fragmentPayloadBytes.Length)
                                         {
-                                            Console.WriteLine(currentOffset);
+                                            //Console.WriteLine(currentOffset);
 
                                             byte[] fragmentBytes;
                                             ushort moreFragments;
@@ -186,24 +203,100 @@ public class FrameCapture
                             }
                             else
                             {
-                                Tunnel.SendFrame(ip.Bytes, ip.DestinationAddress);
+                                if (ip.TotalLength > enforcedMTU)
+                                {
+                                    if (isTCP)
+                                    {
+                                        Tunnel.SendFrame(ip.Bytes, ip.DestinationAddress);
+                                    }
+                                    else
+                                    {
+                                        try
+                                        {
+                                            byte[] dataToFragment = ip.PayloadPacket.Bytes;
+                                            int noHeaderMTU = enforcedMTU - ip.HeaderData.Length;
+
+                                            IPv4Packet firstFragment = new IPv4Packet(new ByteArraySegment(ip.Bytes));
+
+                                            firstFragment.FragmentFlags = 0x01;
+                                            firstFragment.PayloadData = new byte[enforcedMTU];
+                                            Array.Copy(dataToFragment, 0, firstFragment.PayloadData, 0, enforcedMTU);
+
+                                            firstFragment.UpdateCalculatedValues();
+                                            firstFragment.UpdateIPChecksum();
+
+                                            Tunnel.SendFrame(firstFragment.Bytes, ip.DestinationAddress);
+
+                                            int currentOffset = enforcedMTU;
+                                            int remainderOffset = 0;
+                                            bool run = true;
+                                            while (run)
+                                            {
+                                                if (currentOffset < dataToFragment.Length)
+                                                {
+                                                    byte[] fragmentBytes;
+
+                                                    IPv4Packet nextFragment = new IPv4Packet(new ByteArraySegment(ip.Bytes));
+
+                                                    if ((currentOffset + enforcedMTU) < dataToFragment.Length)
+                                                    {
+                                                        fragmentBytes = new byte[enforcedMTU];
+                                                        Array.Copy(dataToFragment, currentOffset, fragmentBytes, 0, enforcedMTU);
+
+                                                        nextFragment.FragmentFlags = 0x01;
+                                                        nextFragment.FragmentOffset = currentOffset / 8;
+                                                        nextFragment.PayloadData = fragmentBytes;
+                                                    }
+                                                    else
+                                                    {
+                                                        remainderOffset = dataToFragment.Length - currentOffset;
+                                                        fragmentBytes = new byte[remainderOffset];
+                                                        Array.Copy(dataToFragment, currentOffset, fragmentBytes, 0, remainderOffset);
+                                                        run = false;
+
+                                                        nextFragment.FragmentFlags = 0x00;
+                                                        nextFragment.FragmentOffset = currentOffset / 8;
+                                                        nextFragment.PayloadData = fragmentBytes;
+                                                    }
+
+                                                    nextFragment.UpdateCalculatedValues();
+                                                    nextFragment.UpdateIPChecksum();
+
+                                                    Tunnel.SendFrame(nextFragment.Bytes, ip.DestinationAddress);
+
+                                                    currentOffset += enforcedMTU;
+                                                }
+                                            }
+                                        }
+                                        catch (Exception err)
+                                        {
+                                            //Console.WriteLine(err);
+                                        }
+                                    }
+                                }
+                                else
+                                {
+                                    Tunnel.SendFrame(ip.Bytes, ip.DestinationAddress);
+                                }
+
                             }
                         }
                         else
                         {
                             if (!ip.DestinationAddress.Equals(myIP)) continue;
-                            UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+                            UdpPacket udp = ip.Extract<UdpPacket>();
                             MediationMessage receivedMessage;
                             try
                             {
                                 receivedMessage = new MediationMessage();
-                                Console.WriteLine(udp.PayloadData.Length);
+                                //Console.WriteLine(udp.PayloadData.Length);
                                 receivedMessage.DeserializeBytes(udp.PayloadData);
 
                                 switch (receivedMessage.ID)
                                 {
                                     case MediationMessageType.NATTunnelData:
                                         {
+
                                             //Console.WriteLine(count++);
                                             IPEndPoint clientSourceEndpoint = new IPEndPoint(ip.SourceAddress, udp.SourcePort);
                                             Client c = Clients.GetClient(clientSourceEndpoint);
@@ -264,16 +357,16 @@ public class FrameCapture
 
     public void Send(byte[] packetData, byte[] fragmentID, byte[] fragmentOffset, byte[] moreFragments)
     {
-        if (BitConverter.ToUInt16(fragmentID) != 0)
+        if (fragmentID != null && BitConverter.ToUInt16(fragmentID) != 0)
         {
-            fragmentMessageList.Insert(0, new Fragment(packetData, fragmentID, fragmentOffset, moreFragments));
-            if (BitConverter.ToUInt16(fragmentOffset) > 0 && BitConverter.ToUInt16(moreFragments) == 0)
+            fragmentMessageList.Insert(0, new IPFragment(packetData, fragmentID, fragmentOffset, moreFragments));
+            if (BitConverter.ToUInt16(fragmentOffset) > 0 && (BitConverter.ToUInt16(moreFragments) == 0 || BitConverter.ToUInt16(moreFragments) == 3))
             {
                 ushort id = BitConverter.ToUInt16(fragmentID);
                 byte[] fragmentPayloadBytes = new byte[0];
                 for (int i = fragmentMessageList.Count - 1; i >= 0; i--)
                 {
-                    Fragment tempFragment = fragmentMessageList[i];
+                    IPFragment tempFragment = fragmentMessageList[i];
                     if (BitConverter.ToUInt16(tempFragment.ID) == id)
                     {
                         fragmentPayloadBytes = fragmentPayloadBytes.Concat(tempFragment.Bytes).ToArray();
@@ -292,7 +385,7 @@ public class FrameCapture
                 {
                     if (currentOffset < fragmentPayloadBytes.Length)
                     {
-                        Console.WriteLine(currentOffset);
+                        //Console.WriteLine(currentOffset);
 
                         byte[] fragmentBytes;
 
@@ -321,7 +414,7 @@ public class FrameCapture
 
                         try
                         {
-                            UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+                            UdpPacket udp = ip.Extract<UdpPacket>();
                             udp.UpdateCalculatedValues();
                             udp.UpdateUdpChecksum();
                             ip.PayloadPacket = udp;
@@ -343,7 +436,7 @@ public class FrameCapture
 
                         try
                         {
-                            TcpPacket tcp = ip.Extract<PacketDotNet.TcpPacket>();
+                            TcpPacket tcp = ip.Extract<TcpPacket>();
                             tcp.UpdateCalculatedValues();
                             tcp.UpdateTcpChecksum();
                             ip.PayloadPacket = tcp;
@@ -386,10 +479,11 @@ public class FrameCapture
 
             try
             {
-                UdpPacket udp = ip.Extract<PacketDotNet.UdpPacket>();
+                UdpPacket udp = ip.Extract<UdpPacket>();
                 udp.UpdateCalculatedValues();
                 udp.UpdateUdpChecksum();
                 ip.PayloadPacket = udp;
+
                 if (TunnelOptions.IsServer && TunnelOptions.UsingWhitelist && !TunnelOptions.WhitelistedPorts.Contains(udp.DestinationPort))
                 {
                     Console.WriteLine(udp.DestinationPort);
@@ -412,7 +506,7 @@ public class FrameCapture
 
             try
             {
-                TcpPacket tcp = ip.Extract<PacketDotNet.TcpPacket>();
+                TcpPacket tcp = ip.Extract<TcpPacket>();
                 tcp.UpdateCalculatedValues();
                 tcp.UpdateTcpChecksum();
                 ip.PayloadPacket = tcp;
@@ -436,9 +530,16 @@ public class FrameCapture
                 //Console.WriteLine(e);
             }
 
-            newPacket.PayloadPacket = ip;
-            newPacket.UpdateCalculatedValues();
-            device.SendPacket(newPacket);
+            try
+            {
+                newPacket.PayloadPacket = ip;
+                newPacket.UpdateCalculatedValues();
+                device.SendPacket(newPacket);
+            }
+            catch (Exception e)
+            {
+                //Console.WriteLine(e);
+            }
         }
     }
 

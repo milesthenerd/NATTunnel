@@ -59,7 +59,7 @@ public static class Config
     public static bool TryLoadConfig()
     {
         string configString = File.ReadAllText(GetConfigFilePath());
-        
+
         TomlTable model = Toml.ToModel(configString);
 
         Console.WriteLine(Toml.FromModel(model));
@@ -139,7 +139,7 @@ public static class Config
         {
             TunnelOptions.WhitelistedPorts = ((TomlArray)model[WhitelistedPorts]).Select(i => Convert.ToInt32(i)).ToList();
         }
-        catch(Exception e)
+        catch (Exception e)
         {
             Console.WriteLine(e);
             Console.Error.WriteLine($"Failed to parse the {WhitelistedPorts} field! Make sure all entered values are numbers!");
@@ -220,22 +220,22 @@ public static class Config
         switch (cki.KeyChar)
         {
             case 'c':
-            {
-                TunnelOptions.IsServer = false;
-                CreateNewConfig();
-                return true;
-            }
+                {
+                    TunnelOptions.IsServer = false;
+                    CreateNewConfig();
+                    return true;
+                }
             case 's':
-            {
-                TunnelOptions.IsServer = true;
-                CreateNewConfig();
-                return true;
-            }
+                {
+                    TunnelOptions.IsServer = true;
+                    CreateNewConfig();
+                    return true;
+                }
             default:
-            {
-                Console.WriteLine("Quitting...");
-                return false;
-            }
+                {
+                    Console.WriteLine("Quitting...");
+                    return false;
+                }
         }
     }
 
