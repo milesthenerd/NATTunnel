@@ -52,6 +52,11 @@ public class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int ConnectionID { get; set; }
     /// <summary>
+    ///Randomly generated client ID to avoid NATs with multiple IP addresses
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public System.Guid ClientID { get; set; }
+    /// <summary>
     ///Whether or not the peer sending the packet is a NATTunnel server
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]

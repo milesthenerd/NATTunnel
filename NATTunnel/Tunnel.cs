@@ -58,6 +58,7 @@ public static class Tunnel
     public static bool serverHasSymmetricKey = false;
     private static byte[] symmetricKey = new byte[32];
     private static SHA256 shaHashGen = SHA256.Create();
+    private static Guid clientID = Guid.NewGuid();
 
     static Tunnel()
     {
@@ -209,6 +210,7 @@ public static class Tunnel
     private static void OnTimedEvent(object source, ElapsedEventArgs e)
     {
         MediationMessage message = new MediationMessage(MediationMessageType.KeepAlive);
+        message.ClientID = clientID;
         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
         //If not connected to remote endpoint, send remote IP to mediator
         if (!connected || isServer)
@@ -763,6 +765,7 @@ public static class Tunnel
                         {
                             MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest);
                             message.LocalPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
+                            message.ClientID = clientID;
                             byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                             Console.WriteLine(message.Serialize());
                             tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
@@ -773,6 +776,7 @@ public static class Tunnel
                             natTestPortOne = receivedMessage.NATTestPortOne;
                             natTestPortTwo = receivedMessage.NATTestPortTwo;
                             MediationMessage message = new MediationMessage(MediationMessageType.NATTest);
+                            message.ClientID = clientID;
                             byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                             udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortOne));
                             udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortTwo));
