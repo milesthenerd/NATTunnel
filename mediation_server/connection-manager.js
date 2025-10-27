@@ -49,7 +49,7 @@ class ConnectionManager {
         Object.entries(this.currentConnectionPairs).forEach(([id, pair]) => {
             if (pair.server_info === socketInfo.ip || pair.client_info === socketInfo.ip) {
                 // Find the other party in the connection
-                const otherSocket = this.sockets.find(s => 
+                const otherSocket = this.sockets.find(s =>
                     (pair.server_info === socketInfo.ip && s.ip === pair.client_info) ||
                     (pair.client_info === socketInfo.ip && s.ip === pair.server_info)
                 );

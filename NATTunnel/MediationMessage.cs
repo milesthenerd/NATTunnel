@@ -107,6 +107,16 @@ public class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] SymmetricKeyHash { get; set; }
     /// <summary>
+    ///WireGuard public key (base64 encoded)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string WireGuardPublicKey { get; set; }
+    /// <summary>
+    ///SHA256 hash to verify that WireGuard public key is intact after being transported
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public byte[] WireGuardPublicKeyHash { get; set; }
+    /// <summary>
     ///ID of a fragmented packet
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -311,7 +321,15 @@ public enum MediationMessageType
     /// <summary>
     ///Packet sent to confirm server received client's symmetric key
     /// </summary>
-    SymmetricKeyConfirm
+    SymmetricKeyConfirm,
+    /// <summary>
+    ///Packet sent to exchange WireGuard public keys between client and server
+    /// </summary>
+    WireGuardPublicKeyExchange,
+    /// <summary>
+    ///Hash of WireGuard public key for integrity verification
+    /// </summary>
+    WireGuardPublicKeyHash
 }
 
 /// <summary>

@@ -50,7 +50,7 @@ class MessageHandler {
             return;
         }
 
-        const isBusy = this.connectionManager.udpConnectionInfo.some(info => 
+        const isBusy = this.connectionManager.udpConnectionInfo.some(info =>
             requestedIp.includes(info.ip) && info.status.type === StatusTypes.Busy
         );
 
@@ -153,7 +153,7 @@ class MessageHandler {
 
     completeConnection(connectionId) {
         const pair = this.connectionManager.currentConnectionPairs[connectionId];
-        
+
         // Notify both server and client
         const serverSocket = this.connectionManager.sockets.find(s => pair.server_info.includes(s.ip));
         const clientSocket = this.connectionManager.sockets.find(s => pair.client_info.includes(s.ip));
@@ -178,12 +178,19 @@ class MessageHandler {
         });
     }
 
-    handleConnectionTimeout(socket) {
+    handleConnectionTimeout(connectionId) {
+        const pair = this.connectionManager.currentConnectionPairs[connectionId];
+        if (!pair) return;
+
+        // Reset connection status for both server and client IPs
         this.connectionManager.udpConnectionInfo.forEach((info, index) => {
-            if (socket.remoteAddress.includes(info.ip)) {
+            if (pair.server_info.includes(info.ip) || pair.client_info.includes(info.ip)) {
                 info.status.type = StatusTypes.Free;
             }
         });
+
+        // Clean up the connection pair
+        delete this.connectionManager.currentConnectionPairs[connectionId];
     }
 
     sendServerNotAvailable(socket) {
