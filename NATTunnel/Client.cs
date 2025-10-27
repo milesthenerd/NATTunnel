@@ -16,7 +16,8 @@ public class Client
     public AesGcm aes;
     public bool HasPublicKey = false;
     public bool HasSymmetricKey = false;
-    public FrameCapture capture;
+    public string WireGuardPublicKey = null;  // Base64-encoded WireGuard public key
+    public bool HasWireGuardPublicKey = false;
 
     public Client(IPEndPoint endpoint, IPAddress privateAddress, int connectionID)
     {
@@ -28,6 +29,12 @@ public class Client
     public IPEndPoint GetEndPoint()
     {
         return Endpoint;
+    }
+
+    public IPEndPoint GetWireGuardEndPoint()
+    {
+        // WireGuard uses port 51820, not the mediation/hole punch port
+        return new IPEndPoint(Endpoint.Address, 51820);
     }
 
     public IPAddress GetPrivateAddress()
@@ -57,7 +64,13 @@ public class Client
 
     public void ImportAes(byte[] key)
     {
-        aes = new AesGcm(key);
+        aes = new AesGcm(key, AesGcm.TagByteSizes.MaxSize);
         HasSymmetricKey = true;
+    }
+
+    public void ImportWireGuardPublicKey(string publicKey)
+    {
+        WireGuardPublicKey = publicKey;
+        HasWireGuardPublicKey = true;
     }
 }

@@ -8,7 +8,7 @@ class NATServer {
     constructor() {
         this.connectionManager = new ConnectionManager();
         this.messageHandler = new MessageHandler(this.connectionManager);
-        
+
         this.tcpServer = null;
         this.udpServer = null;
         this.natTestServer1 = null;
@@ -40,7 +40,7 @@ class NATServer {
     initializeNATTestServers() {
         this.natTestServer1 = this.createNATTestSocket('NAT Test 1', Config.NAT_TEST_PORT_ONE, true);
         this.natTestServer2 = this.createNATTestSocket('NAT Test 2', Config.NAT_TEST_PORT_TWO, false);
-        
+
         this.natTestServer1.bind(Config.NAT_TEST_PORT_ONE);
         this.natTestServer2.bind(Config.NAT_TEST_PORT_TWO);
     }
@@ -69,7 +69,7 @@ class NATServer {
 
     handleNewTCPConnection(socket) {
         console.log(`New connection from ${socket.remoteAddress}:${socket.remotePort}`);
-        
+
         const socketInfo = this.connectionManager.addSocket(
             socket,
             socket.remoteAddress,
@@ -78,7 +78,7 @@ class NATServer {
         );
 
         socket.on('data', (data) => this.handleTCPData(data, socket));
-        
+
         socket.on('close', () => {
             console.log(`Client ${socketInfo.clientID} (${socket.remoteAddress}:${socket.remotePort}) disconnected`);
             this.connectionManager.removeSocket(socket, socketInfo.clientID);

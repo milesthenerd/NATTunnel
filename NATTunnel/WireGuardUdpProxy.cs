@@ -1,0 +1,362 @@
+using System;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace NATTunnel;
+
+/// <summary>
+/// UDP proxy that intercepts WireGuard traffic and routes it through the NAT hole-punched socket
+/// Now supports multiple peers with unique localhost ports
+/// Inbound: Tunnel socket receives WireGuard packets → forwards to localhost:51820
+/// Outbound: Listens on multiple localhost ports (one per peer) → routes via tunnel socket
+/// </summary>
+public class WireGuardUdpProxy : IDisposable
+{
+    private UdpClient tunnelSocket;  // The hole-punched socket (shared with Tunnel.cs)
+    private readonly Dictionary<int, PeerProxyListener> peerListeners; // Port -> Listener mapping
+    private readonly Dictionary<IPEndPoint, int> peerEndpointToPort;   // Real endpoint -> Proxy port
+    private readonly Dictionary<IPAddress, IPEndPoint> tunnelIpToPeerEndpoint; // Tunnel IP (10.5.0.x) -> Real peer endpoint
+    private bool disposed;
+    private readonly object proxyLock = new object();
+    private readonly object tunnelSocketLock = new object();
+    private int tunnelPort;
+
+    // Shared listener on 51821 for WireGuard outbound packets (used for all peers)
+    private readonly UdpClient wireguardListener;
+    private readonly CancellationTokenSource cancellation;
+    private readonly Task listenTask;
+
+    // Static persistent socket for forwarding TO WireGuard with fixed source port
+    private static UdpClient inboundForwarder;
+    private static int inboundForwarderPort = 51821;
+    private static readonly object inboundForwarderLock = new object();
+
+    public WireGuardUdpProxy(UdpClient holePunchedSocket)
+    {
+        this.tunnelSocket = holePunchedSocket;
+        this.peerListeners = new Dictionary<int, PeerProxyListener>();
+        this.peerEndpointToPort = new Dictionary<IPEndPoint, int>();
+        this.tunnelIpToPeerEndpoint = new Dictionary<IPAddress, IPEndPoint>();
+        this.tunnelPort = ((IPEndPoint)tunnelSocket.Client.LocalEndPoint).Port;
+        this.cancellation = new CancellationTokenSource();
+
+        // Create inbound forwarder on port 51821 (for forwarding FROM tunnel TO WireGuard)
+        // Per-peer outbound listeners will be created on 51822, 51823, etc.
+        wireguardListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, 51821));
+        wireguardListener.Client.ReceiveBufferSize = 128000;
+
+        // Initialize the inbound forwarder
+        lock (inboundForwarderLock)
+        {
+            if (inboundForwarder == null)
+            {
+                inboundForwarder = wireguardListener;
+                Console.WriteLine($"✓ WireGuard inbound forwarder initialized on port {inboundForwarderPort}");
+            }
+        }
+
+        Console.WriteLine($"✓ UDP Proxy initialized with per-peer routing (tunnel port: {tunnelPort})");
+
+        // No shared outbound listener needed - each peer gets their own
+        listenTask = Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Register a peer with its tunnel IP and real endpoint
+    /// Creates a dedicated listener on the peer's proxy port
+    /// </summary>
+    public void RegisterPeer(IPEndPoint peerEndpoint, int proxyPort, IPAddress tunnelIp)
+    {
+        lock (proxyLock)
+        {
+            // Check if this tunnel IP already exists with a different endpoint
+            if (tunnelIpToPeerEndpoint.TryGetValue(tunnelIp, out var oldEndpoint))
+            {
+                if (!oldEndpoint.Equals(peerEndpoint))
+                {
+                    // Endpoint changed - remove old entries
+                    peerEndpointToPort.Remove(oldEndpoint);
+                    Console.WriteLine($"[Proxy] Endpoint updated for {tunnelIp}: {oldEndpoint} -> {peerEndpoint}");
+                }
+            }
+
+            // Add/update peer mappings
+            peerEndpointToPort[peerEndpoint] = proxyPort;
+            tunnelIpToPeerEndpoint[tunnelIp] = peerEndpoint;
+
+            // Create dedicated listener for this peer if it doesn't exist
+            if (!peerListeners.ContainsKey(proxyPort))
+            {
+                var listener = new PeerProxyListener(proxyPort, peerEndpoint, tunnelSocket, tunnelSocketLock);
+                peerListeners[proxyPort] = listener;
+                Console.WriteLine($"[Proxy] ✓ Created dedicated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint}");
+            }
+            else
+            {
+                // Update existing listener's endpoint
+                peerListeners[proxyPort].UpdateEndpoint(peerEndpoint);
+                Console.WriteLine($"[Proxy] ✓ Updated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint}");
+            }
+
+            Console.WriteLine($"[Proxy] Total registered peers: {peerEndpointToPort.Count}");
+
+            // List all registered peers for debugging
+            Console.WriteLine("[Proxy] Current peer list:");
+            foreach (var kvp in tunnelIpToPeerEndpoint)
+            {
+                var port = peerEndpointToPort[kvp.Value];
+                Console.WriteLine($"  - {kvp.Key} → {kvp.Value} (port {port})");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Update the tunnel socket reference (needed for symmetric NAT socket swaps)
+    /// </summary>
+    public void UpdateTunnelSocket(UdpClient newSocket)
+    {
+        lock (tunnelSocketLock)
+        {
+            tunnelSocket = newSocket;
+            tunnelPort = ((IPEndPoint)tunnelSocket.Client.LocalEndPoint).Port;
+            Console.WriteLine($"[Proxy] ✓ Tunnel socket updated to port {tunnelPort}");
+
+            // Update all peer listeners with the new socket
+            lock (proxyLock)
+            {
+                foreach (var listener in peerListeners.Values)
+                {
+                    listener.UpdateTunnelSocket(newSocket);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Forwards incoming packets from peers to local WireGuard instance
+    /// Uses the peer-specific proxy socket to maintain source port consistency
+    /// </summary>
+    public void ForwardToWireGuard(byte[] packet, IPEndPoint sourceEndpoint)
+    {
+        try
+        {
+            int proxyPort = 0;
+            PeerProxyListener listener = null;
+
+            lock (proxyLock)
+            {
+                // Try exact match first (IP + port)
+                if (peerEndpointToPort.TryGetValue(sourceEndpoint, out proxyPort))
+                {
+                    if (peerListeners.TryGetValue(proxyPort, out listener))
+                    {
+                        listener.ForwardInboundPacket(packet);
+                        return;
+                    }
+                }
+
+                // NAT may change source port, so try matching by IP address only
+                foreach (var kvp in peerEndpointToPort)
+                {
+                    if (kvp.Key.Address.Equals(sourceEndpoint.Address))
+                    {
+                        proxyPort = kvp.Value;
+                        if (peerListeners.TryGetValue(proxyPort, out listener))
+                        {
+                            // Update the registered endpoint to the new port for future packets
+                            peerEndpointToPort.Remove(kvp.Key);
+                            peerEndpointToPort[sourceEndpoint] = proxyPort;
+
+                            // Also update the peer listener's target endpoint
+                            listener.UpdateEndpoint(sourceEndpoint);
+
+                            listener.ForwardInboundPacket(packet);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Fallback: use the shared inbound forwarder on port 51821
+            lock (inboundForwarderLock)
+            {
+                if (inboundForwarder != null)
+                {
+                    inboundForwarder.Send(packet, packet.Length, new IPEndPoint(IPAddress.Loopback, 51820));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Proxy] Error forwarding to WireGuard: {ex.Message}");
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+
+        Console.WriteLine("[Proxy] Shutting down...");
+        cancellation?.Cancel();
+
+        // Dispose all peer listeners
+        lock (proxyLock)
+        {
+            foreach (var listener in peerListeners.Values)
+            {
+                listener?.Dispose();
+            }
+            peerListeners.Clear();
+        }
+
+        try
+        {
+            listenTask?.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch { }
+
+        lock (proxyLock)
+        {
+            foreach (var listener in peerListeners.Values)
+            {
+                listener?.Dispose();
+            }
+            peerListeners.Clear();
+        }
+
+        wireguardListener?.Dispose();
+        cancellation?.Dispose();
+
+        Console.WriteLine("✓ WireGuard UDP Proxy stopped");
+    }
+}
+
+/// <summary>
+/// Individual listener for a single peer's proxy port
+/// </summary>
+internal class PeerProxyListener : IDisposable
+{
+    private readonly int proxyPort;
+    private IPEndPoint peerEndpoint;
+    private UdpClient listener;
+    private UdpClient tunnelSocket;
+    private readonly object tunnelSocketLock;
+    private readonly CancellationTokenSource cancellation;
+    private readonly Task listenTask;
+    private bool disposed;
+    private readonly object endpointLock = new object();
+
+    public PeerProxyListener(int proxyPort, IPEndPoint peerEndpoint, UdpClient tunnelSocket, object tunnelSocketLock)
+    {
+        this.proxyPort = proxyPort;
+        this.peerEndpoint = peerEndpoint;
+        this.tunnelSocket = tunnelSocket;
+        this.tunnelSocketLock = tunnelSocketLock;
+        this.cancellation = new CancellationTokenSource();
+
+        // Create listener for this specific port
+        listener = new UdpClient(new IPEndPoint(IPAddress.Loopback, proxyPort));
+        listener.Client.ReceiveBufferSize = 128000;
+
+        // Start listening task
+        listenTask = Task.Run(() => ListenLoop(cancellation.Token));
+
+        Console.WriteLine($"[PeerProxy:{proxyPort}] Started for {peerEndpoint}");
+    }
+
+    public void UpdateEndpoint(IPEndPoint newEndpoint)
+    {
+        lock (endpointLock)
+        {
+            peerEndpoint = newEndpoint;
+            Console.WriteLine($"[PeerProxy:{proxyPort}] Updated endpoint to {newEndpoint}");
+        }
+    }
+
+    public void UpdateTunnelSocket(UdpClient newSocket)
+    {
+        lock (tunnelSocketLock)
+        {
+            tunnelSocket = newSocket;
+        }
+    }
+
+    /// <summary>
+    /// Forward an inbound packet from tunnel to WireGuard using this listener's socket
+    /// This maintains source port consistency (responses come from the same port WireGuard sent to)
+    /// </summary>
+    public void ForwardInboundPacket(byte[] packet)
+    {
+        try
+        {
+            listener.Send(packet, packet.Length, new IPEndPoint(IPAddress.Loopback, 51820));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PeerProxy:{proxyPort}] Error forwarding inbound packet: {ex.Message}");
+        }
+    }
+
+    private async Task ListenLoop(CancellationToken token)
+    {
+        try
+        {
+            while (!token.IsCancellationRequested)
+            {
+                var result = await listener.ReceiveAsync(token);
+
+                // Forward packet from WireGuard to the real peer endpoint via tunnel socket
+                IPEndPoint targetEndpoint;
+                lock (endpointLock)
+                {
+                    targetEndpoint = peerEndpoint;
+                }
+
+                if (targetEndpoint != null)
+                {
+                    try
+                    {
+                        UdpClient socketToUse;
+                        lock (tunnelSocketLock)
+                        {
+                            socketToUse = tunnelSocket;
+                        }
+
+                        await socketToUse.SendAsync(result.Buffer, targetEndpoint, token);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[PeerProxy:{proxyPort}] Error sending packet: {ex.Message}");
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PeerProxy:{proxyPort}] Error in listen loop: {ex.Message}");
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+
+        cancellation?.Cancel();
+
+        try
+        {
+            listenTask?.Wait(TimeSpan.FromSeconds(2));
+        }
+        catch { }
+
+        listener?.Dispose();
+        cancellation?.Dispose();
+    }
+}
