@@ -64,10 +64,8 @@ class ConnectionManager {
                 }
 
                 // Free up the UDP connection status for both peers
-                console.log(`⏱ Cleaning up connection ${id} after peer disconnect`);
                 this.udpConnectionInfo.forEach((info) => {
                     if (pair.server_info === info.ip || pair.client_info === info.ip) {
-                        console.log(`  └─ Freeing ${info.ip}:${info.port} (was ${info.status.type} for connection ${id})`);
                         info.status.type = StatusTypes.Free;
                     }
                 });
@@ -142,12 +140,10 @@ class ConnectionManager {
             const socketInfo = this.sockets.find(s => s.socket === socket);
             if (socketInfo) {
                 socketInfo.natType = natType;
-                console.log(`✓ NAT type ${natType} stored for ${socketInfo.ip}`);
 
                 // Check if this socket is for a specific connection (server-side per-client tunnel)
                 if (socketInfo.forConnectionID) {
                     const connectionId = socketInfo.forConnectionID;
-                    console.log(`✓ Server tunnel for connection ${connectionId} completed NAT detection`);
 
                     // Trigger callback to send ConnectionBegin to waiting client
                     if (this.onServerTunnelReady) {

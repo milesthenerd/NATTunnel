@@ -156,7 +156,7 @@ public class Tunnel : IDisposable
     public void SetWireGuardTunnel(WireGuardTunnel tunnel)
     {
         wireguardTunnel = tunnel;
-        Console.WriteLine("✓ WireGuard tunnel reference set in Tunnel");
+        Console.WriteLine("WireGuard tunnel reference set in Tunnel");
     }
 
     /// <summary>
@@ -424,7 +424,7 @@ public class Tunnel : IDisposable
                 initialConnectionTimer.Enabled = false;
 
                 // Start cooldown before retry
-                Console.WriteLine($"⚠ Connection attempt {retryAttempt + 1} failed. Waiting {retryCooldown}s before retry...");
+                Console.WriteLine($"Connection attempt {retryAttempt + 1} failed. Waiting {retryCooldown}s before retry...");
                 retryAttempt++;
 
                 if (retryAttempt < maxRetryAttempts)
@@ -434,12 +434,12 @@ public class Tunnel : IDisposable
                     {
                         if (!connected && retryAttempt < maxRetryAttempts)
                         {
-                            Console.WriteLine($"🔄 Retrying connection (attempt {retryAttempt + 1}/{maxRetryAttempts})...");
+                            Console.WriteLine($"Retrying connection (attempt {retryAttempt + 1}/{maxRetryAttempts})...");
 
                             // Only clients should recreate tunnel instance, servers just reset state
                             if (!isServer)
                             {
-                                Console.WriteLine($"🔄 Creating new tunnel instance with fresh connection ID...");
+                                Console.WriteLine($"Creating new tunnel instance with fresh connection ID...");
                                 onConnectionFailure?.Invoke();
                             }
                             else
@@ -670,13 +670,10 @@ public class Tunnel : IDisposable
                             clientIPAssigned = true;
 
                             // Client: derive and send WireGuard public key to server
-                            Console.WriteLine($"[DEBUG] Client attempting to send WireGuard public key to server at {targetPeerIp}:{targetPeerPort}");
                             try
                             {
                                 string configPath = wireguardTunnel.GetConfigPath();
                                 string clientWgPublicKey = WireGuardConfig.GetPublicKeyFromConfig(configPath);
-
-                                Console.WriteLine($"[DEBUG] Client derived public key: {clientWgPublicKey.Substring(0, 8)}...");
 
                                 message = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
                                 message.WireGuardPublicKey = clientWgPublicKey;
@@ -686,27 +683,18 @@ public class Tunnel : IDisposable
                                 var serverEndpoint = new IPEndPoint(targetPeerIp, targetPeerPort);
                                 udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, serverEndpoint);
 
-                                Console.WriteLine($"✓ Client sent WireGuard public key ({wgKeyBuffer.Length} bytes) to server at {serverEndpoint}");
+                                Console.WriteLine($"Sent WireGuard public key to server");
                             }
                             catch (Exception wgEx)
                             {
-                                Console.WriteLine($"⚠ Error sending WireGuard public key: {wgEx.Message}");
-                                Console.WriteLine($"   Stack trace: {wgEx.StackTrace}");
+                                Console.WriteLine($"Error sending WireGuard public key: {wgEx.Message}");
                             }
-
-                            // DON'T update interface yet - wait for server's response with corrected IP
-                            // The server will send back a WireGuardPublicKeyExchange with the actual assigned IP
-                            Console.WriteLine($"[DEBUG] Waiting for server's WireGuardPublicKeyExchange with confirmed IP...");
                         }
                     }
                     break;
                 case MediationMessageType.WireGuardPublicKeyExchange:
                     {
                         // Client: receive server's WireGuard public key
-                        Console.WriteLine($"[DEBUG] Client received WireGuardPublicKeyExchange message");
-                        Console.WriteLine($"[DEBUG] Message has public key: {(receivedMessage.WireGuardPublicKey != null && !receivedMessage.WireGuardPublicKey.Equals(""))}");
-                        Console.WriteLine($"[DEBUG] wireguardTunnel != null: {wireguardTunnel != null}");
-                        Console.WriteLine($"[DEBUG] targetPeerIp != null: {targetPeerIp != null}, targetPeerPort: {targetPeerPort}");
 
                         // CRITICAL: Server may have corrected our IP (e.g., reconnection with existing peer)
                         // Update privateIP before we configure the interface
@@ -715,7 +703,7 @@ public class Tunnel : IDisposable
                             var serverAssignedIP = receivedMessage.GetPrivateAddress();
                             if (serverAssignedIP != null && !serverAssignedIP.Equals(privateIP))
                             {
-                                Console.WriteLine($"[INFO] Server corrected our IP from {privateIP} to {serverAssignedIP} (peer reused)");
+                                Console.WriteLine($"Server assigned IP {serverAssignedIP}");
                                 privateIP = serverAssignedIP;
                             }
                         }
@@ -724,11 +712,10 @@ public class Tunnel : IDisposable
                         {
                             var expectedHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(receivedMessage.WireGuardPublicKey));
                             var hashMatches = StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.WireGuardPublicKeyHash, expectedHash);
-                            Console.WriteLine($"[DEBUG] Server public key hash validation: {(hashMatches ? "PASSED" : "FAILED")}");
 
                             if (hashMatches)
                             {
-                                Console.WriteLine($"✓ Client received server's WireGuard public key: {receivedMessage.WireGuardPublicKey.Substring(0, 8)}...");
+                                Console.WriteLine($"Received server's WireGuard public key");
 
                                 // FIRST: Update client tunnel with the final confirmed IP
                                 // This must happen BEFORE adding the peer, as the interface needs the correct IP
@@ -736,13 +723,12 @@ public class Tunnel : IDisposable
                                 {
                                     try
                                     {
-                                        Console.WriteLine($"[CRITICAL] Updating client WireGuard interface with confirmed IP: {privateIP}");
                                         wireguardTunnel.SetClientIPAndRestart(privateIP.ToString());
-                                        Console.WriteLine("✓ Client WireGuard tunnel updated with confirmed IP");
+                                        Console.WriteLine("Updated tunnel with confirmed IP");
                                     }
                                     catch (Exception ex)
                                     {
-                                        Console.WriteLine($"⚠ Could not update tunnel with confirmed IP: {ex.Message}");
+                                        Console.WriteLine($"Could not update tunnel IP: {ex.Message}");
                                     }
                                 }
 
@@ -755,19 +741,16 @@ public class Tunnel : IDisposable
                                         // Use the actual NAT-traversed endpoint established by mediation
                                         var serverEndpoint = new IPEndPoint(targetPeerIp, targetPeerPort);
 
-                                        Console.WriteLine($"[DEBUG] Adding server as peer with endpoint: {serverEndpoint}");
-
                                         // Add server as a peer with its public key and known tunnel IP (10.5.0.1)
                                         // Pass our tunnel socket for proxy routing
                                         var serverTunnelIp = IPAddress.Parse("10.5.0.1");
                                         var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, serverTunnelIp, true, udpClient);
-                                        Console.WriteLine($"✓ Added server as WireGuard peer: {serverEndpoint} -> {serverPeer.PrivateAddress}");
+                                        Console.WriteLine($"Added server peer: {serverPeer.PrivateAddress}");
                                         peerAddedSuccessfully = true;
                                     }
                                     catch (Exception ex)
                                     {
-                                        Console.WriteLine($"⚠ Error adding server as WireGuard peer: {ex.Message}");
-                                        Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                                        Console.WriteLine($"Error adding server as peer: {ex.Message}");
                                     }
 
                                     // THIRD: Send ConnectionComplete to signal we're done with setup
@@ -779,7 +762,6 @@ public class Tunnel : IDisposable
                                             message.ConnectionID = currentConnectionID;
                                             message.IsServer = false;
                                             byte[] completeBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                                            Console.WriteLine($"[DEBUG] Client sending ReceivedPeer to mediation server: {message.Serialize()}");
                                             tcpClientStream.Write(completeBuffer, 0, completeBuffer.Length);
 
                                             // Mark connection as complete
@@ -787,17 +769,17 @@ public class Tunnel : IDisposable
                                             retryAttempt = 0;  // Reset for future connections
                                             initialConnectionTimer.Enabled = false;
                                             connectionAttempt.Enabled = false;
-                                            Console.WriteLine("✓ Client connection setup complete!");
+                                            Console.WriteLine("Connection established successfully!");
                                         }
                                         catch (Exception ex)
                                         {
-                                            Console.WriteLine($"⚠ Error sending connection complete: {ex.Message}");
+                                            Console.WriteLine($"Error sending connection complete: {ex.Message}");
                                         }
                                     }
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"⚠ Cannot add server peer: wireguardTunnel={wireguardTunnel != null}, targetPeerIp={targetPeerIp}, targetPeerPort={targetPeerPort}");
+                                    Console.WriteLine($"Cannot add server peer: missing tunnel or endpoint information");
                                 }
                             }
                             else
@@ -1023,12 +1005,11 @@ public class Tunnel : IDisposable
                             {
                                 var expectedHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(receivedMessage.WireGuardPublicKey));
                                 var hashMatches = StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.WireGuardPublicKeyHash, expectedHash);
-                                Console.WriteLine($"[DEBUG] Hash validation: {(hashMatches ? "PASSED" : "FAILED")}");
 
                                 if (hashMatches)
                                 {
                                     c.ImportWireGuardPublicKey(receivedMessage.WireGuardPublicKey);
-                                    Console.WriteLine($"✓ Imported client WireGuard public key: {receivedMessage.WireGuardPublicKey.Substring(0, 8)}...");
+                                    Console.WriteLine($"Imported client WireGuard public key");
 
                                     // Add client as WireGuard peer using their actual public key and NAT-traversed endpoint
                                     if (wireguardTunnel != null)
@@ -1037,33 +1018,26 @@ public class Tunnel : IDisposable
                                         {
                                             // Use the client's received public key and actual NAT-traversed endpoint
                                             // Pass our tunnel socket for proxy routing
-                                            Console.WriteLine($"[DEBUG] Adding WireGuard peer:");
-                                            Console.WriteLine($"[DEBUG]   Public Key: {c.WireGuardPublicKey.Substring(0, 16)}...");
-                                            Console.WriteLine($"[DEBUG]   Endpoint: {c.GetEndPoint()}");
-
                                             var peer = wireguardTunnel.AddPeer(c.WireGuardPublicKey, c.GetEndPoint(), false, udpClient);
 
                                             // CRITICAL: Update client's IP to match what peer manager assigned
                                             // This handles reconnections where an existing peer is reused with its old IP
                                             if (!peer.PrivateAddress.Equals(c.GetPrivateAddress()))
                                             {
-                                                Console.WriteLine($"[INFO] Updating client IP from {c.GetPrivateAddress()} to {peer.PrivateAddress} (existing peer reused)");
+                                                Console.WriteLine($"Updating client IP to {peer.PrivateAddress} (peer reused)");
                                                 c.SetPrivateAddress(peer.PrivateAddress);
                                             }
 
-                                            Console.WriteLine($"✓ Added client as WireGuard peer: {c.GetEndPoint()} -> {peer.PrivateAddress}");
-                                            Console.WriteLine($"[INFO] WireGuard will send encrypted UDP packets to {c.GetEndPoint()}");
-                                            Console.WriteLine($"[INFO] Client must also add server as peer with endpoint pointing here");
+                                            Console.WriteLine($"Added client peer: {peer.PrivateAddress}");
                                         }
                                         catch (Exception ex)
                                         {
-                                            Console.WriteLine($"⚠ Error adding client as WireGuard peer: {ex.Message}");
-                                            Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                                            Console.WriteLine($"Error adding client as peer: {ex.Message}");
                                         }
                                     }
                                     else
                                     {
-                                        Console.WriteLine($"⚠ Cannot add peer: wireguardTunnel is null");
+                                        Console.WriteLine($"Cannot add peer: tunnel not initialized");
                                     }
 
                                     // Server: derive public key from its config file private key
@@ -1093,36 +1067,31 @@ public class Tunnel : IDisposable
                                         byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                                         udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, c.GetEndPoint());
 
-                                        Console.WriteLine($"✓ WireGuard keys exchanged with client {c.GetEndPoint()}");
+                                        Console.WriteLine($"WireGuard keys exchanged with client");
                                     }
                                     else
                                     {
-                                        Console.WriteLine($"⚠ Server public key is empty, cannot send to client");
+                                        Console.WriteLine($"Server public key is empty, cannot send to client");
                                     }
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"⚠ WireGuard public key hash validation FAILED for client {c.GetEndPoint()}");
+                                    Console.WriteLine($"WireGuard public key hash validation failed");
                                 }
                             }
                         }
                         else
                         {
                             // Client: receive server's WireGuard public key
-                            Console.WriteLine($"[DEBUG] Client received WireGuardPublicKeyExchange message");
-                            Console.WriteLine($"[DEBUG] Message has public key: {(receivedMessage.WireGuardPublicKey != null && !receivedMessage.WireGuardPublicKey.Equals(""))}");
-                            Console.WriteLine($"[DEBUG] wireguardTunnel != null: {wireguardTunnel != null}");
-                            Console.WriteLine($"[DEBUG] targetPeerIp != null: {targetPeerIp != null}, targetPeerPort: {targetPeerPort}");
 
                             if (receivedMessage.WireGuardPublicKey != null && !receivedMessage.WireGuardPublicKey.Equals(""))
                             {
                                 var expectedHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(receivedMessage.WireGuardPublicKey));
                                 var hashMatches = StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.WireGuardPublicKeyHash, expectedHash);
-                                Console.WriteLine($"[DEBUG] Server public key hash validation: {(hashMatches ? "PASSED" : "FAILED")}");
 
                                 if (hashMatches)
                                 {
-                                    Console.WriteLine($"✓ Client received server's WireGuard public key: {receivedMessage.WireGuardPublicKey.Substring(0, 8)}...");
+                                    Console.WriteLine($"Received server's WireGuard public key");
 
                                     // Store server's WireGuard public key by adding it as a peer
                                     if (wireguardTunnel != null && targetPeerIp != null && targetPeerPort != 0)
@@ -1132,32 +1101,29 @@ public class Tunnel : IDisposable
                                             // Use the actual NAT-traversed endpoint established by mediation
                                             var serverEndpoint = new IPEndPoint(targetPeerIp, targetPeerPort);
 
-                                            Console.WriteLine($"[DEBUG] Adding server as peer with endpoint: {serverEndpoint}");
-
                                             // Add server as a peer with its public key
                                             // Pass our tunnel socket for proxy routing
                                             var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, isPersistent: true, tunnelSocket: udpClient);
-                                            Console.WriteLine($"✓ Added server as WireGuard peer: {serverEndpoint} -> {serverPeer.PrivateAddress}");
+                                            Console.WriteLine($"Added server peer: {serverPeer.PrivateAddress}");
                                         }
                                         catch (Exception ex)
                                         {
-                                            Console.WriteLine($"⚠ Error adding server as WireGuard peer: {ex.Message}");
-                                            Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                                            Console.WriteLine($"Error adding server as peer: {ex.Message}");
                                         }
                                     }
                                     else
                                     {
-                                        Console.WriteLine($"⚠ Cannot add server peer: wireguardTunnel={wireguardTunnel != null}, targetPeerIp={targetPeerIp}, targetPeerPort={targetPeerPort}");
+                                        Console.WriteLine($"Cannot add server peer: missing tunnel or endpoint information");
                                     }
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"⚠ Server WireGuard public key hash validation FAILED");
+                                    Console.WriteLine($"Server WireGuard public key hash validation failed");
                                 }
                             }
                             else
                             {
-                                Console.WriteLine($"⚠ Server's WireGuard public key is null or empty");
+                                Console.WriteLine($"Server's WireGuard public key is invalid");
                             }
                         }
                     }
@@ -1589,7 +1555,7 @@ public class Tunnel : IDisposable
                                     connected = true;
                                     initialConnectionTimer.Enabled = false;
                                     retryAttempt = 0;  // Reset retry counter on successful connection
-                                    Console.WriteLine("✓ Connection established. Retry counter reset.");
+                                    Console.WriteLine("Connection established. Retry counter reset.");
                                     Console.WriteLine("Completed");
                                 }
                             }
