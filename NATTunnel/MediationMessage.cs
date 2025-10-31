@@ -226,6 +226,10 @@ public class MediationMessage
     /// </summary>
     public IPAddress GetPrivateAddress()
     {
+        if (string.IsNullOrEmpty(PrivateAddressString))
+        {
+            return null;
+        }
         return IPAddress.Parse(PrivateAddressString);
     }
 
@@ -329,7 +333,11 @@ public enum MediationMessageType
     /// <summary>
     ///Hash of WireGuard public key for integrity verification
     /// </summary>
-    WireGuardPublicKeyHash
+    WireGuardPublicKeyHash,
+    /// <summary>
+    ///Packet sent by server to register with mediation server for connection management
+    /// </summary>
+    ServerRegister
 }
 
 /// <summary>

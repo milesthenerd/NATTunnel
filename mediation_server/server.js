@@ -77,6 +77,9 @@ class NATServer {
             Config.DEFAULT_TIMEOUT
         );
 
+        // Buffer for handling partial/concatenated JSON messages
+        socket.dataBuffer = '';
+
         socket.on('data', (data) => this.handleTCPData(data, socket));
 
         socket.on('close', () => {
@@ -99,15 +102,44 @@ class NATServer {
     }
 
     handleTCPData(data, socket) {
-        let message;
-        try {
-            message = JSON.parse(data);
-        } catch (e) {
-            console.error('Invalid JSON received:', e);
-            return;
+        // Append incoming data to buffer
+        socket.dataBuffer += data.toString();
+
+        // Try to parse complete JSON objects separated by newlines or by detecting balanced braces
+        let braceCount = 0;
+        let startIndex = 0;
+
+        for (let i = 0; i < socket.dataBuffer.length; i++) {
+            if (socket.dataBuffer[i] === '{') {
+                if (braceCount === 0) {
+                    startIndex = i;
+                }
+                braceCount++;
+            } else if (socket.dataBuffer[i] === '}') {
+                braceCount--;
+                if (braceCount === 0) {
+                    // Found a complete JSON object
+                    const jsonStr = socket.dataBuffer.substring(startIndex, i + 1);
+                    try {
+                        const message = JSON.parse(jsonStr);
+                        this.messageHandler.handleTCPMessage(message, socket);
+                    } catch (e) {
+                        console.error('Invalid JSON received:', e);
+                        console.error('JSON string was:', jsonStr);
+                    }
+                    // Remove processed data from buffer
+                    socket.dataBuffer = socket.dataBuffer.substring(i + 1);
+                    i = -1; // Reset loop to parse next message
+                    braceCount = 0;
+                }
+            }
         }
 
-        this.messageHandler.handleTCPMessage(message, socket);
+        // If buffer gets too large without finding complete JSON, clear it to prevent memory issues
+        if (socket.dataBuffer.length > 10000) {
+            console.error('Buffer overflow, clearing buffer');
+            socket.dataBuffer = '';
+        }
     }
 
     handleUDPMessage(msg, info) {

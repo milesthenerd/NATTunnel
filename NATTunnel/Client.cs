@@ -6,7 +6,7 @@ namespace NATTunnel;
 public class Client
 {
     private readonly IPEndPoint Endpoint;
-    private readonly IPAddress PrivateAddress;
+    private IPAddress PrivateAddress; // Changed from readonly to allow updates for reconnections
     public bool Connected = false;
     private int MaxTimeout = 20;
     public int Timeout = 20;
@@ -40,6 +40,11 @@ public class Client
     public IPAddress GetPrivateAddress()
     {
         return PrivateAddress;
+    }
+
+    public void SetPrivateAddress(IPAddress privateAddress)
+    {
+        PrivateAddress = privateAddress;
     }
 
     public void Tick()

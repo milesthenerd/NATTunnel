@@ -19,7 +19,8 @@ class ConnectionManager {
             localPort: 0,
             externalPortOne: 0,
             externalPortTwo: 0,
-            clientID: Math.random().toString()
+            clientID: Math.random().toString(),
+            isServer: false  // Track if this is a registered server
         };
         this.sockets.push(socketInfo);
         return socketInfo;
@@ -62,6 +63,15 @@ class ConnectionManager {
                     })));
                 }
 
+                // Free up the UDP connection status for both peers
+                console.log(`⏱ Cleaning up connection ${id} after peer disconnect`);
+                this.udpConnectionInfo.forEach((info) => {
+                    if (pair.server_info === info.ip || pair.client_info === info.ip) {
+                        console.log(`  └─ Freeing ${info.ip}:${info.port} (was ${info.status.type} for connection ${id})`);
+                        info.status.type = StatusTypes.Free;
+                    }
+                });
+
                 // Clean up the connection pair
                 delete this.currentConnectionPairs[id];
             }
@@ -69,7 +79,11 @@ class ConnectionManager {
     }
 
     addUDPInfo(address, port) {
-        if (!this.udpConnectionInfo.some(info => info.ip === address)) {
+        const existing = this.udpConnectionInfo.find(info => info.ip === address);
+        if (existing) {
+            // Update the port to the most recent one observed
+            existing.port = port;
+        } else {
             this.udpConnectionInfo.push({
                 ip: address,
                 port,
@@ -123,6 +137,24 @@ class ConnectionManager {
                 ID: MessageTypes.NATTypeResponse,
                 NATType: natType,
             })));
+
+            // Store NAT type on socket info
+            const socketInfo = this.sockets.find(s => s.socket === socket);
+            if (socketInfo) {
+                socketInfo.natType = natType;
+                console.log(`✓ NAT type ${natType} stored for ${socketInfo.ip}`);
+
+                // Check if this socket is for a specific connection (server-side per-client tunnel)
+                if (socketInfo.forConnectionID) {
+                    const connectionId = socketInfo.forConnectionID;
+                    console.log(`✓ Server tunnel for connection ${connectionId} completed NAT detection`);
+
+                    // Trigger callback to send ConnectionBegin to waiting client
+                    if (this.onServerTunnelReady) {
+                        this.onServerTunnelReady(connectionId, socketInfo, natType);
+                    }
+                }
+            }
         }
 
         return natType;

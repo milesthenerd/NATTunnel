@@ -18,6 +18,7 @@ public class WireGuardPeerManager
     private int nextPeerId = 2;  // Start at 2 since server is 10.5.0.1
     private int nextProxyPort = 51822; // Start allocating unique ports from 51822 (51821 is reserved for inbound forwarder)
     private readonly HashSet<int> allocatedPorts = new(); // Track allocated ports
+    private readonly HashSet<int> allocatedPeerIds = new(); // Track allocated peer IDs for IP reuse
 
     public WireGuardPeerManager(string configPath, IPAddress baseAddress, int basePort = 51820, bool isServer = false)
     {
@@ -57,6 +58,35 @@ public class WireGuardPeerManager
         }
     }
 
+    private int AllocatePeerId()
+    {
+        lock (configLock)
+        {
+            // Try to reuse freed peer IDs first (starting from 2)
+            for (int id = 2; id < nextPeerId; id++)
+            {
+                if (!allocatedPeerIds.Contains(id))
+                {
+                    allocatedPeerIds.Add(id);
+                    return id;
+                }
+            }
+
+            // No freed IDs available, allocate a new one
+            int peerId = nextPeerId++;
+            allocatedPeerIds.Add(peerId);
+            return peerId;
+        }
+    }
+
+    private void ReleasePeerId(int peerId)
+    {
+        lock (configLock)
+        {
+            allocatedPeerIds.Remove(peerId);
+        }
+    }
+
     public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, bool isPersistent = false)
     {
         lock (configLock)
@@ -71,7 +101,8 @@ public class WireGuardPeerManager
                 {
                     Console.WriteLine($"  Updating endpoint: {existingPeerByKey.Endpoint} -> {endpoint}");
                     peers.Remove(existingPeerByKey);
-                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByKey.PrivateAddress, existingPeerByKey.ConnectionId, isPersistent);
+                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when reconnecting to maintain unique endpoints
+                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByKey.PrivateAddress, existingPeerByKey.ConnectionId, existingPeerByKey.IsPersistent, existingPeerByKey.ProxyPort);
                     peers.Add(updatedPeer);
                     UpdateConfig();
                     return updatedPeer;
@@ -93,7 +124,8 @@ public class WireGuardPeerManager
                 if (existingPeerByEndpoint.PublicKey != publicKey)
                 {
                     peers.Remove(existingPeerByEndpoint);
-                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByEndpoint.PrivateAddress, existingPeerByEndpoint.ConnectionId, isPersistent);
+                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when updating public key
+                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByEndpoint.PrivateAddress, existingPeerByEndpoint.ConnectionId, existingPeerByEndpoint.IsPersistent, existingPeerByEndpoint.ProxyPort);
                     peers.Add(updatedPeer);
                     UpdateConfig();
                     return updatedPeer;
@@ -103,13 +135,14 @@ public class WireGuardPeerManager
 
             // Calculate next available IP in the subnet (e.g., 10.5.0.x)
             var ipBytes = baseAddress.GetAddressBytes();
-            ipBytes[3] = (byte)nextPeerId;
+            int peerId = AllocatePeerId();
+            ipBytes[3] = (byte)peerId;
             var peerAddress = new IPAddress(ipBytes);
 
             // Allocate unique proxy port for this peer
             int proxyPort = AllocateProxyPort();
 
-            var peer = new WireGuardPeer(publicKey, endpoint, peerAddress, nextPeerId++, isPersistent, proxyPort);
+            var peer = new WireGuardPeer(publicKey, endpoint, peerAddress, peerId, isPersistent, proxyPort);
             peers.Add(peer);
 
             // Update WireGuard config
@@ -137,7 +170,8 @@ public class WireGuardPeerManager
                 {
                     Console.WriteLine($"  Updating endpoint: {existingPeerByKey.Endpoint} -> {endpoint}");
                     peers.Remove(existingPeerByKey);
-                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByKey.PrivateAddress, existingPeerByKey.ConnectionId, isPersistent);
+                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when reconnecting to maintain unique endpoints
+                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByKey.PrivateAddress, existingPeerByKey.ConnectionId, existingPeerByKey.IsPersistent, existingPeerByKey.ProxyPort);
                     peers.Add(updatedPeer);
                     UpdateConfig();
                     return updatedPeer;
@@ -158,7 +192,8 @@ public class WireGuardPeerManager
                 if (existingPeerByEndpoint.PublicKey != publicKey)
                 {
                     peers.Remove(existingPeerByEndpoint);
-                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByEndpoint.PrivateAddress, existingPeerByEndpoint.ConnectionId, isPersistent);
+                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when updating public key
+                    var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByEndpoint.PrivateAddress, existingPeerByEndpoint.ConnectionId, existingPeerByEndpoint.IsPersistent, existingPeerByEndpoint.ProxyPort);
                     peers.Add(updatedPeer);
                     UpdateConfig();
                     return updatedPeer;
@@ -172,6 +207,9 @@ public class WireGuardPeerManager
 
             // Allocate unique proxy port for this peer
             int proxyPort = AllocateProxyPort();
+
+            // Mark this peer ID as allocated
+            allocatedPeerIds.Add(connectionId);
 
             var peer = new WireGuardPeer(publicKey, endpoint, privateAddress, connectionId, isPersistent, proxyPort);
             peers.Add(peer);
@@ -193,6 +231,7 @@ public class WireGuardPeerManager
             {
                 peers.Remove(peer);
                 ReleaseProxyPort(peer.ProxyPort); // Free the port for reuse
+                ReleasePeerId(connectionId); // Free the peer ID / IP address for reuse
                 UpdateConfig();
             }
         }

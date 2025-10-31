@@ -1,3 +1,4 @@
+using System;
 using System.Net;
 
 namespace NATTunnel;
@@ -12,6 +13,7 @@ public class WireGuardPeer
     public int ConnectionId { get; private set; }
     public int KeepAliveInterval { get; set; } = 25;
     public int ProxyPort { get; private set; } // Unique localhost port for this peer
+    public DateTime LastActivity { get; set; } = DateTime.UtcNow; // Track when we last received traffic from this peer
 
     public WireGuardPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, int connectionId, bool isPersistent = false, int proxyPort = 0)
     {

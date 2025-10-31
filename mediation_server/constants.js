@@ -27,7 +27,10 @@ const MessageTypes = {
     PublicKeyResponse: 16,
     SymmetricKeyRequest: 17,
     SymmetricKeyResponse: 18,
-    SymmetricKeyConfirm: 19
+    SymmetricKeyConfirm: 19,
+    WireGuardPublicKeyExchange: 20,
+    WireGuardPublicKeyHash: 21,
+    ServerRegister: 22
 };
 
 // Client status types
