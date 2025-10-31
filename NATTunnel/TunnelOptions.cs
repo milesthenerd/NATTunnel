@@ -7,23 +7,34 @@ using Tomlyn.Model;
 namespace NATTunnel;
 
 /// <summary>
-/// Class that holds option values for various parts for NATTunnel.
+/// Configuration options for NATTunnel.
+/// These options control tunnel behavior, connection settings, and networking parameters.
+/// Values are typically loaded from a config.toml file at startup.
 /// </summary>
 public static class TunnelOptions
 {
-    //TODO: documentation needed
     /// <summary>
-    /// Indicates whether the Tunnel is in a server state or client State.
+    /// Indicates whether this instance is running as a server or client.
+    /// Server mode: Uses TunnelManager to handle multiple client connections.
+    /// Client mode: Connects to a single server peer.
+    /// Configured via config.toml "mode" setting ("server" or "client").
     /// </summary>
     public static bool IsServer = false;
 
     /// <summary>
-    /// The public IP of the mediation server you want to connect to.
+    /// The public IP address and port of the mediation server.
+    /// The mediation server coordinates NAT traversal and hole punching between peers.
+    /// Format: IPAddress:Port (e.g., "sync.milesthenerd.net:6510")
+    /// Configured via config.toml "mediationEndpoint" setting.
+    /// Required for both server and client modes.
     /// </summary>
     public static IPEndPoint MediationEndpoint = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
 
     /// <summary>
-    /// The public IP of the server Tunnel you want to connect to. Only used as a client.
+    /// The public IP address of the server you want to connect to.
+    /// Only used in client mode - ignored when IsServer is true.
+    /// Configured via config.toml "remoteIP" setting.
+    /// This helps identify which server to request connection to via the mediation server.
     /// </summary>
     public static IPAddress RemoteIp = IPAddress.Loopback;
 

@@ -146,49 +146,6 @@ public static class WireGuardAPI
         public long CreationTimeStamp;
     }
 
-    // P/Invoke declarations for wintun.dll
-    [DllImport("wintun.dll", EntryPoint = "WintunCreateAdapter", CallingConvention = CallingConvention.Cdecl, SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr WintunCreateAdapter(string name, string tunnelType, IntPtr requestedGuid);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunOpenAdapter", CallingConvention = CallingConvention.Cdecl, SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr WintunOpenAdapter(string name);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunCloseAdapter", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void WintunCloseAdapter(IntPtr adapter);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunDeleteDriver", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
-    private static extern bool WintunDeleteDriver();
-
-    [DllImport("wintun.dll", EntryPoint = "WintunGetAdapterLuid", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void WintunGetAdapterLuid(IntPtr adapter, out ulong luid);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunStartSession", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
-    private static extern IntPtr WintunStartSession(IntPtr adapter, uint capacity);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunEndSession", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void WintunEndSession(IntPtr session);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunReceivePacket", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
-    private static extern IntPtr WintunReceivePacket(IntPtr session, out uint packetSize);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunReleaseReceivePacket", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void WintunReleaseReceivePacket(IntPtr session, IntPtr packet);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunAllocateSendPacket", CallingConvention = CallingConvention.Cdecl, SetLastError = true)]
-    private static extern IntPtr WintunAllocateSendPacket(IntPtr session, uint packetSize);
-
-    [DllImport("wintun.dll", EntryPoint = "WintunSendPacket", CallingConvention = CallingConvention.Cdecl)]
-    private static extern void WintunSendPacket(IntPtr session, IntPtr packet);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr GetStdHandle(int nStdHandle);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CreateEventA(IntPtr lpEventAttributes, bool bManualReset, bool bInitialState, string lpName);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern uint WaitForSingleObject(IntPtr hHandle, uint dwMilliseconds);
-
     // P/Invoke declarations for wireguard.dll
     [DllImport("wireguard.dll", EntryPoint = "WireGuardOpenAdapter", CallingConvention = CallingConvention.StdCall, SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr WireGuardOpenAdapter(string name);
@@ -375,170 +332,6 @@ public static class WireGuardAPI
     }
 
     /// <summary>
-    /// Starts a Wintun session on the adapter to make it active
-    /// This is CRITICAL for the interface to actually function!
-    /// </summary>
-    public static IntPtr StartWintunSession(IntPtr adapter, uint ringCapacity = 0x400000)
-    {
-        try
-        {
-            Console.WriteLine($"Starting Wintun session (ring capacity: {ringCapacity} bytes)...");
-
-            IntPtr session = WintunStartSession(adapter, ringCapacity);
-
-            if (session == IntPtr.Zero)
-            {
-                int error = Marshal.GetLastWin32Error();
-                throw new Exception($"Failed to start Wintun session (Error: {error})");
-            }
-
-            Console.WriteLine($"✓ Successfully started Wintun session: {session}");
-            return session;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error starting Wintun session: {ex.Message}");
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Closes a Wintun session
-    /// </summary>
-    public static void EndWintunSession(IntPtr session)
-    {
-        if (session != IntPtr.Zero)
-        {
-            try
-            {
-                WintunEndSession(session);
-                Console.WriteLine("Wintun session closed");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error closing Wintun session: {ex.Message}");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Reads a single packet from the Wintun session (standard Wintun API)
-    /// Returns packet pointer and size. Caller must release packet with ReleaseReceivePacket.
-    /// </summary>
-    public static IntPtr GetReadPacket(IntPtr session, out uint packetSize)
-    {
-        packetSize = 0;
-        try
-        {
-            if (session == IntPtr.Zero)
-                return IntPtr.Zero;
-
-            IntPtr packet = WintunReceivePacket(session, out packetSize);
-            return packet;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error receiving packet: {ex.Message}");
-            return IntPtr.Zero;
-        }
-    }
-
-    /// <summary>
-    /// Releases a received packet back to the Wintun session
-    /// </summary>
-    public static void ReleaseReadPacket(IntPtr session, IntPtr packet)
-    {
-        try
-        {
-            if (session != IntPtr.Zero && packet != IntPtr.Zero)
-            {
-                WintunReleaseReceivePacket(session, packet);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error releasing packet: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Allocates a send packet buffer (standard Wintun API)
-    /// Caller must commit packet with SendPacket after writing data.
-    /// </summary>
-    public static IntPtr AllocateWritePacket(IntPtr session, uint packetSize)
-    {
-        try
-        {
-            if (session == IntPtr.Zero)
-                throw new ArgumentException("Invalid session handle");
-
-            IntPtr packet = WintunAllocateSendPacket(session, packetSize);
-            if (packet == IntPtr.Zero)
-            {
-                int error = Marshal.GetLastWin32Error();
-                if (error == 8) // ERROR_NOT_ENOUGH_MEMORY
-                {
-                    Console.WriteLine("Buffer full - cannot allocate send packet");
-                }
-                else if (error != 0)
-                {
-                    Console.WriteLine($"Failed to allocate send packet (Error: {error})");
-                }
-            }
-            return packet;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error allocating send packet: {ex.Message}");
-            return IntPtr.Zero;
-        }
-    }
-
-    /// <summary>
-    /// Commits a send packet to transmit it through the tunnel
-    /// </summary>
-    public static void CommitWritePacket(IntPtr session, IntPtr packet)
-    {
-        try
-        {
-            if (session != IntPtr.Zero && packet != IntPtr.Zero)
-            {
-                WintunSendPacket(session, packet);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error sending packet: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Allocates a packet buffer for sending data through the tunnel (legacy wrapper)
-    /// Just calls AllocateWritePacket for backward compatibility
-    /// </summary>
-    public static IntPtr AllocateSendPacket(IntPtr session, uint packetSize)
-    {
-        return AllocateWritePacket(session, packetSize);
-    }
-
-    /// <summary>
-    /// Sends a packet through the tunnel (legacy wrapper)
-    /// Just calls CommitWritePacket for backward compatibility
-    /// </summary>
-    public static void SendPackets(IntPtr session, IntPtr packet, uint packetCount)
-    {
-        if (packetCount == 1)
-        {
-            CommitWritePacket(session, packet);
-        }
-        else
-        {
-            Console.WriteLine($"Warning: SendPackets called with packetCount={packetCount}, only sending first packet");
-            CommitWritePacket(session, packet);
-        }
-    }
-
-    /// <summary>
     /// Converts CIDR prefix length to subnet mask
     /// </summary>
     private static string GetSubnetMask(byte prefixLength)
@@ -672,17 +465,17 @@ public static class WireGuardAPI
 
             ulong interfaceLuid = 0;
 
-            // Try to get LUID directly from Wintun adapter
+            // Try to get LUID directly from WireGuard adapter
             try
             {
-                WintunGetAdapterLuid(adapter, out interfaceLuid);
+                WireGuardNTAPI.WireGuardGetAdapterLUID(adapter, out interfaceLuid);
                 if (interfaceLuid != 0)
                 {
-                    Console.WriteLine($"✓ Got LUID from Wintun adapter: {interfaceLuid}");
+                    Console.WriteLine($"✓ Got LUID from WireGuard adapter: {interfaceLuid}");
                 }
                 else
                 {
-                    Console.WriteLine("WintunGetAdapterLuid returned 0, trying NetworkInterface enumeration...");
+                    Console.WriteLine("WireGuardGetAdapterLUID returned 0, trying NetworkInterface enumeration...");
 
                     // Fallback: Try to find the interface by name through NetworkInterface
                     var ni = NetworkInterface.GetAllNetworkInterfaces()
@@ -711,7 +504,7 @@ public static class WireGuardAPI
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to get LUID from Wintun: {ex.Message}");
+                Console.WriteLine($"Failed to get LUID from WireGuard adapter: {ex.Message}");
             }
 
             if (interfaceLuid == 0)
@@ -1050,27 +843,23 @@ public static class WireGuardAPI
 
             ulong interfaceLuid = 0;
 
-            // First, try to get LUID directly from the Wintun adapter handle
+            // First, try to get LUID directly from the WireGuard adapter handle
             try
             {
-                Console.WriteLine("Attempting to get LUID from Wintun adapter...");
-                WintunGetAdapterLuid(adapter, out interfaceLuid);
+                Console.WriteLine("Attempting to get LUID from WireGuard adapter...");
+                WireGuardNTAPI.WireGuardGetAdapterLUID(adapter, out interfaceLuid);
                 if (interfaceLuid != 0)
                 {
                     Console.WriteLine($"Successfully got LUID from adapter: {interfaceLuid}");
                 }
                 else
                 {
-                    Console.WriteLine("WintunGetAdapterLuid returned 0, will try other methods");
+                    Console.WriteLine("WireGuardGetAdapterLUID returned 0, will try other methods");
                 }
             }
-            catch (DllNotFoundException ex)
+            catch (Exception ex)
             {
-                Console.WriteLine($"WintunGetAdapterLuid not available: {ex.Message}, will use other methods");
-            }
-            catch (EntryPointNotFoundException ex)
-            {
-                Console.WriteLine($"WintunGetAdapterLuid not found: {ex.Message}, will use other methods");
+                Console.WriteLine($"WireGuardGetAdapterLUID failed: {ex.Message}, will use other methods");
             }
 
             // If we didn't get LUID from adapter, try using .NET's NetworkInterface to extract it via reflection

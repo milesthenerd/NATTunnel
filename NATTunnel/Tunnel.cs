@@ -16,9 +16,13 @@ using System.IO;
 
 namespace NATTunnel;
 
-public class Tunnel
+public class Tunnel : IDisposable
 {
     //TODO: entire class should get reviewed and eventually split up into smaller classes
+
+    // Connection constants
+    private const int HOLE_PUNCH_THRESHOLD = 5;  // Number of hole punch packets required before confirming connection
+
     private TcpClient tcpClient = new TcpClient();
     private UdpClient udpClient;
     private NetworkStream tcpClientStream;
@@ -479,14 +483,27 @@ public class Tunnel
         {
             tcpClient.Connect(endpoint);
         }
-        //TODO: Have exception silent if can't connect? Quit program entirely?
         catch (Exception e)
         {
-            Console.WriteLine(e);
+            Console.WriteLine($"⚠ Failed to connect to mediation server at {endpoint}");
+            Console.WriteLine($"   Error: {e.Message}");
+
+            // For managed tunnels (server-side), notify TunnelManager of failure
+            if (isManagedByTunnelManager && onConnectionFailure != null)
+            {
+                Console.WriteLine($"[Tunnel {assignedConnectionID}] Notifying TunnelManager of connection failure");
+                onConnectionFailure();
+            }
+            // For standalone tunnels, this is fatal - return early
+            return;
         }
+
         //Once connected, begin listening
         if (!tcpClient.Connected)
+        {
+            Console.WriteLine("⚠ TCP connection failed - cannot proceed");
             return;
+        }
 
         tcpClientStream = tcpClient.GetStream();
         tcpClientTask = new Task(TcpListenLoop);
@@ -576,8 +593,7 @@ public class Tunnel
             if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
-                //TODO: random hardcoded value
-                if (holePunchReceivedCount >= 5 && !connected)
+                if (holePunchReceivedCount >= HOLE_PUNCH_THRESHOLD && !connected)
                 {
                     MediationMessage _message = new MediationMessage(MediationMessageType.ReceivedPeer);
                     _message.ConnectionID = currentConnectionID;
@@ -1654,5 +1670,60 @@ public class Tunnel
     public (long BytesReceived, long BytesSent, DateTime LastActivity) GetActivityStats()
     {
         return (totalBytesReceived, totalBytesSent, lastActivityTime);
+    }
+
+    /// <summary>
+    /// Disposes of tunnel resources properly
+    /// </summary>
+    public void Dispose()
+    {
+        try
+        {
+            // Cancel all running tasks
+            tcpClientTaskCancellationToken?.Cancel();
+            udpClientTaskCancellationToken?.Cancel();
+            udpServerTaskCancellationToken?.Cancel();
+
+            // Stop timers
+            initialConnectionTimer?.Stop();
+            initialConnectionTimer?.Dispose();
+            connectionAttempt?.Stop();
+            connectionAttempt?.Dispose();
+
+            // Close network streams
+            tcpClientStream?.Close();
+            tcpClientStream?.Dispose();
+
+            // Close clients
+            tcpClient?.Close();
+            tcpClient?.Dispose();
+
+            // Don't dispose udpClient if it's shared (managed by TunnelManager)
+            if (!isManagedByTunnelManager)
+            {
+                udpClient?.Close();
+                udpClient?.Dispose();
+            }
+
+            // Dispose symmetric NAT probe sockets
+            foreach (var probe in symmetricConnectionUdpProbes)
+            {
+                probe?.Close();
+                probe?.Dispose();
+            }
+            symmetricConnectionUdpProbes.Clear();
+
+            // Dispose crypto resources
+            rsa?.Dispose();
+            rsaServer?.Dispose();
+            aes?.Dispose();
+            shaHashGen?.Dispose();
+
+            Console.WriteLine($"[Tunnel] Disposed tunnel {GetConnectionID()}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Tunnel] Error during disposal: {ex.Message}");
+        }
     }
 }

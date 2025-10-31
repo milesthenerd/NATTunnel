@@ -21,11 +21,9 @@ namespace NATTunnel
         private readonly bool isRunningAsService;
         private WireGuardUdpProxy udpProxy;
         private IntPtr wireguardAdapter = IntPtr.Zero;
-        private IntPtr wintunSession = IntPtr.Zero;
         private byte[] privateKey;
         private byte[] publicKey;
         private CancellationTokenSource packetLoopCancellation;
-        private Task packetProcessingTask;
         private string clientAssignedIP; // Track client's assigned IP (null until assigned)
         private Tunnel tunnel; // Instance of the Tunnel class (for clients)
         private TunnelManager tunnelManager; // Instance of TunnelManager (for servers)
@@ -792,115 +790,6 @@ namespace NATTunnel
         }
         */
 
-        /// <summary>
-        /// Main packet processing loop - reads packets from Wintun and forwards them
-        /// NOTE: With WireGuard-NT, packet processing is handled by the kernel driver
-        /// This method is no longer needed but kept for reference
-        /// </summary>
-        private void PacketProcessingLoop(CancellationToken cancellationToken)
-        {
-            Console.WriteLine("Packet processing loop running...");
-
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    try
-                    {
-                        // Use WintunGetReadPacket for reading individual packets from Wintun
-                        // This is the standard Wintun API approach
-                        IntPtr packetPtr = WireGuardAPI.GetReadPacket(wintunSession, out uint packetSize);
-
-                        if (packetPtr != IntPtr.Zero && packetSize > 0)
-                        {
-                            try
-                            {
-                                // Read packet data
-                                byte[] packetData = new byte[packetSize];
-                                Marshal.Copy(packetPtr, packetData, 0, (int)packetSize);
-
-                                // Uncomment for debugging packet reception:
-                                // Console.WriteLine($"Received packet from Wintun: {packetSize} bytes");
-
-                                // TODO: Forward packet through mediation tunnel
-                                // This would involve:
-                                // 1. Parse the IP packet using PacketDotNet
-                                // 2. Encrypt it with peer's symmetric key
-                                // 3. Send via UDP to the peer through Tunnel.cs
-
-                                // For now, just log receipt
-                                // In production, you'd call something like:
-                                // Tunnel.ForwardPacketToPeer(packetData);
-                            }
-                            finally
-                            {
-                                // Always release the packet back to Wintun
-                                WireGuardAPI.ReleaseReadPacket(wintunSession, packetPtr);
-                            }
-                        }
-                        else
-                        {
-                            // No packet available, wait a bit
-                            Thread.Sleep(1);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (!cancellationToken.IsCancellationRequested)
-                        {
-                            Console.WriteLine($"Error in packet processing loop: {ex.Message}");
-                            Thread.Sleep(100); // Back off on error
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Packet processing loop terminated with error: {ex.Message}");
-            }
-            finally
-            {
-                Console.WriteLine("Packet processing loop stopped");
-            }
-        }
-
-        /// <summary>
-        /// Sends a packet through the Wintun tunnel
-        /// </summary>
-        public void SendPacket(byte[] packetData)
-        {
-            if (wintunSession == IntPtr.Zero)
-            {
-                Console.WriteLine("⚠ Cannot send packet: Wintun session not initialized");
-                return;
-            }
-
-            try
-            {
-                // Allocate write packet buffer using standard Wintun API
-                IntPtr packet = WireGuardAPI.AllocateWritePacket(wintunSession, (uint)packetData.Length);
-
-                if (packet != IntPtr.Zero)
-                {
-                    // Copy packet data to the buffer
-                    Marshal.Copy(packetData, 0, packet, packetData.Length);
-
-                    // Commit the packet to send it
-                    WireGuardAPI.CommitWritePacket(wintunSession, packet);
-
-                    Console.WriteLine($"Sent packet through Wintun: {packetData.Length} bytes");
-                }
-                else
-                {
-                    Console.WriteLine("⚠ Failed to allocate write packet buffer");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error sending packet: {ex.Message}");
-            }
-        }
-
         private bool IsElevated()
         {
             if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -1243,24 +1132,11 @@ namespace NATTunnel
                             udpProxy = null;
                         }
 
-                        // Stop packet processing loop
+                        // Stop packet processing loop (if active)
                         if (packetLoopCancellation != null)
                         {
-                            Console.WriteLine("Stopping packet processing loop...");
+                            Console.WriteLine("Cancelling packet loop...");
                             packetLoopCancellation.Cancel();
-
-                            if (packetProcessingTask != null)
-                            {
-                                try
-                                {
-                                    packetProcessingTask.Wait(5000); // Wait up to 5 seconds
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"Warning: Error waiting for packet loop: {ex.Message}");
-                                }
-                            }
-
                             packetLoopCancellation.Dispose();
                             packetLoopCancellation = null;
                         }
@@ -1289,13 +1165,6 @@ namespace NATTunnel
                 {
                     try
                     {
-                        // End the Wintun session first
-                        if (wintunSession != IntPtr.Zero)
-                        {
-                            WireGuardAPI.EndWintunSession(wintunSession);
-                            wintunSession = IntPtr.Zero;
-                        }
-
                         WireGuardAPI.CloseAdapter(wireguardAdapter);
                         wireguardAdapter = IntPtr.Zero;
                     }

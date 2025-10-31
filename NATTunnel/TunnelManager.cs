@@ -263,8 +263,8 @@ namespace NATTunnel
                     // Clean up the tunnel (dispose resources)
                     try
                     {
-                        // TODO: Add proper disposal to Tunnel class
-                        Console.WriteLine($"[TunnelManager] Removing tunnel {connectionId}");
+                        tunnel.Dispose();
+                        Console.WriteLine($"[TunnelManager] Removed and disposed tunnel {connectionId}");
                     }
                     catch (Exception ex)
                     {
@@ -371,8 +371,15 @@ namespace NATTunnel
                     {
                         foreach (var kvp in activeTunnels)
                         {
-                            Console.WriteLine($"[TunnelManager] Disposing tunnel {kvp.Key}");
-                            // TODO: Properly dispose tunnel
+                            try
+                            {
+                                Console.WriteLine($"[TunnelManager] Disposing tunnel {kvp.Key}");
+                                kvp.Value.Dispose();
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[TunnelManager] Error disposing tunnel {kvp.Key}: {ex.Message}");
+                            }
                         }
                         activeTunnels.Clear();
                     }
