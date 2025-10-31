@@ -430,7 +430,8 @@ public static class WireGuardAPI
                 UseShellExecute = true,
                 RedirectStandardOutput = false,
                 RedirectStandardError = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
             };
 
             using (var proc = System.Diagnostics.Process.Start(psi))
@@ -681,7 +682,8 @@ public static class WireGuardAPI
                     UseShellExecute = true,  // Important: inherit admin context
                     RedirectStandardOutput = false,
                     RedirectStandardError = false,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
                 };
 
                 using (var proc = System.Diagnostics.Process.Start(psi))
@@ -726,7 +728,8 @@ public static class WireGuardAPI
                     FileName = "netsh",
                     Arguments = $"interface ipv4 delete address \"{interfaceName}\" all",
                     UseShellExecute = true,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
                 };
 
                 using (var deleteProc = System.Diagnostics.Process.Start(deleteAllPsi))
@@ -743,7 +746,8 @@ public static class WireGuardAPI
                     FileName = "netsh",
                     Arguments = $"interface ipv4 add address name=\"{interfaceName}\" addr={ipAddr} mask={subnetMask}",
                     UseShellExecute = true,  // Important: inherit admin context
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
                 };
 
                 using (var proc = System.Diagnostics.Process.Start(psi))
@@ -790,7 +794,8 @@ public static class WireGuardAPI
                     UseShellExecute = true,
                     RedirectStandardOutput = false,
                     RedirectStandardError = false,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
                 };
 
                 using (var deleteProc = System.Diagnostics.Process.Start(deleteAllPsi))
@@ -808,7 +813,8 @@ public static class WireGuardAPI
                     UseShellExecute = true,  // Important: inherit admin context
                     RedirectStandardOutput = false,
                     RedirectStandardError = false,
-                    CreateNoWindow = true
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
                 };
 
                 using (var proc = System.Diagnostics.Process.Start(psi))
