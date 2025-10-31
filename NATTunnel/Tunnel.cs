@@ -16,54 +16,76 @@ using System.IO;
 
 namespace NATTunnel;
 
-public static class Tunnel
+public class Tunnel
 {
     //TODO: entire class should get reviewed and eventually split up into smaller classes
-    //TODO: do we really want to have this static? Why not just a normal class, with normal constructor?
-    private static readonly TcpClient tcpClient = new TcpClient();
-    private static UdpClient udpClient; // set in constructor
-    private static NetworkStream tcpClientStream;
-    private static Task tcpClientTask;
-    private static CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
-    private static CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();
-    private static CancellationTokenSource udpServerTaskCancellationToken = new CancellationTokenSource();
-    private static readonly IPEndPoint endpoint;
-    private static int natTestPortOne = 6511;
-    private static int natTestPortTwo = 6512;
-    private static IPAddress targetPeerIp;
-    private static int targetPeerPort;
-    private static int holePunchReceivedCount;
-    public static bool connected;
-    private static readonly IPAddress remoteIp;
-    private static readonly bool isServer;
-    private static NATType natType = NATType.Unknown;
-    private static List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
-    private static int currentConnectionID = 0;
-    public static IPAddress privateIP = null;
-    private static WireGuardTunnel wireguardTunnel;
-    private static int maxConnectionTimeout = 15;
-    private static int connectionTimeout = maxConnectionTimeout;
-    private static Timer initialConnectionTimer;
-    private static Timer connectionAttempt;
-    private static int retryAttempt = 0;
-    private static int maxRetryAttempts = 5;
-    private static int retryCooldown = 10;  // seconds before retrying after failure
-    private static bool clientIPAssigned = false;  // Track if we've already assigned the client IP
-    private static RSACryptoServiceProvider rsa = new RSACryptoServiceProvider();
-    private static RSAParameters rsaKeyInfo = rsa.ExportParameters(false);
-    private static byte[] keyModulus = rsaKeyInfo.Modulus;
-    private static byte[] keyExponent = rsaKeyInfo.Exponent;
-    private static RSA rsaServer = RSA.Create();
-    private static RSAParameters rsaKeyInfoServer = new RSAParameters();
-    public static AesGcm aes;
-    public static bool hasServerPublicKey = false;
-    public static bool serverHasSymmetricKey = false;
-    private static byte[] symmetricKey = new byte[32];
-    private static SHA256 shaHashGen = SHA256.Create();
-    private static Guid clientID = Guid.NewGuid();
+    private TcpClient tcpClient = new TcpClient();
+    private UdpClient udpClient;
+    private NetworkStream tcpClientStream;
+    private Task tcpClientTask;
+    private CancellationTokenSource tcpClientTaskCancellationToken = new CancellationTokenSource();
+    private CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();
+    private CancellationTokenSource udpServerTaskCancellationToken = new CancellationTokenSource();
+    private readonly IPEndPoint endpoint;
+    private int natTestPortOne = 6511;
+    private int natTestPortTwo = 6512;
+    private IPAddress targetPeerIp;
+    private int targetPeerPort;
+    private int holePunchReceivedCount;
+    public bool connected;
+    private readonly IPAddress remoteIp;
+    private readonly bool isServer;
+    private NATType natType = NATType.Unknown;
+    private List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
+    private int currentConnectionID = 0;
+    public IPAddress privateIP = null;
+    private WireGuardTunnel wireguardTunnel;
+    private int maxConnectionTimeout = 15;
+    private int connectionTimeout;
+    private Timer initialConnectionTimer;
+    private Timer connectionAttempt;
+    private int retryAttempt = 0;
+    private int maxRetryAttempts = 5;
+    private int retryCooldown = 10;  // seconds before retrying after failure
+    private bool clientIPAssigned = false;  // Track if we've already assigned the client IP
+    private RSACryptoServiceProvider rsa;
+    private RSAParameters rsaKeyInfo;
+    private byte[] keyModulus;
+    private byte[] keyExponent;
+    private RSA rsaServer;
+    private RSAParameters rsaKeyInfoServer;
+    public AesGcm aes;
+    public bool hasServerPublicKey = false;
+    public bool serverHasSymmetricKey = false;
+    private byte[] symmetricKey;
+    private SHA256 shaHashGen;
+    private Guid clientID;
+    private Action onConnectionFailure; // Callback for when connection fails completely
+    private bool isManagedByTunnelManager; // True if this tunnel is managed by TunnelManager
+    private int assignedConnectionID; // Connection ID assigned by TunnelManager (for server-side)
+    private DateTime lastActivityTime; // Track last time this tunnel had any activity
+    private long totalBytesReceived = 0; // Track total bytes received for activity monitoring
+    private long totalBytesSent = 0; // Track total bytes sent for activity monitoring
 
-    static Tunnel()
+    public Tunnel(Action onConnectionFailure = null, bool managedByTunnelManager = false, int connectionId = 0, UdpClient sharedUdpClient = null)
     {
+        // Initialize all fields that need initialization
+        connectionTimeout = maxConnectionTimeout;
+        rsa = new RSACryptoServiceProvider();
+        rsaKeyInfo = rsa.ExportParameters(false);
+        keyModulus = rsaKeyInfo.Modulus;
+        keyExponent = rsaKeyInfo.Exponent;
+        rsaServer = RSA.Create();
+        rsaKeyInfoServer = new RSAParameters();
+        symmetricKey = new byte[32];
+        shaHashGen = SHA256.Create();
+        clientID = Guid.NewGuid();
+
+        this.onConnectionFailure = onConnectionFailure;
+        this.isManagedByTunnelManager = managedByTunnelManager;
+        this.assignedConnectionID = connectionId;
+        this.lastActivityTime = DateTime.UtcNow; // Initialize activity tracking
+
         RandomNumberGenerator.Fill(symmetricKey);
 
         aes = new AesGcm(symmetricKey, AesGcm.TagByteSizes.MaxSize);
@@ -77,20 +99,30 @@ public static class Tunnel
         // Note: WireGuardTunnel is now initialized externally in WireGuardTunnel.InitializeTunnel()
         // to avoid duplicate initialization
 
-        udpClient = new UdpClient();
-        udpClient.Client.ReceiveBufferSize = 128000;
-
-        // Explicitly bind to a random port (0 = OS assigns ephemeral port)
-        // This ensures we have a local port before WireGuard configuration
-        udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
-
-        // Windows-specific udpClient switch
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        // Use shared UDP client if provided (for server-side tunnels managed by TunnelManager)
+        // Otherwise create a new one
+        if (sharedUdpClient != null)
         {
-            // ReSharper disable once IdentifierTypo - taken from here:
-            // https://docs.microsoft.com/en-us/windows/win32/winsock/winsock-ioctls#sio_udp_connreset-opcode-setting-i-t3
-            const int SIO_UDP_CONNRESET = -1744830452;
-            udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+            udpClient = sharedUdpClient;
+            Console.WriteLine($"[Tunnel] Using shared UDP client on port {((IPEndPoint)udpClient.Client.LocalEndPoint).Port}");
+        }
+        else
+        {
+            udpClient = new UdpClient();
+            udpClient.Client.ReceiveBufferSize = 128000;
+
+            // Explicitly bind to a random port (0 = OS assigns ephemeral port)
+            // This ensures we have a local port before WireGuard configuration
+            udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+
+            // Windows-specific udpClient switch
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                // ReSharper disable once IdentifierTypo - taken from here:
+                // https://docs.microsoft.com/en-us/windows/win32/winsock/winsock-ioctls#sio_udp_connreset-opcode-setting-i-t3
+                const int SIO_UDP_CONNRESET = -1744830452;
+                udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+            }
         }
 
         Console.WriteLine($"UDP client bound to local port: {((IPEndPoint)udpClient.Client.LocalEndPoint).Port}");
@@ -117,16 +149,57 @@ public static class Tunnel
     /// <summary>
     /// Sets the WireGuard tunnel reference so clients can restart with their assigned IP
     /// </summary>
-    public static void SetWireGuardTunnel(WireGuardTunnel tunnel)
+    public void SetWireGuardTunnel(WireGuardTunnel tunnel)
     {
         wireguardTunnel = tunnel;
         Console.WriteLine("✓ WireGuard tunnel reference set in Tunnel");
     }
 
     /// <summary>
+    /// Initializes a managed tunnel with connection information from mediation server
+    /// </summary>
+    public void InitializeManagedConnection(string clientEndpoint, NATType clientNatType)
+    {
+        if (!isManagedByTunnelManager)
+        {
+            throw new InvalidOperationException("InitializeManagedConnection can only be called on managed tunnels");
+        }
+
+        Console.WriteLine($"[Tunnel {assignedConnectionID}] Initializing connection to client at {clientEndpoint}");
+
+        // Parse client endpoint
+        string[] parts = clientEndpoint.Split(':');
+        if (parts.Length == 2 && IPAddress.TryParse(parts[0], out IPAddress clientIp) && int.TryParse(parts[1], out int clientPort))
+        {
+            targetPeerIp = clientIp;
+            targetPeerPort = clientPort;
+            // Store client's NAT type if needed for hole punching logic
+
+            Console.WriteLine($"[Tunnel {assignedConnectionID}] Target peer: {targetPeerIp}:{targetPeerPort}, NAT type: {clientNatType}");
+
+            // Server already knows its own NAT type from registration tunnel
+            // Start hole punching immediately
+            StartHolePunching();
+        }
+        else
+        {
+            Console.WriteLine($"[Tunnel {assignedConnectionID}] ⚠ Failed to parse client endpoint: {clientEndpoint}");
+        }
+    }
+
+    /// <summary>
+    /// Starts hole punching for managed tunnels
+    /// </summary>
+    private void StartHolePunching()
+    {
+        Console.WriteLine($"[Tunnel {assignedConnectionID}] Starting hole punching to {targetPeerIp}");
+        // Timer will be set up by UdpServer() which is called in Start()
+    }
+
+    /// <summary>
     /// Gets the UDP client used for NAT traversal (to be shared with WireGuard proxy)
     /// </summary>
-    public static UdpClient GetUdpClient()
+    public UdpClient GetUdpClient()
     {
         return udpClient;
     }
@@ -134,7 +207,7 @@ public static class Tunnel
     /// <summary>
     /// Gets the local UDP port being used for NAT traversal/hole-punching
     /// </summary>
-    public static int GetLocalUdpPort()
+    public int GetLocalUdpPort()
     {
         if (udpClient?.Client?.LocalEndPoint is IPEndPoint endpoint)
         {
@@ -147,7 +220,7 @@ public static class Tunnel
     /// Gets the next available IP address in the 10.5.0.0/24 subnet
     /// Server is 10.5.0.1, clients get 10.5.0.2 - 10.5.0.254
     /// </summary>
-    private static IPAddress GetNextAvailableIP()
+    private IPAddress GetNextAvailableIP()
     {
         // Server IP is always 10.5.0.1
         const byte serverIpHost = 1;
@@ -178,7 +251,7 @@ public static class Tunnel
         return IPAddress.Parse("10.5.0.2");
     }
 
-    public static void Ping(IPEndPoint privateAddressEndpoint, Client client = null)
+    public void Ping(IPEndPoint privateAddressEndpoint, Client client = null)
     {
         if (isServer)
         {
@@ -203,7 +276,7 @@ public static class Tunnel
         }
     }
 
-    public static void Send(byte[] packetData, IPEndPoint endpoint, IPAddress privateAddress, byte[] fragmentID, byte[] fragmentOffset, byte[] moreFragments, Client client = null)
+    public void Send(byte[] packetData, IPEndPoint endpoint, IPAddress privateAddress, byte[] fragmentID, byte[] fragmentOffset, byte[] moreFragments, Client client = null)
     {
         byte[] fID = fragmentID;
         byte[] fOffset = fragmentOffset;
@@ -257,7 +330,7 @@ public static class Tunnel
         }
     }
 
-    public static void SendFrame(byte[] packetData, IPAddress privateAddress, byte[] fragmentID = null, byte[] fragmentOffset = null, byte[] moreFragments = null)
+    public void SendFrame(byte[] packetData, IPAddress privateAddress, byte[] fragmentID = null, byte[] fragmentOffset = null, byte[] moreFragments = null)
     {
         if (isServer)
         {
@@ -273,7 +346,7 @@ public static class Tunnel
         }
     }
 
-    private static void OnTimedEvent(object source, ElapsedEventArgs e)
+    private void OnTimedEvent(object source, ElapsedEventArgs e)
     {
         MediationMessage message = new MediationMessage(MediationMessageType.KeepAlive);
         message.ClientID = clientID;
@@ -330,7 +403,7 @@ public static class Tunnel
         }
     }
 
-    private static void ConnectionTimer(object source, ElapsedEventArgs e)
+    private void ConnectionTimer(object source, ElapsedEventArgs e)
     {
         if (initialConnectionTimer.Enabled)
         {
@@ -339,6 +412,7 @@ public static class Tunnel
             if (connectionTimeout == 0)
             {
                 MediationMessage message = new MediationMessage(MediationMessageType.ConnectionTimeout);
+                message.ConnectionID = currentConnectionID;  // Include connection ID so server knows which connection timed out
                 byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                 Console.WriteLine($"sending {message.Serialize()}");
                 tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
@@ -357,23 +431,49 @@ public static class Tunnel
                         if (!connected && retryAttempt < maxRetryAttempts)
                         {
                             Console.WriteLine($"🔄 Retrying connection (attempt {retryAttempt + 1}/{maxRetryAttempts})...");
-                            connectionTimeout = maxConnectionTimeout;
-                            holePunchReceivedCount = 0;
-                            connectionAttempt.Enabled = true;
-                            initialConnectionTimer.Enabled = true;
+
+                            // Only clients should recreate tunnel instance, servers just reset state
+                            if (!isServer)
+                            {
+                                Console.WriteLine($"🔄 Creating new tunnel instance with fresh connection ID...");
+                                onConnectionFailure?.Invoke();
+                            }
+                            else
+                            {
+                                // Server just resets connection state
+                                connectionTimeout = maxConnectionTimeout;
+                                holePunchReceivedCount = 0;
+                                connectionAttempt.Enabled = true;
+                                initialConnectionTimer.Enabled = true;
+                            }
                         }
                     });
                 }
                 else
                 {
                     Console.WriteLine($"❌ Max connection retries ({maxRetryAttempts}) reached. Giving up.");
+                    // Invoke failure callback if we've exhausted retries
+                    if (!isServer)
+                    {
+                        onConnectionFailure?.Invoke();
+                    }
                 }
             }
         }
     }
 
-    public static void Start()
+    public void Start()
     {
+        // If this tunnel is managed by TunnelManager, skip TCP connection and NAT detection
+        // The TunnelManager handles coordination with mediation server
+        if (isManagedByTunnelManager)
+        {
+            Console.WriteLine($"[Tunnel {assignedConnectionID}] Starting as managed tunnel (server-side)");
+            // Just start the UDP server listen loop - no NAT detection needed
+            UdpServer();
+            return;
+        }
+
         //Attempt to connect to mediator
         try
         {
@@ -393,7 +493,7 @@ public static class Tunnel
         tcpClientTask.Start();
     }
 
-    private static void UdpClient()
+    private void UdpClient()
     {
         //Set client targetPeerIp to remote endpoint IP
         targetPeerIp = remoteIp;
@@ -408,7 +508,7 @@ public static class Tunnel
         timer.Elapsed += OnTimedEvent;
     }
 
-    private static void UdpServer()
+    private void UdpServer()
     {
         //Set client targetPeerIp to something no client will have
         targetPeerIp = IPAddress.None;
@@ -423,7 +523,7 @@ public static class Tunnel
         timer.Elapsed += OnTimedEvent;
     }
 
-    private static void UdpClientListenLoop(CancellationToken token)
+    private void UdpClientListenLoop(CancellationToken token)
     {
         //Init an IPEndPoint that will be populated with the sender's info
         int randID = new Random().Next();
@@ -432,6 +532,10 @@ public static class Tunnel
         while (!token.IsCancellationRequested)
         {
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
+
+            // Track activity
+            totalBytesReceived += receiveBuffer.Length;
+            UpdateActivity();
 
             // Check if this is a WireGuard packet (binary, not JSON)
             // WireGuard packets start with message type (1-4) and don't contain '{' or '['
@@ -574,17 +678,9 @@ public static class Tunnel
                                 Console.WriteLine($"   Stack trace: {wgEx.StackTrace}");
                             }
 
-                            // Update client tunnel with assigned IP (CRITICAL for multi-peer support)
-                            try
-                            {
-                                Console.WriteLine($"Updating client WireGuard interface with assigned IP: {privateIP}");
-                                wireguardTunnel.SetClientIPAndRestart(privateIP.ToString());
-                                Console.WriteLine("✓ Client WireGuard tunnel updated with assigned IP");
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"⚠ Could not update tunnel with assigned IP: {ex.Message}");
-                            }
+                            // DON'T update interface yet - wait for server's response with corrected IP
+                            // The server will send back a WireGuardPublicKeyExchange with the actual assigned IP
+                            Console.WriteLine($"[DEBUG] Waiting for server's WireGuardPublicKeyExchange with confirmed IP...");
                         }
                     }
                     break;
@@ -596,6 +692,18 @@ public static class Tunnel
                         Console.WriteLine($"[DEBUG] wireguardTunnel != null: {wireguardTunnel != null}");
                         Console.WriteLine($"[DEBUG] targetPeerIp != null: {targetPeerIp != null}, targetPeerPort: {targetPeerPort}");
 
+                        // CRITICAL: Server may have corrected our IP (e.g., reconnection with existing peer)
+                        // Update privateIP before we configure the interface
+                        if (receivedMessage.PrivateAddressString != null && !string.IsNullOrEmpty(receivedMessage.PrivateAddressString))
+                        {
+                            var serverAssignedIP = receivedMessage.GetPrivateAddress();
+                            if (serverAssignedIP != null && !serverAssignedIP.Equals(privateIP))
+                            {
+                                Console.WriteLine($"[INFO] Server corrected our IP from {privateIP} to {serverAssignedIP} (peer reused)");
+                                privateIP = serverAssignedIP;
+                            }
+                        }
+
                         if (receivedMessage.WireGuardPublicKey != null && !receivedMessage.WireGuardPublicKey.Equals(""))
                         {
                             var expectedHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(receivedMessage.WireGuardPublicKey));
@@ -606,9 +714,26 @@ public static class Tunnel
                             {
                                 Console.WriteLine($"✓ Client received server's WireGuard public key: {receivedMessage.WireGuardPublicKey.Substring(0, 8)}...");
 
-                                // Store server's WireGuard public key by adding it as a peer
+                                // FIRST: Update client tunnel with the final confirmed IP
+                                // This must happen BEFORE adding the peer, as the interface needs the correct IP
+                                if (wireguardTunnel != null && privateIP != null)
+                                {
+                                    try
+                                    {
+                                        Console.WriteLine($"[CRITICAL] Updating client WireGuard interface with confirmed IP: {privateIP}");
+                                        wireguardTunnel.SetClientIPAndRestart(privateIP.ToString());
+                                        Console.WriteLine("✓ Client WireGuard tunnel updated with confirmed IP");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"⚠ Could not update tunnel with confirmed IP: {ex.Message}");
+                                    }
+                                }
+
+                                // SECOND: Store server's WireGuard public key by adding it as a peer
                                 if (wireguardTunnel != null && targetPeerIp != null && targetPeerPort != 0)
                                 {
+                                    bool peerAddedSuccessfully = false;
                                     try
                                     {
                                         // Use the actual NAT-traversed endpoint established by mediation
@@ -617,14 +742,41 @@ public static class Tunnel
                                         Console.WriteLine($"[DEBUG] Adding server as peer with endpoint: {serverEndpoint}");
 
                                         // Add server as a peer with its public key and known tunnel IP (10.5.0.1)
+                                        // Pass our tunnel socket for proxy routing
                                         var serverTunnelIp = IPAddress.Parse("10.5.0.1");
-                                        var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, serverTunnelIp, true);
+                                        var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, serverTunnelIp, true, udpClient);
                                         Console.WriteLine($"✓ Added server as WireGuard peer: {serverEndpoint} -> {serverPeer.PrivateAddress}");
+                                        peerAddedSuccessfully = true;
                                     }
                                     catch (Exception ex)
                                     {
                                         Console.WriteLine($"⚠ Error adding server as WireGuard peer: {ex.Message}");
                                         Console.WriteLine($"   Stack trace: {ex.StackTrace}");
+                                    }
+
+                                    // THIRD: Send ConnectionComplete to signal we're done with setup
+                                    if (peerAddedSuccessfully)
+                                    {
+                                        try
+                                        {
+                                            message = new MediationMessage(MediationMessageType.ReceivedPeer);
+                                            message.ConnectionID = currentConnectionID;
+                                            message.IsServer = false;
+                                            byte[] completeBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                                            Console.WriteLine($"[DEBUG] Client sending ReceivedPeer to mediation server: {message.Serialize()}");
+                                            tcpClientStream.Write(completeBuffer, 0, completeBuffer.Length);
+
+                                            // Mark connection as complete
+                                            connected = true;
+                                            retryAttempt = 0;  // Reset for future connections
+                                            initialConnectionTimer.Enabled = false;
+                                            connectionAttempt.Enabled = false;
+                                            Console.WriteLine("✓ Client connection setup complete!");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"⚠ Error sending connection complete: {ex.Message}");
+                                        }
                                     }
                                 }
                                 else
@@ -665,7 +817,11 @@ public static class Tunnel
                         connectionTimeout = maxConnectionTimeout;
                         try
                         {
-                            privateIP = receivedMessage.GetPrivateAddress();
+                            var parsedPrivateIP = receivedMessage.GetPrivateAddress();
+                            if (parsedPrivateIP != null)
+                            {
+                                privateIP = parsedPrivateIP;
+                            }
                         }
                         catch (Exception e)
                         {
@@ -684,13 +840,17 @@ public static class Tunnel
         Console.WriteLine($"WHAT THE HECK IS GOING ON WHY ISN'T THIS HITTING rand {randID}");
     }
 
-    private static void UdpServerListenLoop(CancellationToken token)
+    private void UdpServerListenLoop(CancellationToken token)
     {
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
         while (!token.IsCancellationRequested)
         {
             Console.WriteLine(Clients.Count);
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
+
+            // Track activity
+            totalBytesReceived += receiveBuffer.Length;
+            UpdateActivity();
 
             // Check if this is a WireGuard packet (binary, not JSON)
             // WireGuard packets start with message type (1-4) and don't contain '{' or '['
@@ -734,7 +894,7 @@ public static class Tunnel
                 if (Clients.GetClient(currentConnectionID) != null) continue;
                 Client client = new Client(listenEndpoint, GetNextAvailableIP(), currentConnectionID);
                 Clients.Add(client);
-                Console.WriteLine("added {0}:{1} to list", listenEndpoint.Address, listenEndpoint.Port);
+                Console.WriteLine($"[UdpServer] Added client {listenEndpoint} with ConnectionID: {currentConnectionID}");
             }
 
             if (Equals(listenEndpoint.Address, targetPeerIp))
@@ -860,11 +1020,21 @@ public static class Tunnel
                                         try
                                         {
                                             // Use the client's received public key and actual NAT-traversed endpoint
+                                            // Pass our tunnel socket for proxy routing
                                             Console.WriteLine($"[DEBUG] Adding WireGuard peer:");
                                             Console.WriteLine($"[DEBUG]   Public Key: {c.WireGuardPublicKey.Substring(0, 16)}...");
                                             Console.WriteLine($"[DEBUG]   Endpoint: {c.GetEndPoint()}");
 
-                                            var peer = wireguardTunnel.AddPeer(c.WireGuardPublicKey, c.GetEndPoint());
+                                            var peer = wireguardTunnel.AddPeer(c.WireGuardPublicKey, c.GetEndPoint(), false, udpClient);
+
+                                            // CRITICAL: Update client's IP to match what peer manager assigned
+                                            // This handles reconnections where an existing peer is reused with its old IP
+                                            if (!peer.PrivateAddress.Equals(c.GetPrivateAddress()))
+                                            {
+                                                Console.WriteLine($"[INFO] Updating client IP from {c.GetPrivateAddress()} to {peer.PrivateAddress} (existing peer reused)");
+                                                c.SetPrivateAddress(peer.PrivateAddress);
+                                            }
+
                                             Console.WriteLine($"✓ Added client as WireGuard peer: {c.GetEndPoint()} -> {peer.PrivateAddress}");
                                             Console.WriteLine($"[INFO] WireGuard will send encrypted UDP packets to {c.GetEndPoint()}");
                                             Console.WriteLine($"[INFO] Client must also add server as peer with endpoint pointing here");
@@ -902,6 +1072,8 @@ public static class Tunnel
                                         message = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
                                         message.WireGuardPublicKey = serverWgPublicKey;
                                         message.WireGuardPublicKeyHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(serverWgPublicKey));
+                                        // Send the client's assigned IP (might be different from what they initially got if reconnecting)
+                                        message.SetPrivateAddress(c.GetPrivateAddress());
                                         byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                                         udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, c.GetEndPoint());
 
@@ -947,7 +1119,8 @@ public static class Tunnel
                                             Console.WriteLine($"[DEBUG] Adding server as peer with endpoint: {serverEndpoint}");
 
                                             // Add server as a peer with its public key
-                                            var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, isPersistent: true);
+                                            // Pass our tunnel socket for proxy routing
+                                            var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, isPersistent: true, tunnelSocket: udpClient);
                                             Console.WriteLine($"✓ Added server as WireGuard peer: {serverEndpoint} -> {serverPeer.PrivateAddress}");
                                         }
                                         catch (Exception ex)
@@ -1018,7 +1191,7 @@ public static class Tunnel
         }
     }
 
-    private static void TcpListenLoop()
+    private void TcpListenLoop()
     {
         while (tcpClient.Connected)
         {
@@ -1027,9 +1200,25 @@ public static class Tunnel
                 byte[] receiveBuffer = new byte[tcpClient.ReceiveBufferSize];
                 //TODO: sometimes fails here
                 int bytesRead = tcpClientStream.Read(receiveBuffer, 0, tcpClient.ReceiveBufferSize);
+
+                // Check if connection closed or no data received
+                if (bytesRead == 0)
+                {
+                    Console.WriteLine("TCP connection closed by mediation server");
+                    break; // Exit the listen loop
+                }
+
                 string receivedString = Encoding.ASCII.GetString(receiveBuffer, 0, bytesRead);
+
+                // Skip empty or whitespace-only messages
+                if (string.IsNullOrWhiteSpace(receivedString))
+                {
+                    continue;
+                }
+
                 Console.WriteLine("Received: " + receivedString);
-                MediationMessage receivedMessage = JsonSerializer.Deserialize<MediationMessage>(receivedString);
+
+                // Define local functions for message processing (only defined once per iteration)
 
                 void PollForAvailableServer(object source, ElapsedEventArgs e)
                 {
@@ -1134,197 +1323,285 @@ public static class Tunnel
                 //Basically the server shouldn't be locked out if a client couldn't connect
                 //Also add a retry if there's no connection made after a certain amount of time
 
-                switch (receivedMessage.ID)
+                // Handle multiple JSON objects in the same buffer
+                // Split by detecting JSON object boundaries (each starts with '{' and ends with '}')
+                int jsonStartIndex = 0;
+                while (jsonStartIndex < receivedString.Length)
                 {
-                    case MediationMessageType.Connected:
+                    // Find the start of the next JSON object
+                    int jsonObjStart = receivedString.IndexOf('{', jsonStartIndex);
+                    if (jsonObjStart == -1) break;
+
+                    // Find the matching closing brace by counting braces
+                    int braceCount = 0;
+                    int jsonObjEnd = -1;
+                    for (int i = jsonObjStart; i < receivedString.Length; i++)
+                    {
+                        if (receivedString[i] == '{') braceCount++;
+                        else if (receivedString[i] == '}')
                         {
-                            MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest);
-                            message.LocalPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
-                            message.ClientID = clientID;
-                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                            Console.WriteLine(message.Serialize());
-                            tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
-                        }
-                        break;
-                    case MediationMessageType.NATTestBegin:
-                        {
-                            natTestPortOne = receivedMessage.NATTestPortOne;
-                            natTestPortTwo = receivedMessage.NATTestPortTwo;
-                            MediationMessage message = new MediationMessage(MediationMessageType.NATTest);
-                            message.ClientID = clientID;
-                            byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                            udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortOne));
-                            udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortTwo));
-                        }
-                        break;
-                    case MediationMessageType.NATTypeResponse:
-                        {
-                            Console.WriteLine(receivedMessage.NATType);
-                            natType = receivedMessage.NATType;
-                            if (isServer)
+                            braceCount--;
+                            if (braceCount == 0)
                             {
-                                UdpServer();
+                                jsonObjEnd = i;
+                                break;
                             }
-                            else
+                        }
+                    }
+
+                    if (jsonObjEnd == -1)
+                    {
+                        Console.WriteLine("⚠ Incomplete JSON object in buffer (should not happen with TCP)");
+                        break;
+                    }
+
+                    // Extract and parse this JSON object
+                    string jsonObject = receivedString.Substring(jsonObjStart, jsonObjEnd - jsonObjStart + 1);
+
+                    MediationMessage receivedMessage;
+                    try
+                    {
+                        receivedMessage = JsonSerializer.Deserialize<MediationMessage>(jsonObject);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"Error parsing JSON: {ex.Message}");
+                        jsonStartIndex = jsonObjEnd + 1;
+                        continue;
+                    }
+
+                    // Process this message
+                    switch (receivedMessage.ID)
+                    {
+                        case MediationMessageType.Connected:
                             {
-                                UdpClient();
-                                MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
-                                message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
-                                message.NATType = natType;
+                                MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest);
+                                message.LocalPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
+                                message.ClientID = clientID;
+                                // Include connection ID if this tunnel is for a specific connection (server-side per-client tunnel)
+                                if (assignedConnectionID != 0)
+                                {
+                                    message.ConnectionID = assignedConnectionID;
+                                }
                                 byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                                Console.WriteLine(message.Serialize());
                                 tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
                             }
-                        }
-                        break;
-                    case MediationMessageType.ConnectionBegin:
-                        {
-                            holePunchReceivedCount = 0;
-                            connectionTimeout = maxConnectionTimeout;
-                            initialConnectionTimer.Enabled = true;
-                            currentConnectionID = receivedMessage.ConnectionID;
-                            if (natType == NATType.Symmetric)
+                            break;
+                        case MediationMessageType.NATTestBegin:
                             {
-                                IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
-                                targetPeerIp = targetPeerEndpoint.Address;
-                                targetPeerPort = targetPeerEndpoint.Port;
-
-                                connectionAttempt = new Timer(1000)
+                                natTestPortOne = receivedMessage.NATTestPortOne;
+                                natTestPortTwo = receivedMessage.NATTestPortTwo;
+                                MediationMessage message = new MediationMessage(MediationMessageType.NATTest);
+                                message.ClientID = clientID;
+                                byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                                udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortOne));
+                                udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(endpoint.Address, natTestPortTwo));
+                            }
+                            break;
+                        case MediationMessageType.NATTypeResponse:
+                            {
+                                Console.WriteLine(receivedMessage.NATType);
+                                natType = receivedMessage.NATType;
+                                if (isServer)
                                 {
-                                    AutoReset = true,
-                                    Enabled = false
-                                };
-                                connectionAttempt.Elapsed += TryConnectFromSymmetric;
-
-                                while (symmetricConnectionUdpProbes.Count < 256)
+                                    UdpServer();
+                                }
+                                else
                                 {
-                                    UdpClient tempUdpClient = new UdpClient();
-                                    tempUdpClient.Client.ReceiveBufferSize = 128000;
-                                    const int SIO_UDP_CONNRESET = -1744830452;
-                                    tempUdpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-                                    tempUdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
-                                    tempUdpClient.BeginReceive(new AsyncCallback(probeReceive), null);
-                                    void probeReceive(IAsyncResult res)
+                                    UdpClient();
+                                    MediationMessage message = new MediationMessage(MediationMessageType.ConnectionRequest);
+                                    message.SetEndpoint(new IPEndPoint(remoteIp, IPEndPoint.MinPort));
+                                    message.NATType = natType;
+                                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                                    tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+                                }
+                            }
+                            break;
+                        case MediationMessageType.ConnectionBegin:
+                            {
+                                holePunchReceivedCount = 0;
+                                connectionTimeout = maxConnectionTimeout;
+                                retryAttempt = 0;  // Reset retry counter for new connection attempt
+                                initialConnectionTimer.Enabled = true;
+                                currentConnectionID = receivedMessage.ConnectionID;
+                                Console.WriteLine($"[ConnectionBegin] Set currentConnectionID = {currentConnectionID}, isServer = {isServer}");
+                                if (natType == NATType.Symmetric)
+                                {
+                                    IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                                    targetPeerIp = targetPeerEndpoint.Address;
+                                    targetPeerPort = targetPeerEndpoint.Port;
+
+                                    connectionAttempt = new Timer(1000)
                                     {
-                                        try
+                                        AutoReset = true,
+                                        Enabled = false
+                                    };
+                                    connectionAttempt.Elapsed += TryConnectFromSymmetric;
+
+                                    while (symmetricConnectionUdpProbes.Count < 256)
+                                    {
+                                        UdpClient tempUdpClient = new UdpClient();
+                                        tempUdpClient.Client.ReceiveBufferSize = 128000;
+                                        const int SIO_UDP_CONNRESET = -1744830452;
+                                        tempUdpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+                                        tempUdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+                                        tempUdpClient.BeginReceive(new AsyncCallback(probeReceive), null);
+                                        void probeReceive(IAsyncResult res)
                                         {
-                                            IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
-                                            byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
-                                            holePunchReceivedCount++;
-
-                                            if (receivedEndpoint.Address.Equals(targetPeerIp) && holePunchReceivedCount == 1)
+                                            try
                                             {
-                                                Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint)tempUdpClient.Client.LocalEndPoint).Port}");
+                                                IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
+                                                byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
+                                                holePunchReceivedCount++;
 
-                                                udpClientTaskCancellationToken.Cancel();
-                                                udpServerTaskCancellationToken.Cancel();
-
-                                                if (isServer)
+                                                if (receivedEndpoint.Address.Equals(targetPeerIp) && holePunchReceivedCount == 1)
                                                 {
-                                                    udpClient = tempUdpClient;
+                                                    Console.WriteLine($"DUDE WE JUST RECEIVED A PACKET FROM ANOTHER PEER AS A SYMMETRIC NAT THIS IS INSANE!!! port {((IPEndPoint)tempUdpClient.Client.LocalEndPoint).Port}");
 
-                                                    // Update WireGuard proxy with new socket
-                                                    if (wireguardTunnel != null)
+                                                    udpClientTaskCancellationToken.Cancel();
+                                                    udpServerTaskCancellationToken.Cancel();
+
+                                                    if (isServer)
                                                     {
-                                                        wireguardTunnel.UpdateProxyTunnelSocket(tempUdpClient);
+                                                        udpClient = tempUdpClient;
+
+                                                        // Update WireGuard proxy with new socket
+                                                        if (wireguardTunnel != null)
+                                                        {
+                                                            wireguardTunnel.UpdateProxyTunnelSocket(tempUdpClient);
+                                                        }
+
+                                                        CancellationTokenSource newUdpServerTaskCancellationToken = new CancellationTokenSource();
+                                                        Task.Run(() => UdpServerListenLoop(newUdpServerTaskCancellationToken.Token));
+                                                        Console.WriteLine("server");
                                                     }
-
-                                                    CancellationTokenSource newUdpServerTaskCancellationToken = new CancellationTokenSource();
-                                                    Task.Run(() => UdpServerListenLoop(newUdpServerTaskCancellationToken.Token));
-                                                    Console.WriteLine("server");
-                                                }
-                                                else
-                                                {
-                                                    udpClient = tempUdpClient;
-
-                                                    // Update WireGuard proxy with new socket
-                                                    if (wireguardTunnel != null)
+                                                    else
                                                     {
-                                                        wireguardTunnel.UpdateProxyTunnelSocket(tempUdpClient);
-                                                    }
+                                                        udpClient = tempUdpClient;
 
-                                                    CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
-                                                    Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
-                                                    Console.WriteLine("client");
+                                                        // Update WireGuard proxy with new socket
+                                                        if (wireguardTunnel != null)
+                                                        {
+                                                            wireguardTunnel.UpdateProxyTunnelSocket(tempUdpClient);
+                                                        }
+
+                                                        CancellationTokenSource newUdpClientTaskCancellationToken = new CancellationTokenSource();
+                                                        Task.Run(() => UdpClientListenLoop(newUdpClientTaskCancellationToken.Token));
+                                                        Console.WriteLine("client");
+                                                    }
                                                 }
                                             }
+                                            catch
+                                            {
+                                                Console.WriteLine("who cares it still works lol");
+                                            }
                                         }
-                                        catch
+                                        symmetricConnectionUdpProbes.Add(tempUdpClient);
+                                    }
+
+                                    connectionAttempt.Enabled = true;
+                                }
+
+                                if (receivedMessage.NATType == NATType.Symmetric)
+                                {
+                                    IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                                    targetPeerIp = targetPeerEndpoint.Address;
+                                    connectionAttempt = new Timer(1000)
+                                    {
+                                        AutoReset = true,
+                                        Enabled = true
+                                    };
+                                    connectionAttempt.Elapsed += TryConnectToSymmetric;
+                                }
+
+                                if (natType != NATType.Symmetric && receivedMessage.NATType != NATType.Symmetric)
+                                {
+                                    IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
+                                    targetPeerIp = targetPeerEndpoint.Address;
+                                    targetPeerPort = targetPeerEndpoint.Port;
+                                    connectionAttempt = new Timer(1000)
+                                    {
+                                        AutoReset = true,
+                                        Enabled = true
+                                    };
+                                    connectionAttempt.Elapsed += TryConnect;
+                                }
+                            }
+                            break;
+                        case MediationMessageType.ConnectionComplete:
+                            {
+                                Console.WriteLine($"[ConnectionComplete] Received. currentConnectionID = {currentConnectionID}, isServer = {isServer}");
+                                if (isServer)
+                                {
+                                    holePunchReceivedCount = 5;
+                                    // Look up client by connection ID instead of endpoint
+                                    // (endpoint may have changed for Symmetric NAT after hole punching)
+                                    Console.WriteLine($"[ConnectionComplete] Looking up client by ConnectionID: {currentConnectionID}");
+                                    Console.WriteLine($"[ConnectionComplete] Total clients in list: {Clients.Count}");
+                                    var client = Clients.GetClient(currentConnectionID);
+                                    if (client != null)
+                                    {
+                                        client.Connected = true;
+                                        initialConnectionTimer.Enabled = false;
+                                        Console.WriteLine($"✓ Connection {currentConnectionID} marked complete for client at {client.GetEndPoint()}");
+                                        Console.WriteLine("Completed");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"⚠ Cannot mark connection complete: Client with ConnectionID {currentConnectionID} not found");
+                                        Console.WriteLine($"   (Was looking for endpoint: {targetPeerIp}:{targetPeerPort})");
+                                        Console.WriteLine($"   Current clients:");
+                                        foreach (var c in Clients.GetAll())
                                         {
-                                            Console.WriteLine("who cares it still works lol");
+                                            Console.WriteLine($"     - ConnectionID: {c.ConnectionID}, Endpoint: {c.GetEndPoint()}");
                                         }
                                     }
-                                    symmetricConnectionUdpProbes.Add(tempUdpClient);
                                 }
-
-                                connectionAttempt.Enabled = true;
-                            }
-
-                            if (receivedMessage.NATType == NATType.Symmetric)
-                            {
-                                IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
-                                targetPeerIp = targetPeerEndpoint.Address;
-                                connectionAttempt = new Timer(1000)
+                                else
                                 {
-                                    AutoReset = true,
+                                    try
+                                    {
+                                        tcpClientStream.Close();
+                                        tcpClientTaskCancellationToken.Cancel();
+                                        tcpClient.Close();
+                                    }
+                                    catch (Exception e)
+                                    {
+                                        Console.WriteLine(e);
+                                    }
+                                    connected = true;
+                                    initialConnectionTimer.Enabled = false;
+                                    retryAttempt = 0;  // Reset retry counter on successful connection
+                                    Console.WriteLine("✓ Connection established. Retry counter reset.");
+                                    Console.WriteLine("Completed");
+                                }
+                            }
+                            break;
+                        case MediationMessageType.ServerNotAvailable:
+                            {
+                                Timer recheckAvailability = new Timer(3000)
+                                {
+                                    AutoReset = false,
                                     Enabled = true
                                 };
-                                connectionAttempt.Elapsed += TryConnectToSymmetric;
+                                recheckAvailability.Elapsed += PollForAvailableServer;
                             }
+                            break;
+                    }
 
-                            if (natType != NATType.Symmetric && receivedMessage.NATType != NATType.Symmetric)
-                            {
-                                IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
-                                targetPeerIp = targetPeerEndpoint.Address;
-                                targetPeerPort = targetPeerEndpoint.Port;
-                                connectionAttempt = new Timer(1000)
-                                {
-                                    AutoReset = true,
-                                    Enabled = true
-                                };
-                                connectionAttempt.Elapsed += TryConnect;
-                            }
-                        }
-                        break;
-                    case MediationMessageType.ConnectionComplete:
-                        {
-                            if (isServer)
-                            {
-                                holePunchReceivedCount = 5;
-                                Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).Connected = true;
-                                initialConnectionTimer.Enabled = false;
-                                Console.WriteLine("Completed");
-                            }
-                            else
-                            {
-                                try
-                                {
-                                    tcpClientStream.Close();
-                                    tcpClientTaskCancellationToken.Cancel();
-                                    tcpClient.Close();
-                                }
-                                catch (Exception e)
-                                {
-                                    Console.WriteLine(e);
-                                }
-                                connected = true;
-                                initialConnectionTimer.Enabled = false;
-                                retryAttempt = 0;  // Reset retry counter on successful connection
-                                Console.WriteLine("✓ Connection established. Retry counter reset.");
-                                Console.WriteLine("Completed");
-                            }
-                        }
-                        break;
-                    case MediationMessageType.ServerNotAvailable:
-                        {
-                            Timer recheckAvailability = new Timer(3000)
-                            {
-                                AutoReset = false,
-                                Enabled = true
-                            };
-                            recheckAvailability.Elapsed += PollForAvailableServer;
-                        }
-                        break;
-                }
+                    // Move to next JSON object in buffer
+                    jsonStartIndex = jsonObjEnd + 1;
+                } // End of while loop for processing multiple JSON objects
+
+            } // End of try block
+            catch (IOException ioEx) when (ioEx.InnerException is SocketException socketEx &&
+                                          (socketEx.SocketErrorCode == SocketError.ConnectionAborted ||
+                                           socketEx.SocketErrorCode == SocketError.ConnectionReset))
+            {
+                // Connection was closed during restart - this is expected
+                Console.WriteLine("[TcpListenLoop] Connection closed during restart (expected)");
+                break;  // Exit loop cleanly
             }
             catch (Exception e)
             {
@@ -1337,5 +1614,45 @@ public static class Tunnel
                 return;
             }
         }
+    }
+
+    /// <summary>
+    /// Gets the time since last activity on this tunnel
+    /// </summary>
+    public TimeSpan GetTimeSinceLastActivity()
+    {
+        return DateTime.UtcNow - lastActivityTime;
+    }
+
+    /// <summary>
+    /// Gets whether this tunnel is considered active (received/sent data recently)
+    /// </summary>
+    public bool IsActive(TimeSpan inactivityThreshold)
+    {
+        return GetTimeSinceLastActivity() < inactivityThreshold;
+    }
+
+    /// <summary>
+    /// Updates the last activity timestamp (called when data is received/sent)
+    /// </summary>
+    private void UpdateActivity()
+    {
+        lastActivityTime = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Gets the connection ID for this tunnel (used by TunnelManager)
+    /// </summary>
+    public int GetConnectionID()
+    {
+        return currentConnectionID != 0 ? currentConnectionID : assignedConnectionID;
+    }
+
+    /// <summary>
+    /// Gets activity statistics for this tunnel
+    /// </summary>
+    public (long BytesReceived, long BytesSent, DateTime LastActivity) GetActivityStats()
+    {
+        return (totalBytesReceived, totalBytesSent, lastActivityTime);
     }
 }

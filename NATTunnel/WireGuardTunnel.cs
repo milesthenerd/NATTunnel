@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Net;
+using System.Net.Sockets;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -26,6 +27,9 @@ namespace NATTunnel
         private CancellationTokenSource packetLoopCancellation;
         private Task packetProcessingTask;
         private string clientAssignedIP; // Track client's assigned IP (null until assigned)
+        private Tunnel tunnel; // Instance of the Tunnel class (for clients)
+        private TunnelManager tunnelManager; // Instance of TunnelManager (for servers)
+        private readonly bool isServer;
 
         /// <summary>
         /// Get the UDP proxy instance for forwarding packets
@@ -34,6 +38,7 @@ namespace NATTunnel
 
         public WireGuardTunnel(bool isServer, string interfaceName, bool debugMode = false, bool isRunningAsService = false)
         {
+            this.isServer = isServer;
             this.interfaceName = interfaceName;
             this.debugMode = debugMode;
             this.isRunningAsService = isRunningAsService;
@@ -54,25 +59,77 @@ namespace NATTunnel
                 configFilePath = EnsureConfigPath("wg");
                 Console.WriteLine($"Base config path: {configFilePath}");
 
+                // Set up persistent keys file path (stored separately from config)
+                string keysFilePath = Path.Combine(Path.GetDirectoryName(configFilePath), "wg_keys.txt");
+
                 // Generate or reuse WireGuard keys
                 string privateKeyBase64;
                 string publicKeyBase64;
 
-                if (File.Exists(configFilePath))
+                // Try to load keys from dedicated keys file first (most reliable)
+                if (File.Exists(keysFilePath))
                 {
-                    // Config already exists - extract the existing private key and derive public key
-                    Console.WriteLine("Loading existing WireGuard keys from config...");
-                    privateKeyBase64 = ExtractPrivateKeyFromConfig(configFilePath);
-                    publicKeyBase64 = WireGuardConfig.GetPublicKeyFromConfig(configFilePath);
-                    Console.WriteLine("✓ Loaded existing WireGuard keys");
+                    try
+                    {
+                        Console.WriteLine($"Loading existing WireGuard keys from {keysFilePath}...");
+                        string[] keyLines = File.ReadAllLines(keysFilePath);
+                        if (keyLines.Length >= 2)
+                        {
+                            privateKeyBase64 = keyLines[0].Trim();
+                            publicKeyBase64 = keyLines[1].Trim();
+                            Console.WriteLine("✓ Loaded existing WireGuard keys from keys file");
+                        }
+                        else
+                        {
+                            throw new InvalidDataException("Keys file doesn't contain both keys");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"⚠ Could not load keys from keys file: {ex.Message}");
+                        Console.WriteLine("Generating new keys...");
+                        var (privKey, pubKey) = WireGuardConfig.GenerateKeyPair();
+                        privateKeyBase64 = privKey;
+                        publicKeyBase64 = pubKey;
+                    }
+                }
+                else if (File.Exists(configFilePath))
+                {
+                    // Fallback: try to extract from config file
+                    try
+                    {
+                        Console.WriteLine("Loading existing WireGuard keys from config...");
+                        privateKeyBase64 = ExtractPrivateKeyFromConfig(configFilePath);
+                        publicKeyBase64 = WireGuardConfig.GetPublicKeyFromConfig(configFilePath);
+                        Console.WriteLine("✓ Loaded existing WireGuard keys from config");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"⚠ Could not load keys from config: {ex.Message}");
+                        Console.WriteLine("Generating new keys...");
+                        var (privKey, pubKey) = WireGuardConfig.GenerateKeyPair();
+                        privateKeyBase64 = privKey;
+                        publicKeyBase64 = pubKey;
+                    }
                 }
                 else
                 {
-                    // Config doesn't exist - generate new keypair
+                    // No existing keys - generate new keypair
                     Console.WriteLine("Generating new WireGuard keys...");
                     var (privKey, pubKey) = WireGuardConfig.GenerateKeyPair();
                     privateKeyBase64 = privKey;
                     publicKeyBase64 = pubKey;
+                }
+
+                // ALWAYS save keys to dedicated file for future runs
+                try
+                {
+                    File.WriteAllLines(keysFilePath, new[] { privateKeyBase64, publicKeyBase64 });
+                    Console.WriteLine($"✓ Keys saved to {keysFilePath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠ Warning: Could not save keys file: {ex.Message}");
                 }
 
                 // Decode base64 keys to binary for WireGuard API
@@ -82,7 +139,8 @@ namespace NATTunnel
                 Console.WriteLine("Generating/updating WireGuard config...");
 
                 // Determine interface address based on role
-                string interfaceAddress = isServer ? "10.5.0.1/24" : "10.5.0.2/24";
+                // For clients, use placeholder IP (10.5.0.254) until server assigns actual IP
+                string interfaceAddress = isServer ? "10.5.0.1/24" : "10.5.0.254/24";
 
                 // Generate config with ONLY the [Interface] section
                 // Peers will be added dynamically by WireGuardPeerManager
@@ -233,7 +291,8 @@ namespace NATTunnel
                 ConfigureWireGuardNT();
 
                 // Assign IP address to the interface based on role
-                string assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.2";
+                // For clients, use placeholder IP (10.5.0.254) until server assigns actual IP
+                string assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.254";
                 Console.WriteLine($"Assigning IP address {assignedIp}/24 to interface...");
                 WireGuardAPI.AssignIPAddress(wireguardAdapter, interfaceName, assignedIp, 24);
 
@@ -316,16 +375,56 @@ namespace NATTunnel
                 // Register this tunnel with the Clients class so it can add peers
                 Clients.SetWireGuardTunnel(this);
 
-                // Also register with Tunnel so clients can restart with assigned IP
-                Tunnel.SetWireGuardTunnel(this);
+                // Initialize tunnel/tunnel manager based on mode
+                if (isServer)
+                {
+                    // Server mode: Create registration tunnel + TunnelManager
+                    Console.WriteLine("Server mode: Initializing registration tunnel and TunnelManager...");
 
-                // Start the mediation tunnel to connect to the mediation server
-                Console.WriteLine("Starting mediation tunnel connection...");
-                Tunnel.Start();
+                    // Create a tunnel for server registration and NAT detection
+                    tunnel = new Tunnel(onConnectionFailure: null);  // Server doesn't need restart on failure
+                    tunnel.SetWireGuardTunnel(this);
 
-                // Start UDP proxy to forward WireGuard traffic bidirectionally
-                Console.WriteLine("Starting WireGuard UDP proxy...");
-                udpProxy = new WireGuardUdpProxy(Tunnel.GetUdpClient());
+                    Console.WriteLine("Starting server registration and NAT detection...");
+                    tunnel.Start();
+
+                    // Create UDP proxy for the registration tunnel
+                    Console.WriteLine("Starting WireGuard UDP proxy...");
+                    udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
+
+                    // Also initialize TunnelManager for handling client connections
+                    // Pass the registration tunnel's UDP client so all tunnels share the same port
+                    tunnelManager = new TunnelManager(this, isServer, tunnel.GetUdpClient());
+                    tunnelManager.Start();
+
+                    Console.WriteLine("✓ Server ready: Registration tunnel active, TunnelManager waiting for clients...");
+                }
+                else
+                {
+                    // Client mode: Use single Tunnel instance
+                    Console.WriteLine("Client mode: Initializing single Tunnel...");
+                    tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
+                    tunnel.SetWireGuardTunnel(this);
+
+                    // Start the mediation tunnel to connect to the mediation server
+                    Console.WriteLine("Starting mediation tunnel connection...");
+                    tunnel.Start();
+
+                    // Start UDP proxy to forward WireGuard traffic bidirectionally
+                    Console.WriteLine("Starting WireGuard UDP proxy...");
+                    udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
+
+                    // Set up activity tracking callback
+                    udpProxy.OnPeerActivity = (tunnelIp) =>
+                    {
+                        // Update last activity timestamp for the peer
+                        var peer = peerManager.GetAllPeers().FirstOrDefault(p => p.PrivateAddress.Equals(tunnelIp));
+                        if (peer != null)
+                        {
+                            peer.LastActivity = DateTime.UtcNow;
+                        }
+                    };
+                }
 
                 // Start a task to periodically reset peer endpoints to their correct proxy ports
                 // This prevents WireGuard's endpoint roaming from breaking the proxy
@@ -363,6 +462,63 @@ namespace NATTunnel
                         }
                     }
                 });
+
+                // Peer health monitoring is now handled by TunnelManager
+                // which tracks actual tunnel activity (including keepalives)
+                // This WireGuard-specific check was too aggressive and removed active peers
+                // Leaving code commented for reference
+                /*
+                // Start peer health monitoring task
+                // Removes peers that haven't sent WireGuard traffic in 10 minutes
+                // Note: This is based on WireGuard handshake activity, not tunnel keepalives
+                if (TunnelOptions.IsServer)
+                {
+                    Task.Run(async () =>
+                    {
+                        while (tunnelStarted)
+                        {
+                            await Task.Delay(30000); // Check every 30 seconds
+
+                            var now = DateTime.UtcNow;
+                            // Increased timeout from 120s to 600s (10 minutes) to avoid premature removal
+                            // WireGuard handshakes can be infrequent even with active traffic
+                            var inactivePeers = peerManager.GetAllPeers()
+                                .Where(p => !p.IsPersistent && (now - p.LastActivity).TotalSeconds > 600)
+                                .ToList();
+
+                            foreach (var peer in inactivePeers)
+                            {
+                                Console.WriteLine($"[Health] Removing inactive peer {peer.PrivateAddress} (last activity: {(now - peer.LastActivity).TotalSeconds:F0}s ago)");
+
+                                // Remove from WireGuard
+                                try
+                                {
+                                    var removePsi = new System.Diagnostics.ProcessStartInfo
+                                    {
+                                        FileName = "wg",
+                                        Arguments = $"set {interfaceName} peer {peer.PublicKey} remove",
+                                        UseShellExecute = false,
+                                        RedirectStandardError = true,
+                                        CreateNoWindow = true
+                                    };
+                                    using var proc = System.Diagnostics.Process.Start(removePsi);
+                                    proc.WaitForExit();
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[Health] Error removing peer from WireGuard: {ex.Message}");
+                                }
+
+                                // Remove from proxy
+                                udpProxy?.UnregisterPeer(peer.PrivateAddress);
+
+                                // Remove from peer manager
+                                peerManager.RemovePeer(peer.ConnectionId);
+                            }
+                        }
+                    });
+                }
+                */
 
                 // Check interface connectivity status
                 Task.Run(async () =>
@@ -802,13 +958,19 @@ namespace NATTunnel
 
         public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, bool isPersistent = false)
         {
+            return AddPeer(publicKey, endpoint, isPersistent, null);
+        }
+
+        public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, bool isPersistent, UdpClient tunnelSocket)
+        {
             var peer = peerManager.AddPeer(publicKey, endpoint, isPersistent);
             Console.WriteLine($"✓ Added peer dynamically: {publicKey.Substring(0, 8)}... -> {peer.PrivateAddress} (proxy port: {peer.ProxyPort})");
 
             // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support
+            // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture)
             if (udpProxy != null)
             {
-                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress);
+                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress, tunnelSocket);
             }
 
             // Regenerate config file with new peer
@@ -890,7 +1052,8 @@ namespace NATTunnel
                 }
                 else
                 {
-                    assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.2";
+                    // Use placeholder IP for clients until server assigns actual IP
+                    assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.254";
                     Console.WriteLine($"[DEBUG] Using default IP: {assignedIp}");
                 }
 
@@ -920,13 +1083,19 @@ namespace NATTunnel
 
         public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, bool isPersistent = false)
         {
+            return AddPeer(publicKey, endpoint, privateAddress, isPersistent, null);
+        }
+
+        public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, bool isPersistent, UdpClient tunnelSocket)
+        {
             var peer = peerManager.AddPeer(publicKey, endpoint, privateAddress, isPersistent);
             Console.WriteLine($"✓ Added peer dynamically: {publicKey.Substring(0, 8)}... -> {privateAddress} (proxy port: {peer.ProxyPort})");
 
             // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support
+            // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture)
             if (udpProxy != null)
             {
-                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress);
+                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress, tunnelSocket);
             }
 
             // Update WireGuard-NT configuration dynamically
@@ -1138,6 +1307,33 @@ namespace NATTunnel
 
                 disposedValue = true;
             }
+        }
+
+        /// <summary>
+        /// Handles connection failure by recreating the Tunnel instance
+        /// </summary>
+        private void HandleConnectionFailure()
+        {
+            Console.WriteLine("[WireGuardTunnel] Connection failure detected, recreating tunnel instance...");
+
+            // Dispose old tunnel
+            tunnel = null; // Let GC handle cleanup
+
+            // Wait a bit before recreating
+            Task.Delay(2000).Wait();
+
+            // Create new tunnel instance
+            tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
+            tunnel.SetWireGuardTunnel(this);
+            tunnel.Start();
+
+            // Update UDP proxy to use new tunnel's UDP client
+            if (udpProxy != null)
+            {
+                udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
+            }
+
+            Console.WriteLine("[WireGuardTunnel] Tunnel instance recreated successfully");
         }
 
         public void Dispose()
