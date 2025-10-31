@@ -83,14 +83,12 @@ class NATServer {
         socket.on('data', (data) => this.handleTCPData(data, socket));
 
         socket.on('close', () => {
-            console.log(`Client ${socketInfo.clientID} (${socket.remoteAddress}:${socket.remotePort}) disconnected`);
             this.connectionManager.removeSocket(socket, socketInfo.clientID);
         });
 
         socket.on('error', (err) => {
             // Gracefully handle common disconnection errors
             if (err.code === 'ECONNRESET') {
-                console.log(`Client ${socketInfo.clientID} (${socket.remoteAddress}:${socket.remotePort}) disconnected abruptly`);
                 this.connectionManager.removeSocket(socket, socketInfo.clientID);
             } else {
                 console.error(`Socket error for client ${socketInfo.clientID}:`, err);
@@ -143,7 +141,6 @@ class NATServer {
     }
 
     handleUDPMessage(msg, info) {
-        console.log(`UDP message from ${info.address}:${info.port}`);
         this.connectionManager.updateTimeout(info.address);
         this.connectionManager.addUDPInfo(info.address, info.port);
     }

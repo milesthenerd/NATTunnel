@@ -14,8 +14,6 @@ class MessageHandler {
     handleTCPMessage(message, socket) {
         if (!message) return;
 
-        console.log(`📨 Received TCP message with ID: ${message.ID} (${this.getMessageTypeName(message.ID)})`);
-
         switch (message.ID) {
             case MessageTypes.ServerRegister:
                 this.handleServerRegister(message, socket);
@@ -39,10 +37,7 @@ class MessageHandler {
         const socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
         if (socketInfo) {
             socketInfo.isServer = true;
-            console.log(`✓ Registered server: ${socketInfo.ip}:${socketInfo.tcpPort} (clientID: ${socketInfo.clientID})`);
-            console.log(`   Current isServer flag: ${socketInfo.isServer}`);
-        } else {
-            console.log(`⚠ Could not find socket info for server registration`);
+            console.log(`Registered server: ${socketInfo.ip}:${socketInfo.tcpPort}`);
         }
     }
 
@@ -55,7 +50,6 @@ class MessageHandler {
 
         // Check if this is a per-connection tunnel (server-side tunnel for specific client)
         if (message.ConnectionID) {
-            console.log(`📡 NAT type request from server tunnel for connection ${message.ConnectionID}`);
             // Mark this socket as being for a specific connection
             socketInfo.forConnectionID = message.ConnectionID;
         }
@@ -76,23 +70,14 @@ class MessageHandler {
         // Store client's NAT type from the ConnectionRequest message
         if (clientSocketInfo && message.NATType !== undefined) {
             clientSocketInfo.natType = message.NATType;
-            console.log(`✓ Stored client NAT type: ${message.NATType} for ${clientSocketInfo.ip}`);
         }
 
-        console.log(`🔍 Connection request for: ${requestedIp}`);
-        console.log(`📋 Registered sockets:`);
-        this.connectionManager.sockets.forEach(s => {
-            console.log(`   - IP: ${s.ip}, isServer: ${s.isServer}, clientID: ${s.clientID}`);
-        });
-
-        // Find the registered server
         const serverSocket = this.connectionManager.sockets.find(s =>
             requestedIp.includes(s.ip) && s.isServer
         );
 
         if (!serverSocket) {
             this.sendServerNotAvailable(socket);
-            console.log(`❌ Server not found for IP: ${requestedIp}`);
             return;
         }
 
@@ -106,7 +91,6 @@ class MessageHandler {
 
         if (!clientUDPInfo) {
             this.sendServerNotAvailable(socket);
-            console.log(`❌ No UDP info for client: ${clientSocketInfo.ip}`);
             return;
         }
 
@@ -123,8 +107,7 @@ class MessageHandler {
             connection_start_time: Date.now()
         };
 
-        console.log(`📨 Forwarding connection request to server ${serverSocket.ip} for client ${clientSocketInfo.ip}`);
-        console.log(`   Connection ID: ${connectionId}, Client endpoint: ${clientEndpoint}`);
+        console.log(`New connection ${connectionId}: ${clientSocketInfo.ip} -> ${serverSocket.ip}`);
 
         // Forward the connection request to server's control connection
         const serverMessage = {
@@ -135,36 +118,30 @@ class MessageHandler {
             ClientID: clientSocketInfo.clientID
         };
 
-        console.log(`📤 Sending to server: ${JSON.stringify(serverMessage)}`);
         serverSocket.socket.write(Buffer.from(JSON.stringify(serverMessage)));
 
         // Don't send ConnectionBegin to client yet - wait for the server-side tunnel
         // to complete NAT detection and register its UDP port
-        console.log(`⏳ Waiting for server tunnel to register UDP port for connection ${connectionId}`);
 
         // Set up connection timeout
         setTimeout(() => {
             const pair = this.connectionManager.currentConnectionPairs[connectionId];
             if (pair && (!pair.server_connected || !pair.client_connected)) {
-                console.log(`⏱ Connection ${connectionId} timed out`);
+                console.log(`Connection ${connectionId} timed out`);
                 this.handleConnectionTimeout(connectionId);
             }
         }, 30000); // 30 second timeout
     }
 
     handleServerTunnelReady(connectionId, serverSocketInfo, natType) {
-        console.log(`📡 Server tunnel ready for connection ${connectionId}`);
-
         const pair = this.connectionManager.currentConnectionPairs[connectionId];
         if (!pair) {
-            console.log(`⚠ Connection ${connectionId} not found`);
             return;
         }
 
         // Update the connection pair with the actual per-client tunnel's clientID
         // (not the TunnelManager's clientID that was stored initially)
         pair.server_clientID = serverSocketInfo.clientID;
-        console.log(`✓ Updated server_clientID to: ${serverSocketInfo.clientID}`);
 
         // Get server tunnel's UDP info - use the most recent UDP info from this IP
         // Since the server tunnel just completed NAT detection, its UDP port should be the latest
@@ -173,19 +150,16 @@ class MessageHandler {
         );
 
         if (allServerUDPInfo.length === 0) {
-            console.log(`⚠ No UDP info for server tunnel: ${serverSocketInfo.ip}`);
             return;
         }
 
         // Get the most recently added (last) entry for this IP - that's the server tunnel's port
         const serverUDPInfo = allServerUDPInfo[allServerUDPInfo.length - 1];
         const serverEndpoint = `${serverSocketInfo.ip}:${serverUDPInfo.port}`;
-        console.log(`✓ Server tunnel endpoint: ${serverEndpoint} (from ${allServerUDPInfo.length} UDP entries)`);
 
         // Find the waiting client
         const clientSocketInfo = this.connectionManager.sockets.find(s => s.clientID === pair.client_clientID);
         if (!clientSocketInfo) {
-            console.log(`⚠ Could not find client socket for connection ${connectionId}`);
             return;
         }
 
@@ -195,7 +169,6 @@ class MessageHandler {
         );
 
         if (!clientUDPInfo) {
-            console.log(`⚠ No UDP info for client: ${clientSocketInfo.ip}`);
             return;
         }
 
@@ -205,7 +178,7 @@ class MessageHandler {
         const clientNatType = clientSocketInfo.natType !== undefined ? clientSocketInfo.natType : -1;
 
         if (clientNatType === -1) {
-            console.log(`⚠ Warning: Client NAT type not available for connection ${connectionId}`);
+            console.log(`Warning: Client NAT type not available for connection ${connectionId}`);
         }
 
         // Send ConnectionBegin to client with server's tunnel endpoint
@@ -217,7 +190,7 @@ class MessageHandler {
             IsServer: false
         };
 
-        console.log(`📤 Sending ConnectionBegin to client: ${JSON.stringify(clientMessage)}`);
+        console.log(`Sending ConnectionBegin to client`);
         clientSocketInfo.socket.write(Buffer.from(JSON.stringify(clientMessage)));
 
         // Also send ConnectionBegin to server tunnel with client's endpoint
@@ -229,7 +202,7 @@ class MessageHandler {
             IsServer: true
         };
 
-        console.log(`📤 Sending ConnectionBegin to server tunnel: ${JSON.stringify(serverMessage)}`);
+        console.log(`Sending ConnectionBegin to server tunnel`);
         serverSocketInfo.socket.write(Buffer.from(JSON.stringify(serverMessage)));
     }
 
@@ -256,22 +229,18 @@ class MessageHandler {
         const serverSocket = this.connectionManager.sockets.find(s => s.clientID === pair.server_clientID);
         const clientSocket = this.connectionManager.sockets.find(s => s.clientID === pair.client_clientID);
 
-        console.log(`📤 Completing connection ${connectionId}`);
-        console.log(`   Server clientID: ${pair.server_clientID}, found: ${!!serverSocket}`);
-        console.log(`   Client clientID: ${pair.client_clientID}, found: ${!!clientSocket}`);
+        console.log(`Completing connection ${connectionId}`);
 
         if (serverSocket) {
             serverSocket.socket.write(Buffer.from(JSON.stringify({
                 ID: MessageTypes.ConnectionComplete
             })));
-            console.log(`   ✓ Sent ConnectionComplete to server tunnel`);
         }
 
         if (clientSocket) {
             clientSocket.socket.write(Buffer.from(JSON.stringify({
                 ID: MessageTypes.ConnectionComplete
             })));
-            console.log(`   ✓ Sent ConnectionComplete to client`);
         }
 
         // Reset connection status
@@ -285,16 +254,15 @@ class MessageHandler {
     handleConnectionTimeout(connectionId) {
         const pair = this.connectionManager.currentConnectionPairs[connectionId];
         if (!pair) {
-            console.log(`⚠ ConnectionTimeout for unknown connection ID: ${connectionId}`);
+            console.log(`ConnectionTimeout for unknown connection ID: ${connectionId}`);
             return;
         }
 
-        console.log(`⏱ Connection ${connectionId} timed out - freeing server/client`);
+        console.log(`Connection ${connectionId} timed out`);
 
         // Reset connection status for both server and client IPs
         this.connectionManager.udpConnectionInfo.forEach((info, index) => {
             if (pair.server_info.includes(info.ip) || pair.client_info.includes(info.ip)) {
-                console.log(`  └─ Freeing ${info.ip}:${info.port} (was Busy for connection ${connectionId})`);
                 info.status.type = StatusTypes.Free;
             }
         });

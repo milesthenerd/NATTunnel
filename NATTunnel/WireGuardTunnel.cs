@@ -694,11 +694,6 @@ namespace NATTunnel
                     throw new Exception($"Private key must be exactly 32 bytes (got {privateKey?.Length ?? 0})");
                 }
 
-                Console.WriteLine($"[DEBUG] Configuring with:");
-                Console.WriteLine($"  Private Key: {Convert.ToBase64String(privateKey).Substring(0, 8)}... ({privateKey.Length} bytes)");
-                Console.WriteLine($"  Private Key (hex): {BitConverter.ToString(privateKey).Replace("-", " ")}");
-                Console.WriteLine($"  Peers Count: 0");
-
                 // Build configuration structure - use ONLY HAS_PRIVATE_KEY flag like the official example
                 // Official example: .Flags = WIREGUARD_INTERFACE_HAS_PRIVATE_KEY, .PeersCount = 1
                 // NO LISTEN_PORT or PUBLIC_KEY flags!
@@ -734,48 +729,16 @@ namespace NATTunnel
                     Marshal.WriteInt32(configPtr, offset, (int)peersCount);
                     offset += 4;
 
-                    Console.WriteLine($"[DEBUG] Manual structure size: {size} bytes (offset check: {offset})");
-                    Console.WriteLine($"[DEBUG] Flags: 0x{flags:X}");
-                    Console.WriteLine($"[DEBUG] Dumping entire {size}-byte config:");
-                    for (int i = 0; i < size; i++)
-                    {
-                        byte b = Marshal.ReadByte(configPtr, i);
-                        Console.Write($"{b:X2} ");
-                        if ((i + 1) % 16 == 0) Console.WriteLine();
-                    }
-                    Console.WriteLine();
-
                     // Apply configuration
-                    Console.WriteLine($"[DEBUG] Calling WireGuardSetConfiguration(adapter={wireguardAdapter}, config={configPtr}, size={size})");
-                    
-                    // Check adapter state before configuration
-                    WireGuardNTAPI.WireGuardGetAdapterState(wireguardAdapter, out var stateBefore);
-                    Console.WriteLine($"[DEBUG] Adapter state before config: {stateBefore}");
-                    
                     bool success = WireGuardNTAPI.WireGuardSetConfiguration(wireguardAdapter, configPtr, (uint)size);
                     
                     if (!success)
                     {
                         int error = Marshal.GetLastWin32Error();
-                        Console.WriteLine($"[DEBUG] WireGuardSetConfiguration failed with error {error}");
-                        
-                        // Error 87 = ERROR_INVALID_PARAMETER
-                        if (error == 87)
-                        {
-                            Console.WriteLine($"[DEBUG] ERROR_INVALID_PARAMETER");
-                            Console.WriteLine($"[DEBUG] Dumping first 16 bytes of config:");
-                            for (int i = 0; i < Math.Min(16, size); i++)
-                            {
-                                byte b = Marshal.ReadByte(configPtr, i);
-                                Console.Write($"{b:X2} ");
-                            }
-                            Console.WriteLine();
-                        }
-                        
                         throw new Exception($"Failed to set WireGuard-NT configuration (Error: {error})");
                     }
 
-                    Console.WriteLine("✓ WireGuard-NT interface configured with private key and listen port 51820");
+                    Console.WriteLine("WireGuard-NT interface configured");
                 }
                 finally
                 {
