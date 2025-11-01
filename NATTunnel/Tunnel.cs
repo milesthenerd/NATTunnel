@@ -359,7 +359,6 @@ public class Tunnel : IDisposable
         if (!connected || isServer)
         {
             udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
-            Console.WriteLine("Sent");
         }
         //If connected to remote endpoint, send keep alive message
         if (isServer)

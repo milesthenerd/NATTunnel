@@ -398,6 +398,11 @@ internal class PeerProxyListener : IDisposable
 
                         await socketToUse.SendAsync(result.Buffer, targetEndpoint, token);
                     }
+                    catch (ObjectDisposedException)
+                    {
+                        // Socket was disposed (tunnel closed), stop silently
+                        break;
+                    }
                     catch (Exception ex)
                     {
                         Console.WriteLine($"[PeerProxy:{proxyPort}] Error sending packet: {ex.Message}");

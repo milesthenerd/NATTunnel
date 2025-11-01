@@ -73,7 +73,7 @@ namespace NATTunnel
                 controlTcpClient.Connect(mediationEndpoint);
                 controlStream = controlTcpClient.GetStream();
 
-                Console.WriteLine($"[TunnelManager] ✓ Control connection established to {mediationEndpoint}");
+                Console.WriteLine($"[TunnelManager] Control connection established to {mediationEndpoint}");
 
                 // Start control message listener
                 controlCancellation = new CancellationTokenSource();
@@ -82,17 +82,16 @@ namespace NATTunnel
                 // Register as server with mediation server
                 MediationMessage registerMsg = new MediationMessage(MediationMessageType.ServerRegister);
                 string serialized = registerMsg.Serialize();
-                Console.WriteLine($"[TunnelManager] 📤 Sending ServerRegister message: {serialized}");
                 byte[] sendBuffer = Encoding.ASCII.GetBytes(serialized);
                 controlStream.Write(sendBuffer, 0, sendBuffer.Length);
 
-                Console.WriteLine("[TunnelManager] ✓ Registered as server with mediation server");
+                Console.WriteLine("[TunnelManager] Registered as server with mediation server");
 
                 // Start health check timer for tunnel cleanup
                 healthCheckTimer = new Timer(PerformHealthCheck, null,
                     (int)healthCheckInterval.TotalMilliseconds,
                     (int)healthCheckInterval.TotalMilliseconds);
-                Console.WriteLine($"[TunnelManager] ✓ Health check timer started (interval: {healthCheckInterval.TotalSeconds}s, timeout: {inactivityTimeout.TotalMinutes}min)");
+                Console.WriteLine($"[TunnelManager] Health check timer started (interval: {healthCheckInterval.TotalSeconds}s, timeout: {inactivityTimeout.TotalMinutes}min)");
 
                 isRunning = true;
             }
@@ -158,13 +157,12 @@ namespace NATTunnel
         /// </summary>
         private void HandleControlMessage(MediationMessage message)
         {
-            Console.WriteLine($"[TunnelManager] 📨 Received control message ID: {message.ID}");
+            Console.WriteLine($"[TunnelManager] Received control message: {message.ID}");
 
             switch (message.ID)
             {
                 case MediationMessageType.ConnectionRequest:
                     // A client wants to connect - spin up a dedicated tunnel for this connection
-                    Console.WriteLine($"[TunnelManager] ✓ Processing ConnectionRequest");
                     HandleConnectionRequest(message);
                     break;
 
@@ -321,9 +319,7 @@ namespace NATTunnel
                         // Check if tunnel has been inactive for too long
                         if (timeSinceActivity > inactivityTimeout)
                         {
-                            Console.WriteLine($"[TunnelManager] 🔍 Tunnel {connectionId} inactive for {timeSinceActivity.TotalMinutes:F1} minutes");
-                            Console.WriteLine($"[TunnelManager]    Stats: {stats.BytesReceived} bytes received, {stats.BytesSent} bytes sent");
-                            Console.WriteLine($"[TunnelManager]    Last activity: {stats.LastActivity:yyyy-MM-dd HH:mm:ss} UTC");
+                            Console.WriteLine($"[TunnelManager] Tunnel {connectionId} inactive for {timeSinceActivity.TotalMinutes:F1} minutes - removing");
                             inactiveTunnels.Add(connectionId);
                         }
                     }
@@ -332,7 +328,6 @@ namespace NATTunnel
                 // Remove inactive tunnels (outside the lock to avoid deadlock)
                 foreach (int connectionId in inactiveTunnels)
                 {
-                    Console.WriteLine($"[TunnelManager] ⚠ Removing inactive tunnel {connectionId} (no activity for {inactivityTimeout.TotalMinutes} minutes)");
                     RemoveTunnel(connectionId);
                 }
 
@@ -384,7 +379,7 @@ namespace NATTunnel
                         activeTunnels.Clear();
                     }
 
-                    Console.WriteLine("[TunnelManager] ✓ Disposed");
+                    Console.WriteLine("[TunnelManager] Disposed");
                 }
 
                 disposedValue = true;
