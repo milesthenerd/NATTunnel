@@ -70,8 +70,14 @@ public class Tunnel : IDisposable
     private DateTime lastActivityTime; // Track last time this tunnel had any activity
     private long totalBytesReceived = 0; // Track total bytes received for activity monitoring
     private long totalBytesSent = 0; // Track total bytes sent for activity monitoring
+    private bool meshPeerMode = false; // True if this is a mesh peer-to-peer connection
+    private IPEndPoint meshPeerEndpoint = null; // The peer's endpoint in mesh mode
+    private bool retryInPlace = false; // If true, retry like server (don't recreate tunnel)
+    private bool skipTcpConnection = false; // If true, don't create TCP connection (mesh tunnels managed by mesh mode)
+    private IPAddress ownMeshIP = null; // Our own mesh IP (for mesh mode)
+    private IPAddress peerMeshIP = null; // Remote peer's mesh IP (for mesh mode)
 
-    public Tunnel(Action onConnectionFailure = null, bool managedByTunnelManager = false, int connectionId = 0, UdpClient sharedUdpClient = null)
+    public Tunnel(Action onConnectionFailure = null, bool managedByTunnelManager = false, int connectionId = 0, UdpClient sharedUdpClient = null, bool meshPeerMode = false, string meshPeerEndpoint = null, bool retryInPlace = false, bool? isServerOverride = null, Guid? sharedClientID = null, bool skipTcpConnection = false, string ownMeshIP = null)
     {
         // Initialize all fields that need initialization
         connectionTimeout = maxConnectionTimeout;
@@ -83,12 +89,17 @@ public class Tunnel : IDisposable
         rsaKeyInfoServer = new RSAParameters();
         symmetricKey = new byte[32];
         shaHashGen = SHA256.Create();
-        clientID = Guid.NewGuid();
+        // Use shared clientID if provided (for mesh tunnels to share ID with mesh mode)
+        // Otherwise generate a new one
+        clientID = sharedClientID ?? Guid.NewGuid();
 
         this.onConnectionFailure = onConnectionFailure;
         this.isManagedByTunnelManager = managedByTunnelManager;
         this.assignedConnectionID = connectionId;
         this.lastActivityTime = DateTime.UtcNow; // Initialize activity tracking
+        this.meshPeerMode = meshPeerMode;
+        this.retryInPlace = retryInPlace;
+        this.skipTcpConnection = skipTcpConnection;
 
         RandomNumberGenerator.Fill(symmetricKey);
 
@@ -96,9 +107,30 @@ public class Tunnel : IDisposable
 
         endpoint = TunnelOptions.MediationEndpoint;
         remoteIp = TunnelOptions.RemoteIp;
-        isServer = TunnelOptions.IsServer;
-        if (isServer) privateIP = IPAddress.Parse("10.5.0.0");
-        if (!isServer) privateIP = IPAddress.Parse("10.5.0.255");
+        // Use override if provided, otherwise use global setting
+        isServer = isServerOverride ?? TunnelOptions.IsServer;
+
+        // Set mesh IP if provided, otherwise use default client/server IPs
+        if (ownMeshIP != null)
+        {
+            this.ownMeshIP = IPAddress.Parse(ownMeshIP);
+            privateIP = this.ownMeshIP;  // Use mesh IP as our private IP
+        }
+        else
+        {
+            if (isServer) privateIP = IPAddress.Parse("10.5.0.0");
+            if (!isServer) privateIP = IPAddress.Parse("10.5.0.255");
+        }
+
+        // Parse mesh peer endpoint if provided
+        if (meshPeerMode && meshPeerEndpoint != null)
+        {
+            var parts = meshPeerEndpoint.Split(':');
+            if (parts.Length == 2 && IPAddress.TryParse(parts[0], out var peerIp) && int.TryParse(parts[1], out var peerPort))
+            {
+                this.meshPeerEndpoint = new IPEndPoint(peerIp, peerPort);
+            }
+        }
 
         // Note: WireGuardTunnel is now initialized externally in WireGuardTunnel.InitializeTunnel()
         // to avoid duplicate initialization
@@ -355,6 +387,7 @@ public class Tunnel : IDisposable
         MediationMessage message = new MediationMessage(MediationMessageType.KeepAlive);
         message.ClientID = clientID;
         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+
         //If not connected to remote endpoint, send remote IP to mediator
         if (!connected || isServer)
         {
@@ -435,15 +468,16 @@ public class Tunnel : IDisposable
                         {
                             Console.WriteLine($"Retrying connection (attempt {retryAttempt + 1}/{maxRetryAttempts})...");
 
-                            // Only clients should recreate tunnel instance, servers just reset state
-                            if (!isServer)
+                            // Clients recreate tunnel instance, servers (and retryInPlace tunnels) reset state
+                            if (!isServer && !retryInPlace)
                             {
                                 Console.WriteLine($"Creating new tunnel instance with fresh connection ID...");
                                 onConnectionFailure?.Invoke();
                             }
                             else
                             {
-                                // Server just resets connection state
+                                // Server or mesh peer - just reset connection state and retry
+                                Console.WriteLine($"Resetting connection state and retrying...");
                                 connectionTimeout = maxConnectionTimeout;
                                 holePunchReceivedCount = 0;
                                 connectionAttempt.Enabled = true;
@@ -474,6 +508,16 @@ public class Tunnel : IDisposable
             Console.WriteLine($"[Tunnel {assignedConnectionID}] Starting as managed tunnel (server-side)");
             // Just start the UDP server listen loop - no NAT detection needed
             UdpServer();
+            return;
+        }
+
+        // If skipTcpConnection is true (mesh mode), don't create TCP connection
+        // Mesh mode handles TCP coordination and will inject messages as needed
+        if (skipTcpConnection)
+        {
+            Console.WriteLine($"[Tunnel {assignedConnectionID}] Starting in mesh mode (no TCP connection)");
+            // Just wait for messages to be injected from mesh mode
+            // UDP receive loop will be started when ConnectionBegin is processed
             return;
         }
 
@@ -543,11 +587,13 @@ public class Tunnel : IDisposable
     {
         //Init an IPEndPoint that will be populated with the sender's info
         int randID = new Random().Next();
+        Console.WriteLine($"[UdpClientListenLoop] STARTED with randID={randID}, udpClient.LocalEndPoint={((IPEndPoint)udpClient.Client.LocalEndPoint).Port}");
 
         IPEndPoint listenEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
         while (!token.IsCancellationRequested)
         {
             byte[] receiveBuffer = udpClient.Receive(ref listenEndpoint) ?? throw new ArgumentNullException(nameof(udpClient), "udpClient.Receive(ref listenEP)");
+            Console.WriteLine($"[UdpClientListenLoop {randID}] Received {receiveBuffer.Length} bytes from {listenEndpoint}");
 
             // Track activity
             totalBytesReceived += receiveBuffer.Length;
@@ -589,6 +635,12 @@ public class Tunnel : IDisposable
 
             Console.WriteLine($"Received UDP: {receiveBuffer.Length} bytes from {listenEndpoint.Address}:{listenEndpoint.Port}");
 
+            // Update target peer port if we're receiving from the correct IP but different port (Symmetric NAT port switching)
+            if (Equals(listenEndpoint.Address, targetPeerIp) && listenEndpoint.Port != targetPeerPort)
+            {
+                targetPeerPort = listenEndpoint.Port;
+            }
+
             if (Equals(listenEndpoint.Address, targetPeerIp))
             {
                 Console.WriteLine("pog");
@@ -629,6 +681,12 @@ public class Tunnel : IDisposable
                         byte[] _sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(_sendBuffer, _sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
+                    else if (hasServerPublicKey && !serverHasSymmetricKey)
+                    {
+                        message = new MediationMessage(MediationMessageType.SymmetricKeyRequest);
+                        byte[] _sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(_sendBuffer, _sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    }
                     break;
                 case MediationMessageType.PublicKeyRequest:
                     message = new MediationMessage(MediationMessageType.PublicKeyResponse);
@@ -637,7 +695,7 @@ public class Tunnel : IDisposable
                     message.ModulusHash = shaHashGen.ComputeHash(message.Modulus);
                     message.ExponentHash = shaHashGen.ComputeHash(message.Exponent);
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                    udpClient.Send(sendBuffer, sendBuffer.Length, listenEndpoint);
                     break;
                 case MediationMessageType.PublicKeyResponse:
                     if (StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.ModulusHash, shaHashGen.ComputeHash(receivedMessage.Modulus)) &&
@@ -655,7 +713,22 @@ public class Tunnel : IDisposable
                         message.SymmetricKey = rsaServer.Encrypt(symmetricKey, RSAEncryptionPadding.Pkcs1);
                         message.SymmetricKeyHash = shaHashGen.ComputeHash(message.SymmetricKey);
                         byte[] _s = Encoding.ASCII.GetBytes(message.Serialize());
-                        udpClient.Send(_s, _s.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                        udpClient.Send(_s, _s.Length, listenEndpoint);
+                    }
+                    break;
+                case MediationMessageType.SymmetricKeyResponse:
+                    {
+                        if (StructuralComparisons.StructuralEqualityComparer.Equals(receivedMessage.SymmetricKeyHash, shaHashGen.ComputeHash(receivedMessage.SymmetricKey)))
+                        {
+                            byte[] decryptedKey = rsa.Decrypt(receivedMessage.SymmetricKey, RSAEncryptionPadding.Pkcs1);
+                            aes?.Dispose();
+                            aes = new AesGcm(decryptedKey, AesGcm.TagByteSizes.MaxSize);
+                            serverHasSymmetricKey = true;
+
+                            message = new MediationMessage(MediationMessageType.SymmetricKeyConfirm);
+                            byte[] confirmBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                            udpClient.Send(confirmBuffer, confirmBuffer.Length, listenEndpoint);
+                        }
                     }
                     break;
                 case MediationMessageType.SymmetricKeyConfirm:
@@ -668,7 +741,7 @@ public class Tunnel : IDisposable
                             Console.WriteLine($"Symmetric key confirmed! Client has IP: {privateIP}");
                             clientIPAssigned = true;
 
-                            // Client: derive and send WireGuard public key to server
+                            // Client: derive and send WireGuard public key to peer
                             try
                             {
                                 string configPath = wireguardTunnel.GetConfigPath();
@@ -677,12 +750,20 @@ public class Tunnel : IDisposable
                                 message = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
                                 message.WireGuardPublicKey = clientWgPublicKey;
                                 message.WireGuardPublicKeyHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(clientWgPublicKey));
+
+                                // Include our mesh IP so peer knows what IP to use when adding us
+                                if (privateIP != null)
+                                {
+                                    message.SetPrivateAddress(privateIP);
+                                    Console.WriteLine($"Sending our mesh IP: {privateIP}");
+                                }
+
                                 byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(message.Serialize());
 
                                 var serverEndpoint = new IPEndPoint(targetPeerIp, targetPeerPort);
                                 udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, serverEndpoint);
 
-                                Console.WriteLine($"Sent WireGuard public key to server");
+                                Console.WriteLine($"Sent WireGuard public key to peer");
                             }
                             catch (Exception wgEx)
                             {
@@ -693,17 +774,26 @@ public class Tunnel : IDisposable
                     break;
                 case MediationMessageType.WireGuardPublicKeyExchange:
                     {
-                        // Client: receive server's WireGuard public key
+                        // Client: receive peer's WireGuard public key
 
-                        // CRITICAL: Server may have corrected our IP (e.g., reconnection with existing peer)
-                        // Update privateIP before we configure the interface
+                        // In client/server mode: Server may have corrected our IP
+                        // In mesh mode: Message contains peer's mesh IP (don't overwrite our own!)
                         if (receivedMessage.PrivateAddressString != null && !string.IsNullOrEmpty(receivedMessage.PrivateAddressString))
                         {
-                            var serverAssignedIP = receivedMessage.GetPrivateAddress();
-                            if (serverAssignedIP != null && !serverAssignedIP.Equals(privateIP))
+                            var receivedIP = receivedMessage.GetPrivateAddress();
+
+                            // Only update our own IP in client/server mode (when we don't have mesh IPs set)
+                            if (ownMeshIP == null && peerMeshIP == null && receivedIP != null && !receivedIP.Equals(privateIP))
                             {
-                                Console.WriteLine($"Server assigned IP {serverAssignedIP}");
-                                privateIP = serverAssignedIP;
+                                // Client/server mode: Server is assigning us an IP
+                                Console.WriteLine($"Server assigned IP {receivedIP}");
+                                privateIP = receivedIP;
+                            }
+                            else if (peerMeshIP == null && receivedIP != null)
+                            {
+                                // Mesh mode: This is the peer's mesh IP, store it
+                                peerMeshIP = receivedIP;
+                                Console.WriteLine($"Received peer's mesh IP in WireGuard exchange: {peerMeshIP}");
                             }
                         }
 
@@ -714,15 +804,16 @@ public class Tunnel : IDisposable
 
                             if (hashMatches)
                             {
-                                Console.WriteLine($"Received server's WireGuard public key");
+                                Console.WriteLine($"Received peer's WireGuard public key");
 
-                                // FIRST: Update client tunnel with the final confirmed IP
-                                // This must happen BEFORE adding the peer, as the interface needs the correct IP
-                                if (wireguardTunnel != null && privateIP != null)
+                                // FIRST: Update client tunnel with the final confirmed IP (client/server mode only)
+                                // In mesh mode, skip this since our IP is already set correctly
+                                if (ownMeshIP == null && wireguardTunnel != null && privateIP != null)
                                 {
                                     try
                                     {
-                                        wireguardTunnel.SetClientIPAndRestart(privateIP.ToString());
+                                        // Client/server mode uses /24 netmask (server controls 10.5.0.0/24 subnet)
+                                        wireguardTunnel.SetClientIPAndRestart(privateIP.ToString(), 24);
                                         Console.WriteLine("Updated tunnel with confirmed IP");
                                     }
                                     catch (Exception ex)
@@ -730,8 +821,13 @@ public class Tunnel : IDisposable
                                         Console.WriteLine($"Could not update tunnel IP: {ex.Message}");
                                     }
                                 }
+                                else if (ownMeshIP != null)
+                                {
+                                    Console.WriteLine($"Mesh mode: Skipping IP update (already set to {privateIP})");
+                                }
 
                                 // SECOND: Store server's WireGuard public key by adding it as a peer
+                                Console.WriteLine($"[AddPeer] Pre-check: wireguardTunnel={(wireguardTunnel != null ? "set" : "NULL")}, targetPeerIp={targetPeerIp}, targetPeerPort={targetPeerPort}");
                                 if (wireguardTunnel != null && targetPeerIp != null && targetPeerPort != 0)
                                 {
                                     bool peerAddedSuccessfully = false;
@@ -740,11 +836,34 @@ public class Tunnel : IDisposable
                                         // Use the actual NAT-traversed endpoint established by mediation
                                         var serverEndpoint = new IPEndPoint(targetPeerIp, targetPeerPort);
 
-                                        // Add server as a peer with its public key and known tunnel IP (10.5.0.1)
+                                        // Determine peer's tunnel IP
+                                        // In mesh mode, use the stored peer mesh IP from ConnectionBegin
+                                        // In client/server mode, use hardcoded 10.5.0.1 or message's PrivateAddressString
+                                        Console.WriteLine($"[AddPeer] Determining tunnel IP: peerMeshIP={(peerMeshIP != null ? peerMeshIP.ToString() : "null")}, ownMeshIP={(ownMeshIP != null ? ownMeshIP.ToString() : "null")}, messagePrivateAddr={(receivedMessage.PrivateAddressString ?? "null")}");
+                                        IPAddress serverTunnelIp;
+                                        if (peerMeshIP != null)
+                                        {
+                                            // Mesh mode: Use peer's mesh IP from ConnectionBegin
+                                            serverTunnelIp = peerMeshIP;
+                                            Console.WriteLine($"[AddPeer] Using peer's mesh IP from ConnectionBegin: {serverTunnelIp}");
+                                        }
+                                        else if (!string.IsNullOrEmpty(receivedMessage.PrivateAddressString))
+                                        {
+                                            // Client/server mode: Server-assigned IP from message
+                                            serverTunnelIp = IPAddress.Parse(receivedMessage.PrivateAddressString);
+                                            Console.WriteLine($"Using server-assigned IP from message: {serverTunnelIp}");
+                                        }
+                                        else
+                                        {
+                                            // Fallback: Hardcoded server IP
+                                            serverTunnelIp = IPAddress.Parse("10.5.0.1");
+                                            Console.WriteLine($"Using hardcoded server IP: {serverTunnelIp}");
+                                        }
+
+                                        // Add peer with their public key and tunnel IP
                                         // Pass our tunnel socket for proxy routing
-                                        var serverTunnelIp = IPAddress.Parse("10.5.0.1");
                                         var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, serverEndpoint, serverTunnelIp, true, udpClient);
-                                        Console.WriteLine($"Added server peer: {serverPeer.PrivateAddress}");
+                                        Console.WriteLine($"Added peer: {serverPeer.PrivateAddress}");
                                         peerAddedSuccessfully = true;
                                     }
                                     catch (Exception ex)
@@ -974,11 +1093,28 @@ public class Tunnel : IDisposable
                                 byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                                 udpClient.Send(sendBuffer, sendBuffer.Length, c.GetEndPoint());
 
-                                // Server: restart WireGuard tunnel with the client's assigned IP
-                                if (isServer && wireguardTunnel != null)
+                                // Mesh mode (both peers are clients): Send our WireGuard key after symmetric key exchange
+                                if (!isServer && !clientIPAssigned && wireguardTunnel != null && privateIP != null && ownMeshIP != null)
                                 {
-                                    Console.WriteLine($"Client symmetric key received. Will add peer after receiving public key: {c.GetPrivateAddress()}");
-                                    // Note: Peer will be added when we receive the WireGuard public key
+                                    clientIPAssigned = true;
+
+                                    try
+                                    {
+                                        string configPath = wireguardTunnel.GetConfigPath();
+                                        string clientWgPublicKey = WireGuardConfig.GetPublicKeyFromConfig(configPath);
+
+                                        message = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
+                                        message.WireGuardPublicKey = clientWgPublicKey;
+                                        message.WireGuardPublicKeyHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(clientWgPublicKey));
+                                        message.SetPrivateAddress(privateIP);
+
+                                        byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                                        udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, c.GetEndPoint());
+                                    }
+                                    catch (Exception wgEx)
+                                    {
+                                        Console.WriteLine($"Error sending WireGuard public key: {wgEx.Message}");
+                                    }
                                 }
                             }
                         }
@@ -989,9 +1125,6 @@ public class Tunnel : IDisposable
                         if (isServer)
                         {
                             // Server: receive client's WireGuard public key
-                            Console.WriteLine($"[DEBUG] Server received WireGuardPublicKeyExchange from {listenEndpoint}");
-                            Console.WriteLine($"[DEBUG] Client lookup: c={c}, c.HasWireGuardPublicKey={c?.HasWireGuardPublicKey}");
-
                             if (c == null)
                             {
                                 Console.WriteLine($"⚠ Cannot add WireGuard peer: Client not found for endpoint {listenEndpoint}");
@@ -1250,26 +1383,33 @@ public class Tunnel : IDisposable
 
                 void TryConnectFromSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if (holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
-                    {
-                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
-                        {
-                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
-                        }
-                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                        Console.WriteLine(udpClient.Client.LocalEndPoint);
-                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
-                    }
+                    Console.WriteLine($"[TryConnectFromSymmetric] Called. holePunchReceivedCount={holePunchReceivedCount}, probes={symmetricConnectionUdpProbes.Count}");
 
-                    if (holePunchReceivedCount < 1)
+                    // For symmetric NAT, ALWAYS send from all 256 probes until connection is confirmed
+                    // Don't switch to shared client just because we received packets - we need to keep
+                    // sending from all probes so the remote peer can receive from the successful probe
+                    if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
+                        Console.WriteLine($"[TryConnectFromSymmetric] Sending from {symmetricConnectionUdpProbes.Count} probe clients to {targetPeerIp}:{targetPeerPort}");
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         foreach (UdpClient probe in symmetricConnectionUdpProbes)
                         {
                             probe.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                         }
+                        Console.WriteLine($"[TryConnectFromSymmetric] Sent from all {symmetricConnectionUdpProbes.Count} probes");
+                    }
+                    else
+                    {
+                        // Connection confirmed - send from shared client
+                        Console.WriteLine($"[TryConnectFromSymmetric] Connection confirmed, sending from shared UDP client");
+                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
+                        {
+                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
+                        }
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
                 }
 
@@ -1406,12 +1546,32 @@ public class Tunnel : IDisposable
                                 retryAttempt = 0;  // Reset retry counter for new connection attempt
                                 initialConnectionTimer.Enabled = true;
                                 currentConnectionID = receivedMessage.ConnectionID;
-                                Console.WriteLine($"[ConnectionBegin] Set currentConnectionID = {currentConnectionID}, isServer = {isServer}");
+
+                                // Store peer's mesh IP for WireGuard peer addition
+                                if (!string.IsNullOrEmpty(receivedMessage.PrivateAddressString))
+                                {
+                                    peerMeshIP = IPAddress.Parse(receivedMessage.PrivateAddressString);
+                                }
+
+                                // For mesh tunnels, server skips NAT detection and sends our NAT type in OwnNATType field
+                                if (receivedMessage.OwnNATType.HasValue && natType == NATType.Unknown)
+                                {
+                                    natType = receivedMessage.OwnNATType.Value;
+
+                                    // Start UDP listening if not already started (mesh tunnels skip NATTypeResponse)
+                                    if (!isServer && !udpClientTaskCancellationToken.IsCancellationRequested)
+                                    {
+                                        UdpClient();
+                                    }
+                                }
+
                                 if (natType == NATType.Symmetric)
                                 {
+                                    Console.WriteLine($"[Symmetric NAT] Our NAT is Symmetric, setting up 256 probe clients");
                                     IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
                                     targetPeerIp = targetPeerEndpoint.Address;
                                     targetPeerPort = targetPeerEndpoint.Port;
+                                    Console.WriteLine($"[Symmetric NAT] Target peer: {targetPeerIp}:{targetPeerPort}");
 
                                     connectionAttempt = new Timer(1000)
                                     {
@@ -1419,6 +1579,7 @@ public class Tunnel : IDisposable
                                         Enabled = false
                                     };
                                     connectionAttempt.Elapsed += TryConnectFromSymmetric;
+                                    Console.WriteLine($"[Symmetric NAT] Created timer with TryConnectFromSymmetric handler");
 
                                     while (symmetricConnectionUdpProbes.Count < 256)
                                     {
@@ -1481,7 +1642,9 @@ public class Tunnel : IDisposable
                                         symmetricConnectionUdpProbes.Add(tempUdpClient);
                                     }
 
+                                    Console.WriteLine($"[Symmetric NAT] Created {symmetricConnectionUdpProbes.Count} probe UDP clients");
                                     connectionAttempt.Enabled = true;
+                                    Console.WriteLine($"[Symmetric NAT] Timer enabled, will send from all {symmetricConnectionUdpProbes.Count} probes");
                                 }
 
                                 if (receivedMessage.NATType == NATType.Symmetric)
@@ -1635,6 +1798,18 @@ public class Tunnel : IDisposable
     public (long BytesReceived, long BytesSent, DateTime LastActivity) GetActivityStats()
     {
         return (totalBytesReceived, totalBytesSent, lastActivityTime);
+    }
+
+    /// <summary>
+    /// Notify tunnel that connection is complete (called by mesh mode when it receives ConnectionComplete)
+    /// </summary>
+    public void NotifyConnectionComplete()
+    {
+        Console.WriteLine($"[Tunnel {assignedConnectionID}] NotifyConnectionComplete called");
+        connected = true;
+        initialConnectionTimer.Enabled = false;
+        retryAttempt = 0;  // Reset retry counter on successful connection
+        Console.WriteLine($"[Tunnel {assignedConnectionID}] Connection marked complete");
     }
 
     /// <summary>

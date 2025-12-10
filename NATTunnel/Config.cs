@@ -50,6 +50,11 @@ public static class Config
     /// </summary>
     private const string WhitelistedPorts = "whitelistedPorts";
 
+    /// <summary>
+    /// Text string for "networkID" in the config (for mesh networking).
+    /// </summary>
+    private const string NetworkID = "networkID";
+
     #endregion
 
     /// <summary>
@@ -144,6 +149,24 @@ public static class Config
             Console.WriteLine(e);
             Console.Error.WriteLine($"Failed to parse the {WhitelistedPorts} field! Make sure all entered values are numbers!");
             return false;
+        }
+
+        // Parse optional networkID for mesh networking
+        try
+        {
+            if (model.ContainsKey(NetworkID))
+            {
+                TunnelOptions.NetworkID = (string)model[NetworkID];
+                if (!string.IsNullOrEmpty(TunnelOptions.NetworkID))
+                {
+                    Console.WriteLine($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Config] Warning: Failed to parse {NetworkID}: {e.Message}");
+            // Network ID is optional, so don't fail config loading
         }
 
         return true;

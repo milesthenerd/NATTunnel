@@ -82,14 +82,19 @@ class NATServer {
 
         socket.on('data', (data) => this.handleTCPData(data, socket));
 
-        socket.on('close', () => {
+        socket.on('close', (hadError) => {
+            console.log(`[Server] Socket closed for client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort}) - hadError: ${hadError}`);
             this.connectionManager.removeSocket(socket, socketInfo.clientID);
+            // Also remove from network registry if this was a mesh peer
+            this.messageHandler.handlePeerDisconnection(socket);
         });
 
         socket.on('error', (err) => {
+            console.error(`[Server] Socket error for client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort}):`, err.code, err.message);
             // Gracefully handle common disconnection errors
             if (err.code === 'ECONNRESET') {
                 this.connectionManager.removeSocket(socket, socketInfo.clientID);
+                this.messageHandler.handlePeerDisconnection(socket);
             } else {
                 console.error(`Socket error for client ${socketInfo.clientID}:`, err);
             }
@@ -152,6 +157,14 @@ class NATServer {
                 const socket = this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort);
                 if (socket) {
                     socket.ip = info.address;
+
+                    // Add UDP info for this peer so connection requests work
+                    // Use the localPort (from NATTypeRequest) as the UDP port
+                    if (socket.localPort) {
+                        console.log(`[Server] Adding UDP info from NAT test: ${info.address}:${socket.localPort}`);
+                        this.connectionManager.addUDPInfo(info.address, socket.localPort);
+                    }
+
                     this.connectionManager.checkNATType(
                         socket.socket,
                         socket.localPort,

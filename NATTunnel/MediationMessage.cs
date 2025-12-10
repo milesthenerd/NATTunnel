@@ -131,6 +131,34 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] MoreFragments { get; set; }
+
+    // Mesh networking fields
+    /// <summary>
+    ///Network ID for mesh networking - peers with same ID can discover each other
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string NetworkID { get; set; }
+    /// <summary>
+    ///Unique peer ID (GUID) for mesh networking
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string PeerID { get; set; }
+    /// <summary>
+    ///Number of peers in mesh network response
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int PeerCount { get; set; }
+    /// <summary>
+    ///List of peers in mesh network (JSON array)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public object[] Peers { get; set; }
+    /// <summary>
+    ///This tunnel's own NAT type (used when server skips NAT detection for mesh tunnels)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public NATType? OwnNATType { get; set; }
+
     public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;
@@ -337,7 +365,19 @@ public enum MediationMessageType
     /// <summary>
     ///Packet sent by server to register with mediation server for connection management
     /// </summary>
-    ServerRegister
+    ServerRegister,
+    /// <summary>
+    ///Request to join a mesh network by network ID
+    /// </summary>
+    MeshJoinRequest,
+    /// <summary>
+    ///Response containing list of peers in the mesh network
+    /// </summary>
+    MeshJoinResponse,
+    /// <summary>
+    ///Updated list of peers in the mesh network
+    /// </summary>
+    MeshPeerList
 }
 
 /// <summary>

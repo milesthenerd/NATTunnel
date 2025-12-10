@@ -32,11 +32,6 @@ public static class WireGuardNT
             // WireGuard-NT expects configuration in a specific binary format
             // See: https://git.zx2c4.com/wireguard-windows/tree/embeddable-dll-service
 
-            Console.WriteLine($"[DEBUG] Adding peer to WireGuard-NT adapter");
-            Console.WriteLine($"  Public Key: {publicKey.Substring(0, 8)}...");
-            Console.WriteLine($"  Endpoint: {endpoint}");
-            Console.WriteLine($"  Allowed IPs: {allowedIPs}");
-
             // Decode base64 public key to bytes
             byte[] publicKeyBytes = Convert.FromBase64String(publicKey);
             if (publicKeyBytes.Length != 32)
@@ -67,8 +62,6 @@ public static class WireGuardNT
     {
         try
         {
-            Console.WriteLine($"[DEBUG] Updating WireGuard-NT configuration from: {configPath}");
-
             if (!System.IO.File.Exists(configPath))
             {
                 Console.WriteLine($"⚠ Config file not found: {configPath}");
@@ -125,7 +118,6 @@ public static class WireGuardNT
                 }
 
                 System.IO.File.WriteAllLines(tempConfigPath, wgLines);
-                Console.WriteLine($"[DEBUG] Created temporary config with {wgLines.Count} lines");
 
                 // Use wg.exe to update the configuration
                 var psi = new System.Diagnostics.ProcessStartInfo
@@ -151,11 +143,18 @@ public static class WireGuardNT
                     }
                     else
                     {
-                        Console.WriteLine($"⚠ wg.exe setconf failed (Exit code: {process.ExitCode})");
+                        // Check if the error is because the interface doesn't exist yet
+                        if (error.Contains("No such file or directory") || error.Contains("does not exist"))
+                        {
+                            Console.WriteLine($"? wg.exe setconf skipped - interface not found (may still be initializing)");
+                            return true;  // Return true since this is expected during initialization
+                        }
+
+                        Console.WriteLine($"✗ wg.exe setconf failed (exit code {process.ExitCode})");
                         if (!string.IsNullOrEmpty(output))
-                            Console.WriteLine($"   Output: {output}");
+                            Console.WriteLine($"  stdout: {output}");
                         if (!string.IsNullOrEmpty(error))
-                            Console.WriteLine($"   Error: {error}");
+                            Console.WriteLine($"  stderr: {error}");
                         return false;
                     }
                 }

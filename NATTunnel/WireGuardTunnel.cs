@@ -19,12 +19,14 @@ namespace NATTunnel
         private bool tunnelStarted;
         private readonly bool debugMode;
         private readonly bool isRunningAsService;
+        private readonly bool skipTunnelCreation; // For mesh mode: don't create a Tunnel
         private WireGuardUdpProxy udpProxy;
         private IntPtr wireguardAdapter = IntPtr.Zero;
         private byte[] privateKey;
         private byte[] publicKey;
         private CancellationTokenSource packetLoopCancellation;
         private string clientAssignedIP; // Track client's assigned IP (null until assigned)
+        private byte clientPrefixLength = 24; // Default /24, can be changed for mesh mode (/16)
         private Tunnel tunnel; // Instance of the Tunnel class (for clients)
         private TunnelManager tunnelManager; // Instance of TunnelManager (for servers)
         private readonly bool isServer;
@@ -34,12 +36,35 @@ namespace NATTunnel
         /// </summary>
         public WireGuardUdpProxy GetUdpProxy() => udpProxy;
 
-        public WireGuardTunnel(bool isServer, string interfaceName, bool debugMode = false, bool isRunningAsService = false)
+        /// <summary>
+        /// Set the UDP proxy instance (used in mesh mode to inject the proxy after initialization)
+        /// </summary>
+        public void SetUdpProxy(WireGuardUdpProxy proxy)
+        {
+            udpProxy = proxy;
+
+            // Set up activity tracking callback
+            if (udpProxy != null)
+            {
+                udpProxy.OnPeerActivity = (tunnelIp) =>
+                {
+                    // Update last activity timestamp for the peer
+                    var peer = peerManager.GetAllPeers().FirstOrDefault(p => p.PrivateAddress.Equals(tunnelIp));
+                    if (peer != null)
+                    {
+                        peer.LastActivity = DateTime.UtcNow;
+                    }
+                };
+            }
+        }
+
+        public WireGuardTunnel(bool isServer, string interfaceName, bool debugMode = false, bool isRunningAsService = false, bool skipTunnelCreation = false)
         {
             this.isServer = isServer;
             this.interfaceName = interfaceName;
             this.debugMode = debugMode;
             this.isRunningAsService = isRunningAsService;
+            this.skipTunnelCreation = skipTunnelCreation;
 
             try
             {
@@ -399,29 +424,42 @@ namespace NATTunnel
                 }
                 else
                 {
-                    // Client mode: Use single Tunnel instance
-                    Console.WriteLine("Client mode: Initializing single Tunnel...");
-                    tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
-                    tunnel.SetWireGuardTunnel(this);
-
-                    // Start the mediation tunnel to connect to the mediation server
-                    Console.WriteLine("Starting mediation tunnel connection...");
-                    tunnel.Start();
-
-                    // Start UDP proxy to forward WireGuard traffic bidirectionally
-                    Console.WriteLine("Starting WireGuard UDP proxy...");
-                    udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
-
-                    // Set up activity tracking callback
-                    udpProxy.OnPeerActivity = (tunnelIp) =>
+                    // Client mode: Use single Tunnel instance (unless skipTunnelCreation is true for mesh mode)
+                    if (!skipTunnelCreation)
                     {
-                        // Update last activity timestamp for the peer
-                        var peer = peerManager.GetAllPeers().FirstOrDefault(p => p.PrivateAddress.Equals(tunnelIp));
-                        if (peer != null)
+                        Console.WriteLine("Client mode: Initializing single Tunnel...");
+                        tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
+                        tunnel.SetWireGuardTunnel(this);
+
+                        // Start the mediation tunnel to connect to the mediation server
+                        Console.WriteLine("Starting mediation tunnel connection...");
+                        tunnel.Start();
+
+                        // Start UDP proxy to forward WireGuard traffic bidirectionally
+                        Console.WriteLine("Starting WireGuard UDP proxy...");
+                        udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
+                    }
+                    else
+                    {
+                        // Mesh mode: Don't create a tunnel, mesh mode will create its own peer tunnels
+                        Console.WriteLine("[Mesh] WireGuard initialized without creating Tunnel (mesh mode will manage peer tunnels)");
+                        // UDP proxy will be created later when needed
+                        udpProxy = null;
+                    }
+
+                    // Set up activity tracking callback (only if udpProxy was created)
+                    if (udpProxy != null)
+                    {
+                        udpProxy.OnPeerActivity = (tunnelIp) =>
                         {
-                            peer.LastActivity = DateTime.UtcNow;
-                        }
-                    };
+                            // Update last activity timestamp for the peer
+                            var peer = peerManager.GetAllPeers().FirstOrDefault(p => p.PrivateAddress.Equals(tunnelIp));
+                            if (peer != null)
+                            {
+                                peer.LastActivity = DateTime.UtcNow;
+                            }
+                        };
+                    }
                 }
 
                 // Start a task to periodically reset peer endpoints to their correct proxy ports
@@ -826,56 +864,12 @@ namespace NATTunnel
             }
 
             // Regenerate config file with new peer
-            Console.WriteLine($"[DEBUG] Regenerating config file with peer(s)");
             RegenerateConfigWithPeers();
-
-            // Debug: Show what was written to config
-            Console.WriteLine($"[DEBUG] Config file contents after adding peer:");
-            var configLines = File.ReadAllLines(configFilePath);
-            foreach (var line in configLines)
-            {
-                Console.WriteLine($"  {line}");
-            }
 
             // Update WireGuard-NT configuration dynamically
             if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
             {
-                Console.WriteLine($"[DEBUG] Updating WireGuard-NT with new peer configuration");
                 WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
-
-                // Try to trigger WireGuard to send a packet immediately by setting keepalive to 1 second
-                Console.WriteLine("[DEBUG] Attempting to trigger immediate WireGuard keepalive...");
-                Task.Run(async () =>
-                {
-                    await Task.Delay(1000); // Wait for config to apply
-                    try
-                    {
-                        var triggerPsi = new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = "wg",
-                            Arguments = $"set {interfaceName} peer {publicKey} persistent-keepalive 1",
-                            UseShellExecute = false,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            CreateNoWindow = true
-                        };
-                        using var proc = System.Diagnostics.Process.Start(triggerPsi);
-                        var err = proc.StandardError.ReadToEnd();
-                        proc.WaitForExit();
-                        if (proc.ExitCode == 0)
-                        {
-                            Console.WriteLine($"[DEBUG] Set keepalive to 1 second to trigger immediate packet");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"[DEBUG] Failed to set keepalive: {err}");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[DEBUG] Error triggering keepalive: {ex.Message}");
-                    }
-                });
             }
 
             return peer;
@@ -900,16 +894,14 @@ namespace NATTunnel
                 if (!string.IsNullOrEmpty(clientAssignedIP))
                 {
                     assignedIp = clientAssignedIP;
-                    Console.WriteLine($"[DEBUG] Using client assigned IP: {assignedIp}");
                 }
                 else
                 {
                     // Use placeholder IP for clients until server assigns actual IP
                     assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.254";
-                    Console.WriteLine($"[DEBUG] Using default IP: {assignedIp}");
                 }
 
-                config.AppendLine($"Address = {assignedIp}/24");
+                config.AppendLine($"Address = {assignedIp}/{clientPrefixLength}");
                 config.AppendLine($"Name = {interfaceName}");
                 config.AppendLine();
 
@@ -924,8 +916,6 @@ namespace NATTunnel
                 }
 
                 File.WriteAllText(configFilePath, config.ToString());
-                var peerCount = peerManager.GetAllPeers().ToList().Count;
-                Console.WriteLine($"[DEBUG] Regenerated config with {peerCount} peer(s)");
             }
             catch (Exception ex)
             {
@@ -953,8 +943,7 @@ namespace NATTunnel
             // Update WireGuard-NT configuration dynamically
             if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
             {
-                Console.WriteLine($"[DEBUG] Updating WireGuard-NT with new peer configuration");
-                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath);
+                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
             }
 
             return peer;
@@ -972,8 +961,7 @@ namespace NATTunnel
             // Update WireGuard-NT configuration dynamically
             if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
             {
-                Console.WriteLine($"[DEBUG] Updating WireGuard-NT with updated peer list");
-                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath);
+                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
             }
         }
 
@@ -993,8 +981,9 @@ namespace NATTunnel
             {
                 Console.WriteLine($"Client updating tunnel configuration with IP: {assignedIpAddress}/{prefixLength}");
 
-                // Store the assigned IP for config generation
+                // Store the assigned IP and prefix length for config generation
                 clientAssignedIP = assignedIpAddress;
+                clientPrefixLength = prefixLength;
 
                 // CRITICAL: First, list and remove ALL existing IP addresses from the interface
                 Console.WriteLine($"Checking existing IP addresses on interface {interfaceName}...");
@@ -1068,7 +1057,7 @@ namespace NATTunnel
 
                 // Force WireGuard-NT to reload config
                 Console.WriteLine($"Reloading WireGuard-NT configuration...");
-                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath);
+                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
 
                 Console.WriteLine($"✓ Client tunnel updated with IP {assignedIpAddress}/{prefixLength}");
             }
