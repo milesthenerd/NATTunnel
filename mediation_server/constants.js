@@ -30,7 +30,11 @@ const MessageTypes = {
     SymmetricKeyConfirm: 19,
     WireGuardPublicKeyExchange: 20,
     WireGuardPublicKeyHash: 21,
-    ServerRegister: 22
+    ServerRegister: 22,
+    // Mesh networking messages
+    MeshJoinRequest: 23,        // Peer wants to join a mesh network
+    MeshJoinResponse: 24,        // Response with list of peers in network
+    MeshPeerList: 25            // Updated list of peers
 };
 
 // Client status types
@@ -45,7 +49,7 @@ const Config = {
     UDP_PORT: 6510,
     NAT_TEST_PORT_ONE: 6511,
     NAT_TEST_PORT_TWO: 6512,
-    DEFAULT_TIMEOUT: 10, // seconds
+    DEFAULT_TIMEOUT: 30, // seconds (increased from 10 to accommodate WireGuard initialization in mesh mode)
     BIND_ADDRESS: "0.0.0.0"
 };
 

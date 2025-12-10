@@ -103,7 +103,10 @@ class ConnectionManager {
     updateTimeout(address) {
         const socket = this.sockets.find(s => s.ip === address);
         if (socket) {
+            console.log(`[ConnectionManager] Updated timeout for ${socket.ip}:${socket.tcpPort} (clientID: ${socket.clientID})`);
             socket.timeout = Config.DEFAULT_TIMEOUT;
+        } else {
+            console.log(`[ConnectionManager] WARNING: Could not find socket for address ${address} to update timeout`);
         }
     }
 
@@ -113,6 +116,7 @@ class ConnectionManager {
             if (socket.natType !== NATTypes.Unknown) {
                 socket.timeout--;
                 if (socket.timeout <= 0) {
+                    console.log(`[ConnectionManager] Timeout expired for ${socket.ip}:${socket.tcpPort} (clientID: ${socket.clientID}, natType: ${socket.natType})`);
                     this.removeSocket(socket.socket);
                 }
             }

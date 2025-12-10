@@ -32,12 +32,6 @@ public class WireGuardPeer
         // Each peer gets their own unique localhost port for routing
         string endpoint = $"127.0.0.1:{ProxyPort}";
 
-        return $"""
-            [Peer]
-            PublicKey = {PublicKey}
-            Endpoint = {endpoint}
-            AllowedIPs = {AllowedIPs}
-            PersistentKeepalive = {KeepAliveInterval}
-            """;
+        return $"[Peer]\nPublicKey = {PublicKey}\nEndpoint = {endpoint}\nAllowedIPs = {AllowedIPs}\nPersistentKeepalive = {KeepAliveInterval}\n";
     }
 }

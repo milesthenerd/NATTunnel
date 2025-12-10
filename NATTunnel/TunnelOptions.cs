@@ -54,6 +54,14 @@ public static class TunnelOptions
     public static int DefaultPort = 64198;
 
     /// <summary>
+    /// Network ID for mesh networking mode.
+    /// Peers with the same network ID can discover and connect to each other.
+    /// If null or empty, mesh networking is disabled and traditional client/server mode is used.
+    /// Configured via config.toml "networkID" setting (optional).
+    /// </summary>
+    public static string NetworkID = null;
+
+    /// <summary>
     /// Indicated whether IPv6 is supported.
     /// </summary>
     public static bool IsIPv6Supported { get; }

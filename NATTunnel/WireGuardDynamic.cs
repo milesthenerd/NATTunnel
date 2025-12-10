@@ -16,8 +16,6 @@ public static class WireGuardDynamic
             // wg set <interface> peer <public-key> endpoint <ip>:<port> allowed-ips <ips> persistent-keepalive <interval>
             string arguments = $"set {interfaceName} peer {publicKey} endpoint {endpoint} allowed-ips {allowedIPs} persistent-keepalive {persistentKeepalive}";
 
-            Console.WriteLine($"[DEBUG] Running: wg {arguments}");
-
             var wgProcess = new Process
             {
                 StartInfo = new ProcessStartInfo
@@ -65,8 +63,6 @@ public static class WireGuardDynamic
         {
             // wg set <interface> peer <public-key> remove
             string arguments = $"set {interfaceName} peer {publicKey} remove";
-
-            Console.WriteLine($"[DEBUG] Running: wg {arguments}");
 
             var wgProcess = new Process
             {
