@@ -49,7 +49,7 @@ const Config = {
     UDP_PORT: 6510,
     NAT_TEST_PORT_ONE: 6511,
     NAT_TEST_PORT_TWO: 6512,
-    DEFAULT_TIMEOUT: 30, // seconds (increased from 10 to accommodate WireGuard initialization in mesh mode)
+    DEFAULT_TIMEOUT: 60, // seconds (increased to 60 to prevent mesh peers from timing out between discovery polls)
     BIND_ADDRESS: "0.0.0.0"
 };
 

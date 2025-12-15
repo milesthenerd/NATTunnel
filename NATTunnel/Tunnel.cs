@@ -21,7 +21,7 @@ public class Tunnel : IDisposable
     //TODO: entire class should get reviewed and eventually split up into smaller classes
 
     // Connection constants
-    private const int HOLE_PUNCH_THRESHOLD = 5;  // Number of hole punch packets required before confirming connection
+    private const int HOLE_PUNCH_THRESHOLD = 1;  // Number of hole punch packets required before confirming connection
 
     private TcpClient tcpClient = new TcpClient();
     private UdpClient udpClient;
@@ -652,6 +652,45 @@ public class Tunnel : IDisposable
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(_message.Serialize());
                     Console.WriteLine($"sending {_message.Serialize()}");
                     tcpClientStream.Write(sendBuffer, 0, sendBuffer.Length);
+
+                    // For mesh peer-to-peer connections, mark as connected immediately
+                    // (no need to wait for server confirmation)
+                    if (meshPeerMode)
+                    {
+                        connected = true;
+                        initialConnectionTimer.Enabled = false;
+                        connectionAttempt.Enabled = false;
+                        Console.WriteLine("[Mesh] Connection established - hole punching successful!");
+
+                        // Send WireGuard public key to peer immediately for mesh connections
+                        if (wireguardTunnel != null)
+                        {
+                            try
+                            {
+                                string configPath = wireguardTunnel.GetConfigPath();
+                                string wgPublicKey = WireGuardConfig.GetPublicKeyFromConfig(configPath);
+
+                                MediationMessage wgMessage = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
+                                wgMessage.WireGuardPublicKey = wgPublicKey;
+                                wgMessage.WireGuardPublicKeyHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(wgPublicKey));
+
+                                // Include our mesh IP
+                                if (ownMeshIP != null)
+                                {
+                                    wgMessage.SetPrivateAddress(ownMeshIP);
+                                    Console.WriteLine($"[Mesh] Sending WireGuard public key with mesh IP: {ownMeshIP}");
+                                }
+
+                                byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(wgMessage.Serialize());
+                                udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+                                Console.WriteLine($"[Mesh] Sent WireGuard public key to peer");
+                            }
+                            catch (Exception wgEx)
+                            {
+                                Console.WriteLine($"[Mesh] Error sending WireGuard public key: {wgEx.Message}");
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1037,7 +1076,7 @@ public class Tunnel : IDisposable
             {
                 case MediationMessageType.HolePunchAttempt:
                     {
-                        if (holePunchReceivedCount == 0) holePunchReceivedCount++;
+                        holePunchReceivedCount++;
                         connectionTimeout = maxConnectionTimeout;
                         Console.WriteLine("POG");
                     }
@@ -1362,7 +1401,7 @@ public class Tunnel : IDisposable
 
                 void TryConnect(object source, ElapsedEventArgs e)
                 {
-                    if (holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
+                    if (holePunchReceivedCount >= 1 && holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                         if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
@@ -1373,7 +1412,7 @@ public class Tunnel : IDisposable
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
 
-                    if (holePunchReceivedCount < 1)
+                    if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
@@ -1415,7 +1454,7 @@ public class Tunnel : IDisposable
 
                 void TryConnectToSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if (holePunchReceivedCount >= 1 && holePunchReceivedCount < 5)
+                    if (holePunchReceivedCount >= 1 && holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
@@ -1426,7 +1465,7 @@ public class Tunnel : IDisposable
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
 
-                    if (holePunchReceivedCount < 1)
+                    if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
@@ -1678,7 +1717,7 @@ public class Tunnel : IDisposable
                                 Console.WriteLine($"[ConnectionComplete] Received. currentConnectionID = {currentConnectionID}, isServer = {isServer}");
                                 if (isServer)
                                 {
-                                    holePunchReceivedCount = 5;
+                                    holePunchReceivedCount = HOLE_PUNCH_THRESHOLD;
                                     // Look up client by connection ID instead of endpoint
                                     // (endpoint may have changed for Symmetric NAT after hole punching)
                                     Console.WriteLine($"[ConnectionComplete] Looking up client by ConnectionID: {currentConnectionID}");

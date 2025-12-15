@@ -27,6 +27,7 @@ class MessageHandler {
                 this.handleKeepAlive(socket);
                 break;
             case MessageTypes.ConnectionRequest:
+                console.log(`[MessageHandler] Routing to handleConnectionRequest`);
                 this.handleConnectionRequest(message, socket);
                 break;
             case MessageTypes.ReceivedPeer:
@@ -39,13 +40,37 @@ class MessageHandler {
             case MessageTypes.MeshJoinRequest:
                 this.handleMeshJoinRequest(message, socket);
                 break;
+            default:
+                console.log(`[MessageHandler] ⚠ Unknown message type: ${message.ID}`);
+                break;
         }
     }
 
     handleKeepAlive(socket) {
-        const socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
+        // Primary lookup: Use IP:port (most reliable for sockets behind proxies/NAT)
+        let socketInfo = null;
+        if (socket.remoteAddress && socket.remotePort) {
+            socketInfo = this.connectionManager.sockets.find(s =>
+                s.ip === socket.remoteAddress && s.tcpPort === socket.remotePort
+            );
+        }
+
+        // Fallback: Try socket object reference
+        if (!socketInfo) {
+            socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
+            if (socketInfo) {
+                // Socket object matched, but IP:port didn't - TCP IP may have changed (proxy/CDN)
+                // UDP traffic still comes from original IP, so we don't update UDP info
+
+                // Update the stored TCP IP and port for timeout management
+                socketInfo.ip = socket.remoteAddress;
+                socketInfo.tcpPort = socket.remotePort;
+                // Note: localPort stays the same, it's used to find UDP info later
+            }
+        }
+
         if (socketInfo) {
-            this.connectionManager.updateTimeout(socketInfo.ip);
+            this.connectionManager.updateTimeout(socketInfo);  // Pass socketInfo object directly
         }
     }
 
@@ -140,7 +165,7 @@ class MessageHandler {
 
         // Update timeout for the requesting peer (keeps them alive)
         if (clientSocketInfo) {
-            this.connectionManager.updateTimeout(clientSocketInfo.ip);
+            this.connectionManager.updateTimeout(clientSocketInfo);  // Pass socketInfo object directly
         }
 
         // Store client's NAT type from the ConnectionRequest message
@@ -190,20 +215,28 @@ class MessageHandler {
         const connectionId = this.connectionManager.connectionId++;
 
         // Get client UDP info
-        const clientUDPInfo = this.connectionManager.udpConnectionInfo.find(
-            info => clientSocketInfo.ip.includes(info.ip)
-        );
+        // First try to find by localPort (most reliable when TCP IP changes due to proxy)
+        let clientUDPInfo = null;
+        if (clientSocketInfo.localPort) {
+            clientUDPInfo = this.connectionManager.udpConnectionInfo.find(
+                info => info.port === clientSocketInfo.localPort
+            );
+        }
+
+        // Fallback: try to find by IP
+        if (!clientUDPInfo) {
+            clientUDPInfo = this.connectionManager.udpConnectionInfo.find(
+                info => clientSocketInfo.ip.includes(info.ip)
+            );
+        }
 
         if (!clientUDPInfo) {
             console.log(`[MessageHandler] No UDP info for ${clientSocketInfo.ip}, sending ServerNotAvailable`);
-            console.log(`[MessageHandler] Available UDP connections: ${JSON.stringify(this.connectionManager.udpConnectionInfo.map(u => u.ip))}`);
             this.sendServerNotAvailable(socket);
             return;
         }
 
-        console.log(`[MessageHandler] Client UDP info found: ${clientSocketInfo.ip}:${clientUDPInfo.port}`);
-
-        const clientEndpoint = `${clientSocketInfo.ip}:${clientUDPInfo.port}`;
+        const clientEndpoint = `${clientUDPInfo.ip}:${clientUDPInfo.port}`;
 
         // Store the connection pair
         this.connectionManager.currentConnectionPairs[connectionId] = {
@@ -483,28 +516,52 @@ class MessageHandler {
         });
 
         // Get peer's endpoint from socket info
-        // Try multiple lookup methods:
-        // 1. By socket object reference
-        // 2. By PeerID (clientID)
-        // 3. By remote address (IP:port)
-        let socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
+        // Try multiple lookup methods (prioritizing IP:port as most reliable):
+        // 1. By remote address (IP:port) - PRIMARY
+        // 2. By PeerID (clientID) - SECONDARY
+        // 3. By socket object reference - FALLBACK
+        let socketInfo = null;
 
-        if (!socketInfo && PeerID) {
-            console.log(`[MessageHandler] Socket lookup by object failed, trying by clientID (PeerID: ${PeerID})`);
-            socketInfo = this.connectionManager.sockets.find(s => s.clientID === PeerID);
-        }
-
-        if (!socketInfo && socket.remoteAddress && socket.remotePort) {
+        // Primary: Lookup by IP:port
+        if (socket.remoteAddress && socket.remotePort) {
             const remoteAddr = socket.remoteAddress;
             const remotePort = socket.remotePort;
-            console.log(`[MessageHandler] Socket lookup by clientID failed, trying by remote address (${remoteAddr}:${remotePort})`);
             socketInfo = this.connectionManager.sockets.find(s => s.ip === remoteAddr && s.tcpPort === remotePort);
+            console.log(`[MessageHandler] Socket lookup by IP:port (${remoteAddr}:${remotePort}): ${socketInfo ? 'SUCCESS' : 'FAILED'}`);
+        }
+
+        // Secondary: Lookup by clientID
+        if (!socketInfo && PeerID) {
+            console.log(`[MessageHandler] Socket lookup by IP:port failed, trying by clientID (PeerID: ${PeerID})`);
+            socketInfo = this.connectionManager.sockets.find(s => s.clientID === PeerID);
+            console.log(`[MessageHandler] Socket lookup by clientID: ${socketInfo ? 'SUCCESS' : 'FAILED'}`);
+        }
+
+        // Fallback: Lookup by socket object reference
+        if (!socketInfo) {
+            console.log(`[MessageHandler] Socket lookup by clientID failed, trying by socket object`);
+            socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
+            console.log(`[MessageHandler] Socket lookup by object: ${socketInfo ? 'SUCCESS' : 'FAILED'}`);
+
+            if (socketInfo) {
+                // Socket object matched - check if IP changed
+                if (socketInfo.ip !== socket.remoteAddress || socketInfo.tcpPort !== socket.remotePort) {
+                    console.log(`[MessageHandler] Mesh join: Socket object matched but IP changed! Old: ${socketInfo.ip}:${socketInfo.tcpPort}, New: ${socket.remoteAddress}:${socket.remotePort}`);
+                    // Update the stored IP and port
+                    socketInfo.ip = socket.remoteAddress;
+                    socketInfo.tcpPort = socket.remotePort;
+                }
+            }
         }
 
         if (!socketInfo) {
-            console.log('[MessageHandler] Socket info not found for mesh join');
+            console.log('[MessageHandler] ❌ ERROR: Socket info not found for mesh join after all lookup methods!');
             console.log(`[MessageHandler] PeerID: ${PeerID}`);
             console.log(`[MessageHandler] Socket remote: ${socket.remoteAddress}:${socket.remotePort}`);
+            console.log(`[MessageHandler] Available sockets: ${this.connectionManager.sockets.length}`);
+            this.connectionManager.sockets.forEach((s, idx) => {
+                console.log(`[MessageHandler]   Socket ${idx}: clientID=${s.clientID}, ip=${s.ip}, tcpPort=${s.tcpPort}, socket===socket: ${s.socket === socket}`);
+            });
             return;
         }
 
@@ -517,7 +574,7 @@ class MessageHandler {
 
         // Update timeout for mesh peer to keep them alive
         // Mesh peers stay connected to receive peer updates and connection coordination
-        this.connectionManager.updateTimeout(socketInfo.ip);
+        this.connectionManager.updateTimeout(socketInfo);  // Pass socketInfo object directly
 
         const endpoint = `${socketInfo.ip}:${socketInfo.localPort || 0}`;
 
