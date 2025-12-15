@@ -100,13 +100,19 @@ class ConnectionManager {
         }
     }
 
-    updateTimeout(address) {
-        const socket = this.sockets.find(s => s.ip === address);
-        if (socket) {
-            console.log(`[ConnectionManager] Updated timeout for ${socket.ip}:${socket.tcpPort} (clientID: ${socket.clientID})`);
-            socket.timeout = Config.DEFAULT_TIMEOUT;
+    updateTimeout(socketInfo) {
+        // Accept either a socketInfo object directly, or an IP address string for backward compatibility
+        let socket = null;
+        if (typeof socketInfo === 'string') {
+            // Legacy: lookup by IP address
+            socket = this.sockets.find(s => s.ip === socketInfo);
         } else {
-            console.log(`[ConnectionManager] WARNING: Could not find socket for address ${address} to update timeout`);
+            // New: socketInfo object passed directly
+            socket = socketInfo;
+        }
+
+        if (socket) {
+            socket.timeout = Config.DEFAULT_TIMEOUT;
         }
     }
 
@@ -116,7 +122,6 @@ class ConnectionManager {
             if (socket.natType !== NATTypes.Unknown) {
                 socket.timeout--;
                 if (socket.timeout <= 0) {
-                    console.log(`[ConnectionManager] Timeout expired for ${socket.ip}:${socket.tcpPort} (clientID: ${socket.clientID}, natType: ${socket.natType})`);
                     this.removeSocket(socket.socket);
                 }
             }

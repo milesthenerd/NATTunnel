@@ -231,8 +231,12 @@ public static class Program
 
             // Store active peer tunnels
             var activePeerTunnels = new Dictionary<string, Tunnel>();  // PeerID -> Tunnel
+            var pendingConnectionRequests = new HashSet<string>();  // Track peers we've sent connection requests to
             var activeConnectionTunnels = new Dictionary<int, Tunnel>();  // ConnectionID -> Tunnel
+            var connectionIDToPeerID = new Dictionary<int, string>();  // ConnectionID -> PeerID mapping
             var peerMeshIPs = new Dictionary<int, string>();  // ConnectionID -> Peer's mesh IP
+            int loopCounter = 0;  // Track loop iterations for periodic status
+            DateTime lastResponseTime = DateTime.UtcNow;  // Track when we last received a response from server
 
             // Helper method to process discovered peers and send connection requests
             void ProcessDiscoveredPeers(object[] peers)
@@ -246,6 +250,7 @@ public static class Program
                     var peerObj = JsonSerializer.Deserialize<JsonElement>(peer.ToString());
                     string targetPeerID = peerObj.GetProperty("peerID").GetString();
                     string endpoint = peerObj.GetProperty("endpoint").GetString();
+                    string peerMeshIP = peerObj.TryGetProperty("meshIP", out JsonElement meshIPElement) ? meshIPElement.GetString() : null;
 
                     // Skip if this is ourselves
                     if (targetPeerID == peerID.ToString())
@@ -254,21 +259,21 @@ public static class Program
                         continue;
                     }
 
-                    // Skip if we've already requested connection to this peer
-                    if (activePeerTunnels.ContainsKey(targetPeerID))
+                    // Skip if we've already requested connection or have an active tunnel to this peer
+                    // Check both by PeerID and by mesh IP
+                    if (activePeerTunnels.ContainsKey(targetPeerID) || (peerMeshIP != null && activePeerTunnels.ContainsKey(peerMeshIP)))
                     {
-                        Console.WriteLine($"  - Peer {targetPeerID} (already connected)");
+                        Console.WriteLine($"  - Peer {targetPeerID} (tunnel active)");
+                        continue;
+                    }
+
+                    if (pendingConnectionRequests.Contains(targetPeerID))
+                    {
+                        Console.WriteLine($"  - Peer {targetPeerID} (connection pending)");
                         continue;
                     }
 
                     Console.WriteLine($"  - Peer {targetPeerID}");
-                    Console.WriteLine($"    Endpoint: {endpoint}");
-
-                    // NAT Type might not be present in older peer objects
-                    if (peerObj.TryGetProperty("natType", out JsonElement natTypeElement))
-                    {
-                        Console.WriteLine($"    NAT Type: {natTypeElement.GetInt32()}");
-                    }
 
                     // Send connection request to mediation server for this peer
                     var connectionRequest = new MediationMessage(MediationMessageType.ConnectionRequest)
@@ -280,11 +285,12 @@ public static class Program
                     string connRequestJson = connectionRequest.Serialize();
                     byte[] connBuffer = Encoding.ASCII.GetBytes(connRequestJson);
                     stream.Write(connBuffer, 0, connBuffer.Length);
+                    stream.Flush();
 
                     Console.WriteLine($"[Mesh] Sent connection request for peer {targetPeerID}");
 
-                    // Mark this peer as being connected to (even though connection not complete yet)
-                    activePeerTunnels[targetPeerID] = null;  // Will be populated with Tunnel instance later
+                    // Mark as pending so we don't send duplicate connection requests
+                    pendingConnectionRequests.Add(targetPeerID);
                 }
             }
 
@@ -346,11 +352,18 @@ public static class Program
                     string pollJson = pollRequest.Serialize();
                     byte[] pollBuffer = Encoding.ASCII.GetBytes(pollJson);
                     stream.Write(pollBuffer, 0, pollBuffer.Length);
+                    stream.Flush();
                     lastPeerPoll = DateTime.UtcNow;
-                    Console.WriteLine("[Mesh] Polling for new peers in network...");
                 }
 
                 // Check for new messages from mediation server
+                // Also verify the TCP connection is still alive
+                if (!tcpClient.Connected)
+                {
+                    Console.WriteLine("[Mesh] ⚠ TCP connection to mediation server lost!");
+                    break;
+                }
+
                 if (stream.DataAvailable)
                 {
                     bytesRead = stream.Read(buffer, 0, buffer.Length);
@@ -363,7 +376,7 @@ public static class Program
                     }
 
                     response = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                    Console.WriteLine($"[Mesh] Received message: {response}");
+                    lastResponseTime = DateTime.UtcNow;  // Update last response time
 
                     // Handle multiple JSON objects in the same buffer
                     // Split by detecting JSON object boundaries (each starts with '{' and ends with '}')
@@ -421,13 +434,17 @@ public static class Program
                         }
                         else if (msg.ID == MediationMessageType.ConnectionBegin)
                         {
-                            Console.WriteLine($"[Mesh] Connection initiated! ConnectionID: {msg.ConnectionID}, Endpoint: {msg.EndpointString}");
+                            Console.WriteLine($"[Mesh] *** ConnectionBegin received! ***");
+                            Console.WriteLine($"[Mesh]   ConnectionID: {msg.ConnectionID}");
+                            Console.WriteLine($"[Mesh]   Endpoint: {msg.EndpointString}");
+                            Console.WriteLine($"[Mesh]   NATType: {msg.NATType}");
+                            Console.WriteLine($"[Mesh]   IsServer: {msg.IsServer}");
 
                             // Store peer's mesh IP for later use in WireGuard key exchange
                             if (!string.IsNullOrEmpty(msg.PrivateAddressString))
                             {
                                 peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
-                                Console.WriteLine($"[Mesh] Peer mesh IP: {msg.PrivateAddressString}");
+                                Console.WriteLine($"[Mesh]   Peer mesh IP: {msg.PrivateAddressString}");
                             }
 
                             // Check if we already have a tunnel for this ConnectionID
@@ -450,8 +467,8 @@ public static class Program
                                     managedByTunnelManager: false,
                                     connectionId: msg.ConnectionID,
                                     sharedUdpClient: udpClient,  // Share UDP client with mesh mode (same port)
-                                    meshPeerMode: false,
-                                    meshPeerEndpoint: null,
+                                    meshPeerMode: true,  // This is a mesh peer-to-peer connection
+                                    meshPeerEndpoint: msg.EndpointString,  // Remote peer endpoint
                                     retryInPlace: true,  // Retry in-place like server, don't recreate tunnel
                                     isServerOverride: false,  // Mesh tunnels always act as clients (both peers are equal)
                                     sharedClientID: peerID,  // Share clientID with mesh mode so server routes messages correctly
@@ -464,6 +481,15 @@ public static class Program
 
                                 // Track this tunnel by ConnectionID
                                 activeConnectionTunnels[msg.ConnectionID] = peerTunnel;
+
+                                // Map the peer's mesh IP to this tunnel so we can check connection status
+                                if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+                                {
+                                    // Also track by peer's mesh IP for easier lookups
+                                    activePeerTunnels[msg.PrivateAddressString] = peerTunnel;
+                                    // Remove from pending since we've created the tunnel
+                                    pendingConnectionRequests.Remove(msg.PrivateAddressString);
+                                }
 
                                 Console.WriteLine($"[Mesh] Created tunnel for peer connection {msg.ConnectionID}");
                                 Console.WriteLine($"[Mesh] Peer endpoint: {msg.EndpointString}, Peer NAT: {msg.NATType}, Our NAT: {detectedNatType}");
@@ -487,17 +513,11 @@ public static class Program
                         }
                         else if (msg.ID == MediationMessageType.MeshJoinResponse)
                         {
-                            Console.WriteLine($"[Mesh] Peer poll response: {msg.PeerCount} peers in network");
-
                             // Update hasPeers flag
                             if (msg.Peers != null && msg.Peers.Length > 0)
                             {
                                 hasPeers = true;
                                 ProcessDiscoveredPeers(msg.Peers);
-                            }
-                            else
-                            {
-                                Console.WriteLine("[Mesh] Still no peers in network - will retry in 10 seconds");
                             }
                         }
                         else if (msg.ID == MediationMessageType.MeshPeerList)
@@ -531,6 +551,18 @@ public static class Program
                     } // End while loop for parsing multiple JSON objects
                 }
 
+                // Periodic status update every 5 seconds (50 loops * 100ms)
+                loopCounter++;
+                if (loopCounter % 50 == 0)
+                {
+                    var timeSinceResponse = DateTime.UtcNow - lastResponseTime;
+
+                    // Warn if we haven't received a response in over 30 seconds
+                    if (timeSinceResponse.TotalSeconds > 30)
+                    {
+                        Console.WriteLine($"[Mesh] ⚠ WARNING: No server response for {timeSinceResponse.TotalSeconds:F0} seconds!");
+                    }
+                }
 
                 System.Threading.Thread.Sleep(100);
             }
