@@ -213,7 +213,7 @@ public static class WireGuardConfig
                 throw new Exception($"Failed to derive public key from private key. wg error: {errorOutput}");
             }
 
-            Console.WriteLine($"✓ Derived public key from config: {configPath}");
+            Console.WriteLine($"Derived public key from config: {configPath}");
             return publicKey;
         }
         catch (Exception ex)

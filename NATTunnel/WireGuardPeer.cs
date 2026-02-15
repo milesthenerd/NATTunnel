@@ -27,6 +27,27 @@ public class WireGuardPeer
         AllowedIPs = $"{privateAddress}/32";
     }
 
+    /// <summary>
+    /// Reset AllowedIPs back to just this peer's own private address.
+    /// Called when relay routes through this peer are being removed.
+    /// </summary>
+    public void ResetAllowedIPs()
+    {
+        AllowedIPs = $"{PrivateAddress}/32";
+    }
+
+    /// <summary>
+    /// Add an additional IP to this peer's AllowedIPs (used for relay routing)
+    /// </summary>
+    public void AddAllowedIP(IPAddress ip)
+    {
+        string newEntry = $"{ip}/32";
+        if (!AllowedIPs.Contains(newEntry))
+        {
+            AllowedIPs = $"{AllowedIPs},{newEntry}";
+        }
+    }
+
     public string GenerateConfigSection(bool useProxyEndpoint = true)
     {
         // Each peer gets their own unique localhost port for routing

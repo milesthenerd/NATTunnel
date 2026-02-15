@@ -7,6 +7,9 @@ class ConnectionManager {
         this.udpConnectionInfo = [];
         this.currentConnectionPairs = {};
         this.connectionId = 1;
+        // Callback fired when a socket is removed (timeout or explicit).
+        // Set by the server to trigger network registry cleanup.
+        this.onSocketRemoved = null;
     }
 
     addSocket(socket, remoteAddress, remotePort, timeout) {
@@ -42,6 +45,10 @@ class ConnectionManager {
             this.removeUDPInfo(socketInfo.ip);
             this.sockets.splice(index, 1);
             console.log(`Removed client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort})`);
+            // Notify listener (network registry cleanup, introduction retries, etc.)
+            if (this.onSocketRemoved && socketInfo.socket) {
+                try { this.onSocketRemoved(socketInfo.socket); } catch (e) { }
+            }
         }
     }
 
@@ -76,15 +83,17 @@ class ConnectionManager {
         });
     }
 
-    addUDPInfo(address, port) {
+    addUDPInfo(address, port, localPort = null) {
         const existing = this.udpConnectionInfo.find(info => info.ip === address);
         if (existing) {
             // Update the port to the most recent one observed
             existing.port = port;
+            if (localPort !== null) existing.localPort = localPort;
         } else {
             this.udpConnectionInfo.push({
                 ip: address,
                 port,
+                localPort: localPort || port,
                 status: {
                     id: this.connectionId,
                     type: StatusTypes.Free

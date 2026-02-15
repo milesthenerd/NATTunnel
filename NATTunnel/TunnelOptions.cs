@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Net;
@@ -60,6 +61,13 @@ public static class TunnelOptions
     /// Configured via config.toml "networkID" setting (optional).
     /// </summary>
     public static string NetworkID = null;
+
+    /// <summary>
+    /// Persistent peer ID for mesh networking.
+    /// Persisted in config.toml so the peer keeps its identity (and mesh IP) across restarts.
+    /// If null, a new one will be generated and saved on first mesh mode run.
+    /// </summary>
+    public static Guid? PeerID = null;
 
     /// <summary>
     /// Indicated whether IPv6 is supported.

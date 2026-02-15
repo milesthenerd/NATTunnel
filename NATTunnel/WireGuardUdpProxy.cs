@@ -60,11 +60,11 @@ public class WireGuardUdpProxy : IDisposable
             if (inboundForwarder == null)
             {
                 inboundForwarder = wireguardListener;
-                Console.WriteLine($"✓ WireGuard inbound forwarder initialized on port {inboundForwarderPort}");
+                Console.WriteLine($"WireGuard inbound forwarder initialized on port {inboundForwarderPort}");
             }
         }
 
-        Console.WriteLine($"✓ UDP Proxy initialized with per-peer routing (tunnel port: {tunnelPort})");
+        Console.WriteLine($"UDP Proxy initialized with per-peer routing (tunnel port: {tunnelPort})");
 
         // No shared outbound listener needed - each peer gets their own
         listenTask = Task.CompletedTask;
@@ -102,7 +102,7 @@ public class WireGuardUdpProxy : IDisposable
                 var listener = new PeerProxyListener(proxyPort, peerEndpoint, socketToUse, tunnelSocketLock);
                 peerListeners[proxyPort] = listener;
                 int socketPort = ((IPEndPoint)socketToUse.Client.LocalEndPoint).Port;
-                Console.WriteLine($"[Proxy] ✓ Created dedicated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint} (using tunnel socket {socketPort})");
+                Console.WriteLine($"[Proxy] Created dedicated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint} (using tunnel socket {socketPort})");
             }
             else
             {
@@ -110,18 +110,9 @@ public class WireGuardUdpProxy : IDisposable
                 peerListeners[proxyPort].UpdateEndpoint(peerEndpoint);
                 peerListeners[proxyPort].UpdateTunnelSocket(socketToUse);
                 int socketPort = ((IPEndPoint)socketToUse.Client.LocalEndPoint).Port;
-                Console.WriteLine($"[Proxy] ✓ Updated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint} (using tunnel socket {socketPort})");
+                Console.WriteLine($"[Proxy] Updated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint} (using tunnel socket {socketPort})");
             }
 
-            Console.WriteLine($"[Proxy] Total registered peers: {peerEndpointToPort.Count}");
-
-            // List all registered peers for debugging
-            Console.WriteLine("[Proxy] Current peer list:");
-            foreach (var kvp in tunnelIpToPeerEndpoint)
-            {
-                var port = peerEndpointToPort[kvp.Value];
-                Console.WriteLine($"  - {kvp.Key} → {kvp.Value} (port {port})");
-            }
         }
     }
 
@@ -147,7 +138,7 @@ public class WireGuardUdpProxy : IDisposable
                     {
                         listener.Dispose();
                         peerListeners.Remove(port);
-                        Console.WriteLine($"[Proxy] ✓ Unregistered peer {tunnelIp} (port {port})");
+                        Console.WriteLine($"[Proxy] Unregistered peer {tunnelIp} (port {port})");
                     }
                 }
             }
@@ -163,7 +154,7 @@ public class WireGuardUdpProxy : IDisposable
         {
             tunnelSocket = newSocket;
             tunnelPort = ((IPEndPoint)tunnelSocket.Client.LocalEndPoint).Port;
-            Console.WriteLine($"[Proxy] ✓ Tunnel socket updated to port {tunnelPort}");
+            Console.WriteLine($"[Proxy] Tunnel socket updated to port {tunnelPort}");
 
             // Update all peer listeners with the new socket
             lock (proxyLock)
@@ -301,7 +292,7 @@ public class WireGuardUdpProxy : IDisposable
         wireguardListener?.Dispose();
         cancellation?.Dispose();
 
-        Console.WriteLine("✓ WireGuard UDP Proxy stopped");
+        Console.WriteLine("WireGuard UDP Proxy stopped");
     }
 }
 

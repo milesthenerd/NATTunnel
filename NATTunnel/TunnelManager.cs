@@ -97,7 +97,7 @@ namespace NATTunnel
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TunnelManager] ⚠ Failed to start: {ex.Message}");
+                Console.WriteLine($"[TunnelManager] Failed to start: {ex.Message}");
                 throw;
             }
         }
@@ -335,12 +335,12 @@ namespace NATTunnel
                 int activeCount = GetActiveTunnelCount();
                 if (activeCount > 0)
                 {
-                    Console.WriteLine($"[TunnelManager] 💓 Health check complete. Active tunnels: {activeCount}");
+                    Console.WriteLine($"[TunnelManager] Health check complete. Active tunnels: {activeCount}");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[TunnelManager] ⚠ Error during health check: {ex.Message}");
+                Console.WriteLine($"[TunnelManager] Error during health check: {ex.Message}");
             }
         }
 

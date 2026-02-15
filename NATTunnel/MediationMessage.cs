@@ -24,7 +24,6 @@ public class MediationMessage
     /// <summary>
     ///NAT type of the client
     /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public NATType NATType { get; set; }
     /// <summary>
     ///Server's IP address and port as a string becaause IPEndpoint is not deserializable
@@ -158,6 +157,33 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public NATType? OwnNATType { get; set; }
+    /// <summary>
+    ///Peer ID of the selected introducer (returned in MeshJoinResponse to tell P_new which peer to connect to first)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string IntroducerPeerID { get; set; }
+    /// <summary>
+    ///List of existing peers that the introducer should forward the new peer's info to (used in MeshIntroduceRequest)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public object[] OtherPeers { get; set; }
+    /// <summary>
+    ///When true in MeshConnectionBegin, indicates traffic should be relayed through the introducer
+    ///rather than hole-punched directly (used for symmetric-to-symmetric NAT pairs)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IsRelay { get; set; }
+    /// <summary>
+    ///Introducer's mesh IP — set in relay MeshConnectionBegin so the receiving peer knows
+    ///which WireGuard peer to add the relay route through
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string IntroducerMeshIP { get; set; }
+    /// <summary>
+    ///List of mesh IPs this peer has active WireGuard tunnels to (used in MeshHeartbeatAck)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string[] ConnectedMeshIPs { get; set; }
 
     public MediationMessage(MediationMessageType id = 0)
     {
@@ -377,7 +403,35 @@ public enum MediationMessageType
     /// <summary>
     ///Updated list of peers in the mesh network
     /// </summary>
-    MeshPeerList
+    MeshPeerList,
+    /// <summary>
+    ///Message sent over WireGuard from introducer to existing peers to introduce a new peer
+    /// </summary>
+    MeshIntroduction,
+    /// <summary>
+    ///Acknowledgement of a MeshIntroduction message (optional, sent back to introducer over WireGuard)
+    /// </summary>
+    MeshIntroductionAck,
+    /// <summary>
+    ///Sent from mediation server to the selected introducer peer via TCP, telling it to forward new peer info to other peers
+    /// </summary>
+    MeshIntroduceRequest,
+    /// <summary>
+    ///Sent from introducer to mediation server via TCP after all MeshIntroduction messages have been sent over WireGuard
+    /// </summary>
+    MeshIntroduceAck,
+    /// <summary>
+    ///Sent by introducer to both peers over WireGuard to initiate direct hole-punching between them (no mediation server needed)
+    /// </summary>
+    MeshConnectionBegin,
+    /// <summary>
+    ///Sent by introducer to each peer over WireGuard to check which other mesh peers it can reach
+    /// </summary>
+    MeshHeartbeat,
+    /// <summary>
+    ///Response to MeshHeartbeat — contains the list of mesh IPs this peer has active WireGuard tunnels to
+    /// </summary>
+    MeshHeartbeatAck
 }
 
 /// <summary>

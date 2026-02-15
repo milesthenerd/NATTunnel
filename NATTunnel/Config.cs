@@ -55,6 +55,11 @@ public static class Config
     /// </summary>
     private const string NetworkID = "networkID";
 
+    /// <summary>
+    /// Text string for "peerID" in the config (persistent mesh peer identity).
+    /// </summary>
+    private const string PeerID = "peerID";
+
     #endregion
 
     /// <summary>
@@ -169,7 +174,56 @@ public static class Config
             // Network ID is optional, so don't fail config loading
         }
 
+        // Parse optional peerID (persistent mesh identity)
+        try
+        {
+            if (model.ContainsKey(PeerID))
+            {
+                string peerIDString = (string)model[PeerID];
+                if (Guid.TryParse(peerIDString, out Guid parsedPeerID))
+                {
+                    TunnelOptions.PeerID = parsedPeerID;
+                    Console.WriteLine($"[Config] Loaded persistent peer ID: {parsedPeerID}");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
+        }
+
         return true;
+    }
+
+    /// <summary>
+    /// Saves the peer ID to config.toml so it persists across restarts.
+    /// Appends the peerID line if not present, or updates it if it already exists.
+    /// </summary>
+    public static void SavePeerID(Guid peerID)
+    {
+        string configPath = GetConfigFilePath();
+        if (configPath == null || !File.Exists(configPath)) return;
+
+        string[] lines = File.ReadAllLines(configPath);
+        bool found = false;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].TrimStart().StartsWith(PeerID + " ") || lines[i].TrimStart().StartsWith(PeerID + "="))
+            {
+                lines[i] = $"{PeerID} = \"{peerID}\"";
+                found = true;
+                break;
+            }
+        }
+
+        if (found)
+        {
+            File.WriteAllLines(configPath, lines);
+        }
+        else
+        {
+            File.AppendAllText(configPath, $"\n\n#{PeerID}: Persistent mesh peer identity (auto-generated, do not edit)\n{PeerID} = \"{peerID}\"\n");
+        }
     }
 
     /// <summary>
