@@ -36,11 +36,11 @@ public static class WireGuardDynamic
 
             if (wgProcess.ExitCode != 0)
             {
-                Console.WriteLine($"⚠ wg set failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
+                Console.WriteLine($"wg set failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
                 return false;
             }
 
-            Console.WriteLine($"✓ Dynamically added peer to WireGuard interface {interfaceName}");
+            Console.WriteLine($"Dynamically added peer to WireGuard interface {interfaceName}");
             if (!string.IsNullOrEmpty(output))
             {
                 Console.WriteLine($"   Output: {output}");
@@ -84,11 +84,11 @@ public static class WireGuardDynamic
 
             if (wgProcess.ExitCode != 0)
             {
-                Console.WriteLine($"⚠ wg set remove failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
+                Console.WriteLine($"wg set remove failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
                 return false;
             }
 
-            Console.WriteLine($"✓ Dynamically removed peer from WireGuard interface {interfaceName}");
+            Console.WriteLine($"Dynamically removed peer from WireGuard interface {interfaceName}");
             return true;
         }
         catch (Exception ex)

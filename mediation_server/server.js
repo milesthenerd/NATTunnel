@@ -16,6 +16,12 @@ class NATServer {
     }
 
     start() {
+        // Wire up socket removal callback so timed-out sockets trigger
+        // network registry cleanup and introduction retries
+        this.connectionManager.onSocketRemoved = (socket) => {
+            this.messageHandler.handlePeerDisconnection(socket);
+        };
+
         this.initializeTCPServer();
         this.initializeUDPServer();
         this.initializeNATTestServers();
@@ -84,9 +90,8 @@ class NATServer {
 
         socket.on('close', (hadError) => {
             console.log(`[Server] Socket closed for client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort}) - hadError: ${hadError}`);
+            // removeSocket triggers onSocketRemoved → handlePeerDisconnection automatically
             this.connectionManager.removeSocket(socket, socketInfo.clientID);
-            // Also remove from network registry if this was a mesh peer
-            this.messageHandler.handlePeerDisconnection(socket);
         });
 
         socket.on('error', (err) => {
@@ -94,7 +99,6 @@ class NATServer {
             // Gracefully handle common disconnection errors
             if (err.code === 'ECONNRESET') {
                 this.connectionManager.removeSocket(socket, socketInfo.clientID);
-                this.messageHandler.handlePeerDisconnection(socket);
             } else {
                 console.error(`Socket error for client ${socketInfo.clientID}:`, err);
             }
@@ -159,11 +163,11 @@ class NATServer {
                     socket.ip = info.address;
 
                     // Add UDP info for this peer so connection requests work
-                    // Use the localPort (from NATTypeRequest) as the UDP port
-                    if (socket.localPort) {
-                        console.log(`[Server] Adding UDP info from NAT test: ${info.address}:${socket.localPort}`);
-                        this.connectionManager.addUDPInfo(info.address, socket.localPort);
-                    }
+                    // Store the external port (as seen by the server) — this is the port
+                    // that other peers need to send to. Also store localPort for lookups.
+                    // For DirectMapping, external == local. For Restricted NAT, they may differ.
+                    console.log(`[Server] Adding UDP info from NAT test: ${info.address}:${info.port} (localPort=${socket.localPort})`);
+                    this.connectionManager.addUDPInfo(info.address, info.port, socket.localPort);
 
                     this.connectionManager.checkNATType(
                         socket.socket,

@@ -33,8 +33,15 @@ const MessageTypes = {
     ServerRegister: 22,
     // Mesh networking messages
     MeshJoinRequest: 23,        // Peer wants to join a mesh network
-    MeshJoinResponse: 24,        // Response with list of peers in network
-    MeshPeerList: 25            // Updated list of peers
+    MeshJoinResponse: 24,       // Response with list of peers in network
+    MeshPeerList: 25,           // Updated list of peers
+    MeshIntroduction: 26,       // Sent over WireGuard from introducer to existing peers to introduce a new peer
+    MeshIntroductionAck: 27,    // Acknowledgement of MeshIntroduction (sent back over WireGuard, optional)
+    MeshIntroduceRequest: 28,   // Sent from mediation server to introducer via TCP: forward new peer info to other peers
+    MeshIntroduceAck: 29,       // Sent from introducer to mediation server via TCP: introductions sent
+    MeshConnectionBegin: 30,    // Sent by introducer to both peers over WireGuard: initiate direct hole-punching
+    MeshHeartbeat: 31,           // Sent by introducer to each peer over WireGuard: check reachable peers
+    MeshHeartbeatAck: 32         // Response to MeshHeartbeat: list of reachable mesh IPs
 };
 
 // Client status types
@@ -50,7 +57,8 @@ const Config = {
     NAT_TEST_PORT_ONE: 6511,
     NAT_TEST_PORT_TWO: 6512,
     DEFAULT_TIMEOUT: 60, // seconds (increased to 60 to prevent mesh peers from timing out between discovery polls)
-    BIND_ADDRESS: "0.0.0.0"
+    BIND_ADDRESS: "0.0.0.0",
+    MESH_CONTROL_PORT: 51888    // UDP port used for peer-to-peer mesh introduction messages over WireGuard
 };
 
 module.exports = {

@@ -95,22 +95,12 @@ public class WireGuardPeerManager
             var existingPeerByKey = peers.FirstOrDefault(p => p.PublicKey == publicKey);
             if (existingPeerByKey != null)
             {
-                Console.WriteLine($"⚠ Peer with public key {publicKey.Substring(0, 8)}... already exists.");
-                // Always update endpoint and trigger config update (for reconnections)
                 if (!existingPeerByKey.Endpoint.Equals(endpoint))
                 {
-                    Console.WriteLine($"  Updating endpoint: {existingPeerByKey.Endpoint} -> {endpoint}");
                     peers.Remove(existingPeerByKey);
-                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when reconnecting to maintain unique endpoints
                     var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByKey.PrivateAddress, existingPeerByKey.ConnectionId, existingPeerByKey.IsPersistent, existingPeerByKey.ProxyPort);
                     peers.Add(updatedPeer);
-                    UpdateConfig();
                     return updatedPeer;
-                }
-                else
-                {
-                    Console.WriteLine($"  Endpoint unchanged. Updating config anyway to ensure reconnection works.");
-                    UpdateConfig(); // Force config update even if endpoint didn't change
                 }
                 return existingPeerByKey;
             }
@@ -119,36 +109,24 @@ public class WireGuardPeerManager
             var existingPeerByEndpoint = peers.FirstOrDefault(p => p.Endpoint.Equals(endpoint));
             if (existingPeerByEndpoint != null)
             {
-                Console.WriteLine($"⚠ Peer with endpoint {endpoint} already exists. Updating public key.");
-                // Update public key if it changed
                 if (existingPeerByEndpoint.PublicKey != publicKey)
                 {
                     peers.Remove(existingPeerByEndpoint);
-                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when updating public key
                     var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByEndpoint.PrivateAddress, existingPeerByEndpoint.ConnectionId, existingPeerByEndpoint.IsPersistent, existingPeerByEndpoint.ProxyPort);
                     peers.Add(updatedPeer);
-                    UpdateConfig();
                     return updatedPeer;
                 }
                 return existingPeerByEndpoint;
             }
 
-            // Calculate next available IP in the subnet (e.g., 10.5.0.x)
             var ipBytes = baseAddress.GetAddressBytes();
             int peerId = AllocatePeerId();
             ipBytes[3] = (byte)peerId;
             var peerAddress = new IPAddress(ipBytes);
-
-            // Allocate unique proxy port for this peer
             int proxyPort = AllocateProxyPort();
 
             var peer = new WireGuardPeer(publicKey, endpoint, peerAddress, peerId, isPersistent, proxyPort);
             peers.Add(peer);
-
-            // Update WireGuard config
-            UpdateConfig();
-
-            Console.WriteLine($"✓ Added new peer {publicKey.Substring(0, 8)}... at {peerAddress} (proxy port: {proxyPort})");
             return peer;
         }
     }
@@ -164,22 +142,12 @@ public class WireGuardPeerManager
             var existingPeerByKey = peers.FirstOrDefault(p => p.PublicKey == publicKey);
             if (existingPeerByKey != null)
             {
-                Console.WriteLine($"⚠ Peer with public key {publicKey.Substring(0, 8)}... already exists.");
-                // Always update endpoint and trigger config update (for reconnections)
                 if (!existingPeerByKey.Endpoint.Equals(endpoint))
                 {
-                    Console.WriteLine($"  Updating endpoint: {existingPeerByKey.Endpoint} -> {endpoint}");
                     peers.Remove(existingPeerByKey);
-                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when reconnecting to maintain unique endpoints
                     var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByKey.PrivateAddress, existingPeerByKey.ConnectionId, existingPeerByKey.IsPersistent, existingPeerByKey.ProxyPort);
                     peers.Add(updatedPeer);
-                    UpdateConfig();
                     return updatedPeer;
-                }
-                else
-                {
-                    Console.WriteLine($"  Endpoint unchanged. Updating config anyway to ensure reconnection works.");
-                    UpdateConfig(); // Force config update even if endpoint didn't change
                 }
                 return existingPeerByKey;
             }
@@ -188,36 +156,22 @@ public class WireGuardPeerManager
             var existingPeerByEndpoint = peers.FirstOrDefault(p => p.Endpoint.Equals(endpoint));
             if (existingPeerByEndpoint != null)
             {
-                Console.WriteLine($"⚠ Peer with endpoint {endpoint} already exists. Updating public key.");
                 if (existingPeerByEndpoint.PublicKey != publicKey)
                 {
                     peers.Remove(existingPeerByEndpoint);
-                    // CRITICAL: Preserve the ProxyPort AND isPersistent flag when updating public key
                     var updatedPeer = new WireGuardPeer(publicKey, endpoint, existingPeerByEndpoint.PrivateAddress, existingPeerByEndpoint.ConnectionId, existingPeerByEndpoint.IsPersistent, existingPeerByEndpoint.ProxyPort);
                     peers.Add(updatedPeer);
-                    UpdateConfig();
                     return updatedPeer;
                 }
                 return existingPeerByEndpoint;
             }
 
-            // Use the specified private address
-            // Find a connection ID that matches the last octet of the IP
             int connectionId = (int)privateAddress.GetAddressBytes()[3];
-
-            // Allocate unique proxy port for this peer
             int proxyPort = AllocateProxyPort();
-
-            // Mark this peer ID as allocated
             allocatedPeerIds.Add(connectionId);
 
             var peer = new WireGuardPeer(publicKey, endpoint, privateAddress, connectionId, isPersistent, proxyPort);
             peers.Add(peer);
-
-            // Update WireGuard config
-            UpdateConfig();
-
-            Console.WriteLine($"✓ Added new peer {publicKey.Substring(0, 8)}... at {privateAddress} (proxy port: {proxyPort})");
             return peer;
         }
     }
@@ -294,10 +248,8 @@ public class WireGuardPeerManager
         }
 
         // Write the new config
+        // (WireGuardTunnel.AddPeer applies the config via WireGuardNT.UpdateConfiguration after calling this)
         File.WriteAllText(configPath, newConfig.ToString());
-
-        // Apply the configuration to the running WireGuard interface
-        ApplyConfigToInterface();
     }
 
     private void ApplyConfigToInterface()
@@ -377,11 +329,11 @@ public class WireGuardPeerManager
 
                     if (process.ExitCode != 0)
                     {
-                        Console.WriteLine($"⚠ Failed to apply WireGuard config: {error}");
+                        Console.WriteLine($"Failed to apply WireGuard config: {error}");
                     }
                     else
                     {
-                        Console.WriteLine($"✓ Applied WireGuard configuration with {peers.Count} peer(s)");
+                        Console.WriteLine($"Applied WireGuard configuration with {peers.Count} peer(s)");
                     }
                 }
             }
@@ -395,7 +347,7 @@ public class WireGuardPeerManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"⚠ Error applying WireGuard configuration: {ex.Message}");
+            Console.WriteLine($"Error applying WireGuard configuration: {ex.Message}");
         }
     }
 

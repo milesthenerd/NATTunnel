@@ -3,13 +3,20 @@
  *
  * Manages peer-to-peer mesh networks where peers with the same networkID
  * can discover and connect to each other.
+ *
+ * Two maps per network:
+ *   - networks: active peers with live TCP sockets (used for routing messages)
+ *   - meshMembers: all peers that have ever joined (persists across TCP disconnections)
+ *     The introducer uses meshMembers to know which WireGuard peers to send
+ *     MeshIntroduction messages to, even if those peers have disconnected from mediation.
  */
 
 class NetworkRegistry {
     constructor() {
-        // Map of networkID -> Set of peer info objects
-        // Each peer info: { peerID, socket, endpoint, natType, joinTime }
+        // Map of networkID -> Map of peerID -> peer info (active sockets only)
         this.networks = new Map();
+        // Map of networkID -> Map of peerID -> peer info (all members, persists across disconnections)
+        this.meshMembers = new Map();
     }
 
     /**
@@ -32,8 +39,12 @@ class NetworkRegistry {
             this.networks.set(networkID, new Map());
             console.log(`[NetworkRegistry] Created new network: ${networkID}`);
         }
+        if (!this.meshMembers.has(networkID)) {
+            this.meshMembers.set(networkID, new Map());
+        }
 
         const network = this.networks.get(networkID);
+        const members = this.meshMembers.get(networkID);
 
         // Check if peer already exists (reconnection case)
         if (network.has(peerID)) {
@@ -55,10 +66,20 @@ class NetworkRegistry {
                 meshIP,
                 joinTime: Date.now()
             });
-            console.log(`[NetworkRegistry] Peer ${peerID} joined network ${networkID} (meshIP: ${meshIP}, total peers: ${network.size})`);
+            console.log(`[NetworkRegistry] Peer ${peerID} joined network ${networkID} (meshIP: ${meshIP}, total active: ${network.size})`);
         }
 
-        // Return list of other peers in the network (excluding this peer)
+        // Update mesh members (persistent record)
+        members.set(peerID, {
+            peerID,
+            endpoint,
+            natType,
+            meshIP,
+            connected: true,
+            joinTime: Date.now()
+        });
+
+        // Return list of other active peers in the network (excluding this peer)
         const otherPeers = [];
         for (const [id, peer] of network.entries()) {
             if (id !== peerID) {
@@ -75,19 +96,99 @@ class NetworkRegistry {
     }
 
     /**
-     * Removes a peer from their network
+     * Removes a peer's active socket from the network (TCP disconnection).
+     * The peer remains in meshMembers so the introducer can still relay
+     * introductions to it over WireGuard.
      * @param {string} peerID - Unique peer identifier
      */
     leaveNetwork(peerID) {
         for (const [networkID, network] of this.networks.entries()) {
             if (network.has(peerID)) {
                 network.delete(peerID);
-                console.log(`[NetworkRegistry] Peer ${peerID} left network ${networkID} (remaining: ${network.size})`);
+                console.log(`[NetworkRegistry] Peer ${peerID} disconnected from network ${networkID} (active: ${network.size})`);
 
-                // Clean up empty networks
+                // Mark as disconnected in mesh members (but don't remove yet)
+                const members = this.meshMembers.get(networkID);
+                if (members && members.has(peerID)) {
+                    const member = members.get(peerID);
+                    member.connected = false;
+                    member.disconnectedAt = Date.now();
+                    console.log(`[NetworkRegistry] Peer ${peerID} marked as disconnected in mesh members`);
+                }
+
+                // Clean up empty active networks (but keep meshMembers)
                 if (network.size === 0) {
                     this.networks.delete(networkID);
-                    console.log(`[NetworkRegistry] Removed empty network ${networkID}`);
+                    console.log(`[NetworkRegistry] Removed empty active network ${networkID}`);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns all mesh members for a network (connected or not), excluding a specific peer.
+     * Used to build the OtherPeers list for MeshIntroduceRequest — includes peers that
+     * disconnected from mediation but are still reachable over WireGuard.
+     * @param {string} networkID - Network identifier
+     * @param {string} excludePeerID - Peer to exclude (typically the new peer joining)
+     * @returns {object[]} List of mesh members with meshIP for WireGuard routing
+     */
+    getMeshMembers(networkID, excludePeerID) {
+        const members = this.meshMembers.get(networkID);
+        if (!members) return [];
+
+        const now = Date.now();
+        const STALE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — remove peers disconnected longer than this
+        const staleIDs = [];
+
+        const result = [];
+        for (const [id, member] of members.entries()) {
+            if (id === excludePeerID) continue;
+
+            // Remove stale disconnected peers
+            if (!member.connected && member.disconnectedAt && (now - member.disconnectedAt) > STALE_TIMEOUT_MS) {
+                staleIDs.push(id);
+                continue;
+            }
+
+            result.push({
+                peerID: member.peerID,
+                endpoint: member.endpoint,
+                natType: member.natType,
+                meshIP: member.meshIP,
+                connected: member.connected
+            });
+        }
+
+        // Clean up stale entries
+        for (const id of staleIDs) {
+            members.delete(id);
+            console.log(`[NetworkRegistry] Removed stale mesh member ${id} (disconnected > ${STALE_TIMEOUT_MS / 1000}s)`);
+        }
+
+        return result;
+    }
+
+    /**
+     * Explicitly removes a peer from mesh membership (full leave, not just disconnect).
+     * @param {string} peerID - Unique peer identifier
+     */
+    removeMeshMember(peerID) {
+        for (const [networkID, members] of this.meshMembers.entries()) {
+            if (members.has(peerID)) {
+                members.delete(peerID);
+                console.log(`[NetworkRegistry] Peer ${peerID} removed from mesh members (network: ${networkID})`);
+
+                // Also remove from active if present
+                const network = this.networks.get(networkID);
+                if (network) network.delete(peerID);
+
+                // Clean up empty mesh member maps
+                if (members.size === 0) {
+                    this.meshMembers.delete(networkID);
+                    console.log(`[NetworkRegistry] Removed empty mesh members for network ${networkID}`);
                 }
                 return true;
             }
@@ -169,9 +270,11 @@ class NetworkRegistry {
         };
 
         for (const [networkID, network] of this.networks.entries()) {
+            const members = this.meshMembers.get(networkID);
             stats.networks.push({
                 networkID,
-                peerCount: network.size
+                activePeerCount: network.size,
+                totalMemberCount: members ? members.size : 0
             });
         }
 

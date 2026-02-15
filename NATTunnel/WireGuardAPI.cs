@@ -247,7 +247,7 @@ public static class WireGuardAPI
 
             if (adapter != IntPtr.Zero)
             {
-                Console.WriteLine($"✓ Opened existing WireGuard-NT adapter at: {adapter}");
+                Console.WriteLine($"Opened existing WireGuard-NT adapter at: {adapter}");
                 return adapter;
             }
 
@@ -266,13 +266,13 @@ public static class WireGuardAPI
                     $"Make sure wireguard.dll is installed alongside the application.");
             }
 
-            Console.WriteLine($"✓ Created WireGuard-NT adapter at: {adapter}");
+            Console.WriteLine($"Created WireGuard-NT adapter at: {adapter}");
 
             // Check driver version
             uint version = WireGuardNTAPI.WireGuardGetRunningDriverVersion();
             if (version > 0)
             {
-                Console.WriteLine($"✓ WireGuard-NT driver version: {version}");
+                Console.WriteLine($"WireGuard-NT driver version: {version}");
             }
 
             return adapter;
@@ -472,7 +472,7 @@ public static class WireGuardAPI
                 WireGuardNTAPI.WireGuardGetAdapterLUID(adapter, out interfaceLuid);
                 if (interfaceLuid != 0)
                 {
-                    Console.WriteLine($"✓ Got LUID from WireGuard adapter: {interfaceLuid}");
+                    Console.WriteLine($"Got LUID from WireGuard adapter: {interfaceLuid}");
                 }
                 else
                 {
@@ -497,7 +497,7 @@ public static class WireGuardAPI
                             if (luidObj is ulong luidValue && luidValue != 0)
                             {
                                 interfaceLuid = luidValue;
-                                Console.WriteLine($"✓ Extracted LUID via reflection: {interfaceLuid}");
+                                Console.WriteLine($"Extracted LUID via reflection: {interfaceLuid}");
                             }
                         }
                     }
@@ -510,7 +510,7 @@ public static class WireGuardAPI
 
             if (interfaceLuid == 0)
             {
-                Console.WriteLine("✗ Could not obtain interface LUID");
+                Console.WriteLine("Could not obtain interface LUID");
                 return false;
             }
 
@@ -552,12 +552,12 @@ public static class WireGuardAPI
 
             if (result == 0)
             {
-                Console.WriteLine("✓ Successfully created IP address entry via IPHLPAPI");
+                Console.WriteLine("Successfully created IP address entry via IPHLPAPI");
                 return true;
             }
             else
             {
-                Console.WriteLine($"✗ CreateUnicastIpAddressEntry failed with error: {result}");
+                Console.WriteLine($"CreateUnicastIpAddressEntry failed with error: {result}");
                 return false;
             }
         }
@@ -605,7 +605,7 @@ public static class WireGuardAPI
                         if (deleteResult == 0)
                         {
                             var ipAddr = $"{row.Address_Ipv4[0]}.{row.Address_Ipv4[1]}.{row.Address_Ipv4[2]}.{row.Address_Ipv4[3]}";
-                            Console.WriteLine($"✓ Deleted existing IP: {ipAddr}");
+                            Console.WriteLine($"Deleted existing IP: {ipAddr}");
                         }
                         else
                         {
