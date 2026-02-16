@@ -1,4 +1,4 @@
-const { MessageTypes, StatusTypes, Config } = require('./constants');
+const { MessageTypes, StatusTypes, Config, NATTypes } = require('./constants');
 const { Buffer } = require('buffer');
 const NetworkRegistry = require('./network-registry');
 
@@ -93,7 +93,36 @@ class MessageHandler {
         const socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
         if (socketInfo) {
             socketInfo.localPort = message.LocalPort;
+
+            // Before assigning clientID, remove any OLD socket with the same clientID.
+            // On reconnect, the old TCP socket's 'close' event may not have fired yet,
+            // leaving a stale entry. If two sockets share the same clientID,
+            // updateNATTestPort picks the first (stale) one and the NAT test silently fails.
+            //
+            // IMPORTANT: Skip this cleanup when the NATTypeRequest has a ConnectionID.
+            // Per-connection mesh tunnels share the same clientID as the mesh mode's primary
+            // TCP connection. Removing the "stale" socket would destroy the mesh mode's
+            // main control connection, breaking keepalive, peer discovery, and introductions.
+            if (message.ClientID && !message.ConnectionID) {
+                const staleIndex = this.connectionManager.sockets.findIndex(
+                    s => s.clientID === message.ClientID && s.socket !== socket
+                );
+                if (staleIndex !== -1) {
+                    const stale = this.connectionManager.sockets[staleIndex];
+                    console.log(`[MessageHandler] Removing stale socket for clientID ${message.ClientID} (${stale.ip}:${stale.tcpPort}) — peer reconnected`);
+                    // Don't destroy() the stale socket — the peer may still be using it
+                    // during the reconnect transition. removeSocket cleans up tracking state;
+                    // the socket will close naturally when the OS detects the dead connection.
+                    this.connectionManager.removeSocket(stale.socket, message.ClientID);
+                }
+            }
+
             socketInfo.clientID = message.ClientID;
+
+            // Reset NAT test state so checkNATType waits for fresh results
+            socketInfo.externalPortOne = 0;
+            socketInfo.externalPortTwo = 0;
+            socketInfo.natType = NATTypes.Unknown;
         }
 
         // Check if this is a per-connection tunnel (server-side tunnel for specific client)
@@ -260,10 +289,11 @@ class MessageHandler {
             );
         }
 
-        // Fallback: try to find by IP
+        // Fallback: try to find by IP (check both TCP IP and UDP IP)
         if (!clientUDPInfo) {
             clientUDPInfo = this.connectionManager.udpConnectionInfo.find(
-                info => clientSocketInfo.ip.includes(info.ip)
+                info => clientSocketInfo.ip.includes(info.ip) ||
+                    (clientSocketInfo.udpIp && clientSocketInfo.udpIp.includes(info.ip))
             );
         }
 
@@ -313,10 +343,11 @@ class MessageHandler {
                     info => info.localPort === targetSocket.localPort
                 );
             }
-            // Fallback: try by IP
+            // Fallback: try by IP (check both TCP IP and UDP IP)
             if (!targetUDPInfo) {
                 targetUDPInfo = this.connectionManager.udpConnectionInfo.find(
-                    info => targetSocket.ip.includes(info.ip)
+                    info => targetSocket.ip.includes(info.ip) ||
+                        (targetSocket.udpIp && targetSocket.udpIp.includes(info.ip))
                 );
             }
 
@@ -633,7 +664,39 @@ class MessageHandler {
         // Mesh peers stay connected to receive peer updates and connection coordination
         this.connectionManager.updateTimeout(socketInfo);  // Pass socketInfo object directly
 
-        const endpoint = `${socketInfo.ip}:${socketInfo.localPort || 0}`;
+        // Use the UDP IP (where the peer actually sends UDP from) for the endpoint.
+        // For symmetric NAT, the UDP IP may differ from the TCP IP.
+        // Fall back to TCP IP if no UDP IP is available yet.
+        let peerIP = socketInfo.udpIp || socketInfo.ip;
+        // Strip ::ffff: IPv6-mapped prefix so endpoints are plain IPv4 (e.g. "1.2.3.4:PORT")
+        if (peerIP && peerIP.startsWith('::ffff:')) {
+            peerIP = peerIP.substring(7);
+        }
+
+        // Use the external port from UDP info (as seen by the server) — this is the port
+        // other peers need to send to. For DirectMapping, external == local. For Restricted
+        // NAT, the external port may differ from the local port.
+        // This matches handleConnectionRequest which uses clientUDPInfo.port.
+        let externalPort = socketInfo.localPort || 0;
+        let udpInfo = null;
+        if (socketInfo.localPort) {
+            udpInfo = this.connectionManager.udpConnectionInfo.find(
+                info => info.localPort === socketInfo.localPort
+            );
+        }
+        if (!udpInfo) {
+            udpInfo = this.connectionManager.udpConnectionInfo.find(
+                info => peerIP === info.ip || (socketInfo.ip && socketInfo.ip.includes(info.ip)) ||
+                    (socketInfo.udpIp && socketInfo.udpIp.includes(info.ip))
+            );
+        }
+        if (udpInfo) {
+            externalPort = udpInfo.port;
+            console.log(`[MessageHandler] Using external port ${externalPort} for peer ${PeerID} (local: ${socketInfo.localPort})`);
+        } else {
+            console.log(`[MessageHandler] No UDP info for peer ${PeerID} — using localPort ${externalPort}`);
+        }
+        const endpoint = `${peerIP}:${externalPort}`;
 
         const { NATTypes } = require('./constants');
 
@@ -801,29 +864,79 @@ class MessageHandler {
     /**
      * Retries a pending introduction using a different introducer.
      * Called when an introducer disconnects before sending its MeshIntroduceAck.
+     *
+     * Searches ALL peers in the network for a replacement introducer — not just
+     * the peersToIntroduce list, which only contains peers the old introducer was
+     * supposed to relay to (and may all be disconnected from mediation).
      */
     retryPendingIntroduction(disconnectedPeerID) {
+        const { NATTypes } = require('./constants');
+
         for (const [newPeerID, pending] of this.pendingIntroductions.entries()) {
             if (pending.introducerPeerID !== disconnectedPeerID) continue;
 
             console.log(`[MessageHandler] Introducer ${disconnectedPeerID} disconnected — retrying introduction for ${newPeerID}`);
 
-            // Find a new introducer from peersToIntroduce that is still connected and non-symmetric.
-            // Symmetric NAT peers are NEVER eligible as introducers — no fallback.
-            const { NATTypes } = require('./constants');
-            const newIntroducer = pending.peersToIntroduce.find(p => {
-                const peer = this.networkRegistry.findPeerByID(p.peerID);
-                return peer && peer.socket && p.natType !== NATTypes.Symmetric;
-            });
+            // Search all peers in the network for a replacement introducer.
+            // A valid introducer must be:
+            //   1. Non-symmetric NAT (symmetric peers can't hole-punch on behalf of others)
+            //   2. Have a live TCP socket to the mediation server
+            //   3. Not be the new peer itself
+            //   4. Not be the disconnected introducer
+            let newIntroducer = null;
+            let newIntroducerPeer = null;
 
+            // First check active network peers (they have live TCP sockets by definition)
+            const networkPeers = this.networkRegistry.getPeersInNetwork(pending.networkID);
+            for (const p of networkPeers) {
+                if (p.peerID === newPeerID || p.peerID === disconnectedPeerID) continue;
+                if (p.natType === NATTypes.Symmetric) continue;
+                const activePeer = this.networkRegistry.findPeerByID(p.peerID);
+                if (activePeer && activePeer.socket) {
+                    newIntroducer = p;
+                    newIntroducerPeer = activePeer;
+                    break;
+                }
+            }
+
+            // Also check mesh members who may have reconnected or still have a live socket
             if (!newIntroducer) {
-                console.log(`[MessageHandler] No eligible replacement introducer found for ${newPeerID}`);
+                const meshMembers = this.networkRegistry.getMeshMembers(pending.networkID, newPeerID);
+                for (const m of meshMembers) {
+                    if (m.peerID === disconnectedPeerID) continue;
+                    if (m.natType === NATTypes.Symmetric) continue;
+                    // Check if this mesh member has a live TCP socket
+                    const sockInfo = this.connectionManager.sockets.find(s => s.clientID === m.peerID);
+                    if (sockInfo && sockInfo.socket) {
+                        newIntroducer = m;
+                        // Re-register in active network if needed
+                        const activeNetwork = this.networkRegistry.networks.get(pending.networkID);
+                        if (activeNetwork && !activeNetwork.has(m.peerID)) {
+                            activeNetwork.set(m.peerID, {
+                                peerID: m.peerID,
+                                socket: sockInfo.socket,
+                                endpoint: m.endpoint,
+                                natType: m.natType,
+                                meshIP: m.meshIP,
+                                joinTime: Date.now()
+                            });
+                            console.log(`[MessageHandler] Re-added peer ${m.peerID} to active network for introducer retry`);
+                        }
+                        newIntroducerPeer = this.networkRegistry.findPeerByID(m.peerID) || { socket: sockInfo.socket };
+                        break;
+                    }
+                }
+            }
+
+            if (!newIntroducer || !newIntroducerPeer) {
+                console.log(`[MessageHandler] No eligible replacement introducer found for ${newPeerID} in network ${pending.networkID}`);
                 this.pendingIntroductions.delete(newPeerID);
                 continue;
             }
 
-            const newIntroducerPeer = this.networkRegistry.findPeerByID(newIntroducer.peerID);
-            const remainingPeers = pending.peersToIntroduce.filter(p => p.peerID !== newIntroducer.peerID);
+            // Build updated peersToIntroduce: all mesh members except the new introducer and the new peer
+            const allMembers = this.networkRegistry.getMeshMembers(pending.networkID, newPeerID);
+            const remainingPeers = allMembers.filter(p => p.peerID !== newIntroducer.peerID);
 
             const introduceRequest = {
                 ID: MessageTypes.MeshIntroduceRequest,
@@ -834,7 +947,7 @@ class MessageHandler {
                 OtherPeers: remainingPeers
             };
 
-            console.log(`[MessageHandler] Sending retry MeshIntroduceRequest to new introducer ${newIntroducer.peerID}`);
+            console.log(`[MessageHandler] Sending retry MeshIntroduceRequest to new introducer ${newIntroducer.peerID} (${remainingPeers.length} peers to introduce)`);
             newIntroducerPeer.socket.write(Buffer.from(JSON.stringify(introduceRequest)));
 
             // Update the pending record with the new introducer

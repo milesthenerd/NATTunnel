@@ -160,13 +160,21 @@ class NATServer {
             if (message.ID === MessageTypes.NATTest) {
                 const socket = this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort);
                 if (socket) {
-                    socket.ip = info.address;
+                    // Store the UDP source IP separately so we don't clobber the TCP IP.
+                    // Symmetric NAT peers may use different IPs for TCP vs UDP traffic.
+                    // socket.ip stays as the TCP IP (used for socket lifecycle management);
+                    // socket.udpIp tracks the UDP IP (used for peer endpoint tracking).
+                    socket.udpIp = info.address;
+                    // If TCP and UDP IPs match, also update socket.ip (handles ::ffff: normalization)
+                    if (!socket.ip || socket.ip === '0.0.0.0') {
+                        socket.ip = info.address;
+                    }
 
                     // Add UDP info for this peer so connection requests work
                     // Store the external port (as seen by the server) — this is the port
                     // that other peers need to send to. Also store localPort for lookups.
                     // For DirectMapping, external == local. For Restricted NAT, they may differ.
-                    console.log(`[Server] Adding UDP info from NAT test: ${info.address}:${info.port} (localPort=${socket.localPort})`);
+                    console.log(`[Server] Adding UDP info from NAT test: ${info.address}:${info.port} (localPort=${socket.localPort}, tcpIp=${socket.ip})`);
                     this.connectionManager.addUDPInfo(info.address, info.port, socket.localPort);
 
                     this.connectionManager.checkNATType(
