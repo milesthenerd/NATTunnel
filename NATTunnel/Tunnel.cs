@@ -1798,11 +1798,12 @@ public class Tunnel : IDisposable
 
                 void TryConnectFromSymmetric(object source, ElapsedEventArgs e)
                 {
-                    // For symmetric NAT, ALWAYS send from all 256 probes until connection is confirmed
-                    // Don't switch to shared client just because we received packets - we need to keep
-                    // sending from all probes so the remote peer can receive from the successful probe
+                    // Stop sending once the connection is fully established
+                    if (connected) return;
+
                     if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
+                        // Send from all 256 probes until a response is received
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         foreach (UdpClient probe in symmetricConnectionUdpProbes)
@@ -1812,12 +1813,9 @@ public class Tunnel : IDisposable
                     }
                     else
                     {
-                        // Connection confirmed - send from shared client
+                        // Threshold reached but not fully connected — keep sending from the
+                        // winning probe so the non-symmetric peer continues to receive packets
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
-                        {
-                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
-                        }
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
@@ -1825,19 +1823,12 @@ public class Tunnel : IDisposable
 
                 void TryConnectToSymmetric(object source, ElapsedEventArgs e)
                 {
-                    if (holePunchReceivedCount >= 1 && holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
-                    {
-                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                        if (Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")) != null)
-                        {
-                            if (isServer) message.SetPrivateAddress(Clients.GetClient(IPEndPoint.Parse($"{targetPeerIp}:{targetPeerPort}")).GetPrivateAddress());
-                        }
-                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
-                    }
+                    // Stop sending once the connection is fully established
+                    if (connected) return;
 
                     if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                     {
+                        // Send to 100 random ports trying to hit the symmetric peer's allocated port
                         MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
 
@@ -1846,6 +1837,15 @@ public class Tunnel : IDisposable
                         {
                             udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, randPort.Next(1024, 65536)));
                         }
+                    }
+                    else
+                    {
+                        // Threshold reached but not fully connected — keep sending to the
+                        // symmetric peer's confirmed endpoint so its winning probe receives
+                        // packets and can complete connection establishment
+                        MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                        udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
                 }
 
@@ -2039,6 +2039,15 @@ public class Tunnel : IDisposable
                                                         // Mesh mode: DON'T replace shared udpClient or cancel shared tokens.
                                                         // Use the winning probe for this tunnel's sends and start a private receive loop.
                                                         udpClient = tempUdpClient;
+
+                                                        // Process the first winning packet immediately.
+                                                        // Without this, the packet consumed by EndReceive never runs
+                                                        // through ProcessUdpPacketBody, so the connection establishment
+                                                        // logic (holePunchReceivedCount >= threshold → connected = true)
+                                                        // never triggers for this packet.
+                                                        totalBytesReceived += receivedBuffer.Length;
+                                                        UpdateActivity();
+                                                        ProcessUdpPacketBody(receivedBuffer, receivedEndpoint);
 
                                                         CancellationTokenSource probeCts = new CancellationTokenSource();
                                                         Task.Run(() =>
