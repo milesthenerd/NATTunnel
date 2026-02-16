@@ -41,15 +41,17 @@ public class Tunnel : IDisposable
     private readonly bool isServer;
     private NATType natType = NATType.Unknown;
     private List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
+    private int probeConnected = 0; // Atomic flag: first winning probe sets this to 1 via Interlocked.CompareExchange
     private int currentConnectionID = 0;
     public IPAddress privateIP = null;
     private WireGuardTunnel wireguardTunnel;
     private int maxConnectionTimeout = 15;
+    private int symmetricConnectionTimeout = 60; // Symmetric NAT needs more time for random port spray
     private int connectionTimeout;
     private Timer initialConnectionTimer;
     private Timer connectionAttempt;
     private int retryAttempt = 0;
-    private int maxRetryAttempts = 5;
+    private int maxRetryAttempts = 1;
     private int retryCooldown = 10;  // seconds before retrying after failure
     private bool clientIPAssigned = false;  // Track if we've already assigned the client IP
     private RSACryptoServiceProvider rsa;
@@ -185,6 +187,27 @@ public class Tunnel : IDisposable
             Enabled = false
         };
         initialConnectionTimer.Elapsed += ConnectionTimer;
+    }
+
+    /// <summary>
+    /// Cleans up state from a previous connection attempt so a new one can start cleanly.
+    /// Stops the old connectionAttempt timer and disposes symmetric NAT probe sockets.
+    /// </summary>
+    private void CleanupPreviousConnectionAttempt()
+    {
+        if (connectionAttempt != null)
+        {
+            connectionAttempt.Enabled = false;
+            connectionAttempt.Dispose();
+            connectionAttempt = null;
+        }
+
+        // Dispose and clear old symmetric NAT probes
+        foreach (var probe in symmetricConnectionUdpProbes)
+        {
+            try { probe?.Close(); } catch { }
+        }
+        symmetricConnectionUdpProbes.Clear();
     }
 
     /// <summary>
@@ -479,6 +502,7 @@ public class Tunnel : IDisposable
                                 // Server or mesh peer - just reset connection state and retry
                                 connectionTimeout = maxConnectionTimeout;
                                 holePunchReceivedCount = 0;
+                                probeConnected = 0;
                                 connectionAttempt.Enabled = true;
                                 initialConnectionTimer.Enabled = true;
                             }
@@ -600,7 +624,11 @@ public class Tunnel : IDisposable
     /// </summary>
     public void InjectConnectionBegin(string endpointString, NATType peerNatType, NATType ownNatType, string peerMeshIPString)
     {
+        // Stop any previous connection attempt's timer and probes
+        CleanupPreviousConnectionAttempt();
+
         holePunchReceivedCount = 0;
+        probeConnected = 0;
         connectionTimeout = maxConnectionTimeout;
         retryAttempt = 0;
         initialConnectionTimer.Enabled = true;
@@ -611,15 +639,24 @@ public class Tunnel : IDisposable
             peerMeshIP = IPAddress.Parse(peerMeshIPString);
         }
 
-        // Parse endpoint
-        var parts = endpointString.Split(':');
-        if (parts.Length == 2)
+        // Parse endpoint — handle both "1.2.3.4:PORT" and "::ffff:1.2.3.4:PORT" formats
+        string parsedIpString = null;
+        int parsedPort = 0;
+        int lastColon = endpointString.LastIndexOf(':');
+        if (lastColon > 0 && int.TryParse(endpointString.Substring(lastColon + 1), out parsedPort))
         {
-            targetPeerIp = IPAddress.Parse(parts[0]);
-            targetPeerPort = int.Parse(parts[1]);
+            parsedIpString = endpointString.Substring(0, lastColon);
+            // Strip IPv6-mapped IPv4 prefix (::ffff:)
+            if (parsedIpString.StartsWith("::ffff:", StringComparison.OrdinalIgnoreCase))
+                parsedIpString = parsedIpString.Substring(7);
+            if (IPAddress.TryParse(parsedIpString, out var parsedIp))
+            {
+                targetPeerIp = parsedIp;
+                targetPeerPort = parsedPort;
+            }
         }
 
-        Console.WriteLine($"[Tunnel] InjectConnectionBegin: endpoint={endpointString}, peerNAT={peerNatType}, ownNAT={ownNatType}");
+        Console.WriteLine($"[Tunnel] InjectConnectionBegin: endpoint={endpointString}, parsed={targetPeerIp}:{targetPeerPort}, peerNAT={peerNatType}, ownNAT={ownNatType}");
 
         // Set our own NAT type
         if (natType == NATType.Unknown)
@@ -632,8 +669,11 @@ public class Tunnel : IDisposable
             {
                 UdpClient();
                 // Restore targetPeerIp — UdpClient() overwrites it with remoteIp
-                targetPeerIp = IPAddress.Parse(parts[0]);
-                targetPeerPort = int.Parse(parts[1]);
+                if (parsedIpString != null)
+                {
+                    targetPeerIp = IPAddress.Parse(parsedIpString);
+                    targetPeerPort = parsedPort;
+                }
             }
         }
 
@@ -641,6 +681,8 @@ public class Tunnel : IDisposable
         if (natType == NATType.Symmetric)
         {
             // We're symmetric: create 256 UDP probe clients and send from all of them
+            // Extend timeout — symmetric NAT needs more time for random port scanning
+            connectionTimeout = symmetricConnectionTimeout;
             Console.WriteLine($"[Symmetric NAT] Setting up 256 probe clients (InjectConnectionBegin)");
 
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = false };
@@ -649,12 +691,23 @@ public class Tunnel : IDisposable
                 if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                    message.ConnectionID = currentConnectionID;
+                    // Don't set ConnectionID — introducer-relayed tunnels use mismatched IDs
+                    // (each side hashes the remote peer's ID). Source IP filtering is sufficient.
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     foreach (System.Net.Sockets.UdpClient probe in symmetricConnectionUdpProbes)
                     {
                         probe.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
+                }
+                else if (!connected)
+                {
+                    // Connection confirmed but not yet fully established — keep sending from
+                    // the winning probe (udpClient) so the non-symmetric peer continues to
+                    // receive packets and can respond. Without this, both sides stop sending
+                    // and the connection stalls.
+                    MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 }
             };
 
@@ -674,7 +727,7 @@ public class Tunnel : IDisposable
                         byte[] receivedBuffer = capturedProbe.EndReceive(res, ref receivedEndpoint);
                         holePunchReceivedCount++;
 
-                        if (receivedEndpoint.Address.Equals(targetPeerIp) && holePunchReceivedCount == 1)
+                        if (receivedEndpoint.Address.Equals(targetPeerIp) && Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
                         {
                             Console.WriteLine($"[Symmetric NAT] Connection established on probe port {((IPEndPoint)capturedProbe.Client.LocalEndPoint).Port}");
 
@@ -684,6 +737,16 @@ public class Tunnel : IDisposable
                                 // Instead, switch this tunnel to use the winning probe for sends,
                                 // and start a private receive loop that feeds into ProcessUdpPacketBody.
                                 udpClient = capturedProbe;
+
+                                // Process the packet that triggered the winning probe immediately.
+                                // Without this, the first packet (e.g. WG key exchange from the
+                                // non-symmetric peer) would be consumed by EndReceive but never
+                                // run through ProcessUdpPacketBody, causing a deadlock where both
+                                // sides stop sending and the symmetric side never completes
+                                // connection establishment.
+                                totalBytesReceived += receivedBuffer.Length;
+                                UpdateActivity();
+                                ProcessUdpPacketBody(receivedBuffer, receivedEndpoint);
 
                                 // Start a receive loop on the winning probe socket for this tunnel only
                                 CancellationTokenSource probeCts = new CancellationTokenSource();
@@ -736,6 +799,8 @@ public class Tunnel : IDisposable
         else if (peerNatType == NATType.Symmetric)
         {
             // Peer is symmetric: send to random ports to try to hit the peer's allocated port
+            // Extend timeout — symmetric NAT needs more time for random port scanning
+            connectionTimeout = symmetricConnectionTimeout;
             Console.WriteLine($"[Tunnel] Peer is symmetric — using random port spray (InjectConnectionBegin)");
 
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = true };
@@ -744,7 +809,7 @@ public class Tunnel : IDisposable
                 if (holePunchReceivedCount >= 1 && holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                    message.ConnectionID = currentConnectionID;
+                    // Don't set ConnectionID — source IP filtering handles cross-talk prevention
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 }
@@ -752,13 +817,22 @@ public class Tunnel : IDisposable
                 if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                    message.ConnectionID = currentConnectionID;
+                    // Don't set ConnectionID — source IP filtering handles cross-talk prevention
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     Random randPort = new Random();
                     for (int i = 0; i < 100; i++)
                     {
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, randPort.Next(1024, 65536)));
                     }
+                }
+                else if (!connected)
+                {
+                    // Threshold reached but not fully connected yet — keep sending to the
+                    // symmetric peer's confirmed endpoint so its winning probe receives
+                    // packets and can complete connection establishment.
+                    MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 }
             };
         }
@@ -771,7 +845,8 @@ public class Tunnel : IDisposable
                 if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
-                    message.ConnectionID = currentConnectionID;
+                    // Don't set ConnectionID — introducer-relayed tunnels use mismatched IDs
+                    // (each side hashes the remote peer's ID). Source IP filtering is sufficient.
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 }
@@ -1874,7 +1949,11 @@ public class Tunnel : IDisposable
                             break;
                         case MediationMessageType.ConnectionBegin:
                             {
+                                // Stop any previous connection attempt's timer and probes
+                                CleanupPreviousConnectionAttempt();
+
                                 holePunchReceivedCount = 0;
+                                probeConnected = 0;
                                 connectionTimeout = maxConnectionTimeout;
                                 retryAttempt = 0;  // Reset retry counter for new connection attempt
                                 initialConnectionTimer.Enabled = true;
@@ -1921,6 +2000,8 @@ public class Tunnel : IDisposable
 
                                 if (natType == NATType.Symmetric)
                                 {
+                                    // Extend timeout — symmetric NAT needs more time for random port scanning
+                                    connectionTimeout = symmetricConnectionTimeout;
                                     Console.WriteLine($"[Symmetric NAT] Setting up 256 probe clients");
                                     IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
                                     targetPeerIp = targetPeerEndpoint.Address;
@@ -1949,7 +2030,7 @@ public class Tunnel : IDisposable
                                                 byte[] receivedBuffer = tempUdpClient.EndReceive(res, ref receivedEndpoint);
                                                 holePunchReceivedCount++;
 
-                                                if (receivedEndpoint.Address.Equals(targetPeerIp) && holePunchReceivedCount == 1)
+                                                if (receivedEndpoint.Address.Equals(targetPeerIp) && Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
                                                 {
                                                     Console.WriteLine($"[Symmetric NAT] Connection established on probe port {((IPEndPoint)tempUdpClient.Client.LocalEndPoint).Port}");
 
@@ -2009,6 +2090,8 @@ public class Tunnel : IDisposable
 
                                 if (receivedMessage.NATType == NATType.Symmetric)
                                 {
+                                    // Extend timeout — symmetric NAT needs more time for random port scanning
+                                    connectionTimeout = symmetricConnectionTimeout;
                                     IPEndPoint targetPeerEndpoint = receivedMessage.GetEndpoint();
                                     targetPeerIp = targetPeerEndpoint.Address;
                                     connectionAttempt = new Timer(1000)

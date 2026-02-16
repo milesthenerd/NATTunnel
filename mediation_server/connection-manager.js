@@ -41,8 +41,16 @@ class ConnectionManager {
             const socketInfo = this.sockets[index];
             // Clean up any pending connections for this client
             this.cleanupPendingConnections(socketInfo);
-            // Remove associated UDP info
+            // Remove associated UDP info — try by localPort first (reliable even when
+            // TCP IP differs from UDP IP, e.g. symmetric NAT or proxy), then by both IPs
+            if (socketInfo.localPort) {
+                this.removeUDPInfoByLocalPort(socketInfo.localPort);
+            }
             this.removeUDPInfo(socketInfo.ip);
+            // Also clean up by UDP IP if it differs from TCP IP (symmetric NAT with split IPs)
+            if (socketInfo.udpIp && socketInfo.udpIp !== socketInfo.ip) {
+                this.removeUDPInfo(socketInfo.udpIp);
+            }
             this.sockets.splice(index, 1);
             console.log(`Removed client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort})`);
             // Notify listener (network registry cleanup, introduction retries, etc.)
@@ -53,21 +61,26 @@ class ConnectionManager {
     }
 
     cleanupPendingConnections(socketInfo) {
-        // Find any connection pairs involving this socket and notify the other party
+        // Find any connection pairs involving this socket and notify the other party.
+        // Match by clientID (unique per peer) instead of IP address to avoid
+        // accidentally cleaning up connections belonging to other peers on the same IP
+        // (e.g. reconnects, per-connection tunnels, or multiple peers behind the same NAT).
+        const clientID = socketInfo.clientID;
         Object.entries(this.currentConnectionPairs).forEach(([id, pair]) => {
-            if (pair.server_info === socketInfo.ip || pair.client_info === socketInfo.ip) {
-                // Find the other party in the connection
-                const otherSocket = this.sockets.find(s =>
-                    (pair.server_info === socketInfo.ip && s.ip === pair.client_info) ||
-                    (pair.client_info === socketInfo.ip && s.ip === pair.server_info)
-                );
+            if (pair.server_clientID === clientID || pair.client_clientID === clientID) {
+                // Find the other party in the connection by their clientID
+                const otherClientID = pair.server_clientID === clientID ? pair.client_clientID : pair.server_clientID;
+                const otherSocket = this.sockets.find(s => s.clientID === otherClientID);
 
                 if (otherSocket) {
-                    // Notify the other party that the connection attempt failed
-                    otherSocket.socket.write(Buffer.from(JSON.stringify({
-                        ID: MessageTypes.ConnectionTimeout,
-                        Message: "Peer disconnected"
-                    })));
+                    try {
+                        otherSocket.socket.write(Buffer.from(JSON.stringify({
+                            ID: MessageTypes.ConnectionTimeout,
+                            Message: "Peer disconnected"
+                        })));
+                    } catch (e) {
+                        // Other socket may already be dead
+                    }
                 }
 
                 // Free up the UDP connection status for both peers
@@ -104,6 +117,13 @@ class ConnectionManager {
 
     removeUDPInfo(ip) {
         const index = this.udpConnectionInfo.findIndex(info => info.ip === ip);
+        if (index !== -1) {
+            this.udpConnectionInfo.splice(index, 1);
+        }
+    }
+
+    removeUDPInfoByLocalPort(localPort) {
+        const index = this.udpConnectionInfo.findIndex(info => info.localPort === localPort);
         if (index !== -1) {
             this.udpConnectionInfo.splice(index, 1);
         }
