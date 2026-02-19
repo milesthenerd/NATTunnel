@@ -8,7 +8,7 @@ public static class WireGuardDynamic
     /// <summary>
     /// Dynamically adds a peer to a running WireGuard interface using wg set command
     /// </summary>
-    public static bool AddPeerToInterface(string interfaceName, string publicKey, string endpoint, string allowedIPs, int persistentKeepalive = 25)
+    public static bool AddPeerToInterface(string interfaceName, string publicKey, string endpoint, string allowedIPs, int persistentKeepalive = 5)
     {
         try
         {

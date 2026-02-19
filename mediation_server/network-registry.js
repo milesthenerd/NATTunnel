@@ -29,7 +29,7 @@ class NetworkRegistry {
      * @param {string} meshIP - Peer's mesh IP address (optional)
      * @returns {object[]} List of other peers in the same network
      */
-    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null) {
+    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null) {
         if (!networkID || !peerID) {
             throw new Error('networkID and peerID are required');
         }
@@ -55,6 +55,8 @@ class NetworkRegistry {
             existingPeer.endpoint = endpoint;
             existingPeer.natType = natType;
             existingPeer.meshIP = meshIP;
+            existingPeer.localIP = localIP;
+            existingPeer.localPort = localPort;
             existingPeer.joinTime = Date.now();
         } else {
             // Add new peer
@@ -64,6 +66,8 @@ class NetworkRegistry {
                 endpoint,
                 natType,
                 meshIP,
+                localIP,
+                localPort,
                 joinTime: Date.now()
             });
             console.log(`[NetworkRegistry] Peer ${peerID} joined network ${networkID} (meshIP: ${meshIP}, total active: ${network.size})`);
@@ -75,6 +79,8 @@ class NetworkRegistry {
             endpoint,
             natType,
             meshIP,
+            localIP,
+            localPort,
             connected: true,
             joinTime: Date.now()
         });
@@ -87,7 +93,9 @@ class NetworkRegistry {
                     peerID: peer.peerID,
                     endpoint: peer.endpoint,
                     natType: peer.natType,
-                    meshIP: peer.meshIP
+                    meshIP: peer.meshIP,
+                    localIP: peer.localIP,
+                    localPort: peer.localPort
                 });
             }
         }
@@ -158,6 +166,8 @@ class NetworkRegistry {
                 endpoint: member.endpoint,
                 natType: member.natType,
                 meshIP: member.meshIP,
+                localIP: member.localIP,
+                localPort: member.localPort,
                 connected: member.connected
             });
         }

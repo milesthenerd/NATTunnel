@@ -656,13 +656,10 @@ public class Tunnel : IDisposable
             }
         }
 
-        Console.WriteLine($"[Tunnel] InjectConnectionBegin: endpoint={endpointString}, parsed={targetPeerIp}:{targetPeerPort}, peerNAT={peerNatType}, ownNAT={ownNatType}");
-
         // Set our own NAT type
         if (natType == NATType.Unknown)
         {
             natType = ownNatType;
-            Console.WriteLine($"[Tunnel] Set own NAT type to {natType}");
 
             // Start UDP client (for mesh mode this just starts timers, not a listen loop)
             if (!isServer && !udpClientTaskCancellationToken.IsCancellationRequested)
@@ -935,9 +932,13 @@ public class Tunnel : IDisposable
             targetPeerPort = listenEndpoint.Port;
         }
 
-        if (Equals(listenEndpoint.Address, targetPeerIp))
+        // Match by IP, and also by port when known — needed to disambiguate peers
+        // behind the same NAT (same public IP, different external ports).
+        // Before connection: accept any port from the target IP (port may not be known yet).
+        // After connection: lock to the established port to prevent cross-talk.
+        if (Equals(listenEndpoint.Address, targetPeerIp) &&
+            (targetPeerPort == 0 || !connected || listenEndpoint.Port == targetPeerPort))
         {
-            Console.WriteLine($"[HolePunch] IP match! from={listenEndpoint.Address}:{listenEndpoint.Port} target={targetPeerIp}:{targetPeerPort} count={holePunchReceivedCount} msgType={receivedMessage.ID} connID={currentConnectionID}");
             if (holePunchReceivedCount >= HOLE_PUNCH_THRESHOLD && !connected)
             {
                 // Notify mediation server of connection (only if TCP is available)
@@ -996,11 +997,13 @@ public class Tunnel : IDisposable
         {
             case MediationMessageType.HolePunchAttempt:
                 {
-                    // In mesh mode with shared socket, only process if from our target peer's IP.
+                    // In mesh mode with shared socket, only process if from our target peer.
                     // Without this, hole punch packets from OTHER peers would inflate our holePunchReceivedCount.
-                    if (meshPeerMode && targetPeerIp != null && !Equals(listenEndpoint.Address, targetPeerIp))
+                    // Check both IP and port (when known) to disambiguate same-NAT peers.
+                    if (meshPeerMode && targetPeerIp != null &&
+                        (!Equals(listenEndpoint.Address, targetPeerIp) ||
+                         (targetPeerPort != 0 && listenEndpoint.Port != targetPeerPort)))
                         break;
-                    Console.WriteLine($"[HolePunch] Received HolePunchAttempt from {listenEndpoint.Address}:{listenEndpoint.Port} (target={targetPeerIp}:{targetPeerPort}, match={Equals(listenEndpoint.Address, targetPeerIp)}, count={holePunchReceivedCount}, connID={currentConnectionID})");
                     holePunchReceivedCount++;
                     connectionTimeout = maxConnectionTimeout;
                     try
@@ -1292,10 +1295,13 @@ public class Tunnel : IDisposable
                 break;
             case MediationMessageType.SymmetricHolePunchAttempt:
                 {
-                    // In mesh mode with shared socket, only process if from our target peer's IP.
+                    // In mesh mode with shared socket, only process if from our target peer.
                     // Without this, symmetric hole punch packets from OTHER peers would corrupt
                     // this tunnel's targetPeerIp/Port (line below overwrites them with the source).
-                    if (meshPeerMode && targetPeerIp != null && !Equals(listenEndpoint.Address, targetPeerIp))
+                    // Check both IP and port (when known) to disambiguate same-NAT peers.
+                    if (meshPeerMode && targetPeerIp != null &&
+                        (!Equals(listenEndpoint.Address, targetPeerIp) ||
+                         (targetPeerPort != 0 && listenEndpoint.Port != targetPeerPort)))
                         break;
                     holePunchReceivedCount++;
                     connectionTimeout = maxConnectionTimeout;
@@ -1791,7 +1797,6 @@ public class Tunnel : IDisposable
                     {
                         MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                         byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
-                        Console.WriteLine($"[HolePunch] Sending to {targetPeerIp}:{targetPeerPort} (count={holePunchReceivedCount}, connID={currentConnectionID})");
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
                 }
@@ -1908,6 +1913,7 @@ public class Tunnel : IDisposable
                             {
                                 MediationMessage message = new MediationMessage(MediationMessageType.NATTypeRequest);
                                 message.LocalPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
+                                message.LocalIP = GetLanIPAddress()?.ToString();
                                 message.ClientID = clientID;
                                 // Include connection ID if this tunnel is for a specific connection (server-side per-client tunnel)
                                 if (assignedConnectionID != 0)
@@ -1977,13 +1983,10 @@ public class Tunnel : IDisposable
                                     targetPeerPort = cbEndpoint.Port;
                                 }
 
-                                Console.WriteLine($"[Tunnel] ConnectionBegin: endpoint={receivedMessage.EndpointString}, peerNAT={receivedMessage.NATType}, ownNAT={receivedMessage.OwnNATType}, connID={receivedMessage.ConnectionID}");
-
                                 // For mesh tunnels, server skips NAT detection and sends our NAT type in OwnNATType field
                                 if (receivedMessage.OwnNATType.HasValue && natType == NATType.Unknown)
                                 {
                                     natType = receivedMessage.OwnNATType.Value;
-                                    Console.WriteLine($"[Tunnel] Set own NAT type to {natType}");
 
                                     // Start UDP listening if not already started (mesh tunnels skip NATTypeResponse)
                                     if (!isServer && !udpClientTaskCancellationToken.IsCancellationRequested)
@@ -2301,6 +2304,24 @@ public class Tunnel : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[Tunnel] Error during disposal: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Detects the local LAN IP address by connecting a UDP socket to a public address.
+    /// The OS selects the appropriate local interface without actually sending any data.
+    /// </summary>
+    public static IPAddress GetLanIPAddress()
+    {
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0);
+            socket.Connect("8.8.8.8", 65530);
+            return (socket.LocalEndPoint as IPEndPoint)?.Address;
+        }
+        catch
+        {
+            return null;
         }
     }
 }

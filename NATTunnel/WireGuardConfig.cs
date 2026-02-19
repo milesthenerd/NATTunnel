@@ -30,7 +30,7 @@ public static class WireGuardConfig
             config.AppendLine($"PublicKey = {publicKey}");
             config.AppendLine($"Endpoint = {endpoint}:{port}");
             config.AppendLine($"AllowedIPs = {allowedIPs}");
-            config.AppendLine("PersistentKeepalive = 25");
+            config.AppendLine("PersistentKeepalive = 5");
 
             // Ensure directory exists
             var dirName = Path.GetDirectoryName(configPath);

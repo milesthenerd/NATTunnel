@@ -150,8 +150,16 @@ class NATServer {
     }
 
     handleUDPMessage(msg, info) {
-        this.connectionManager.updateTimeout(info.address);
-        this.connectionManager.addUDPInfo(info.address, info.port);
+        // Try to correlate this UDP keepalive to a specific socket by matching
+        // both IP and external port. This is needed so addUDPInfo can use localPort
+        // as the dedup key — otherwise same-NAT peers (same IP) would clobber each other.
+        const socketInfo = this.connectionManager.sockets.find(
+            s => (s.udpIp === info.address || s.ip === info.address) &&
+                 (s.externalPortOne === info.port || s.externalPortTwo === info.port)
+        );
+        this.connectionManager.updateTimeout(socketInfo || info.address);
+        const localPort = socketInfo ? socketInfo.localPort : null;
+        this.connectionManager.addUDPInfo(info.address, info.port, localPort);
     }
 
     handleNATTestMessage(msg, info, isFirstPort) {
