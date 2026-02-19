@@ -11,7 +11,7 @@ public class WireGuardPeer
     public string AllowedIPs { get; private set; }
     public bool IsPersistent { get; private set; }
     public int ConnectionId { get; private set; }
-    public int KeepAliveInterval { get; set; } = 25;
+    public int KeepAliveInterval { get; set; } = 5;
     public int ProxyPort { get; private set; } // Unique localhost port for this peer
     public DateTime LastActivity { get; set; } = DateTime.UtcNow; // Track when we last received traffic from this peer
 

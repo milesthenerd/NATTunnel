@@ -41,18 +41,24 @@ class ConnectionManager {
             const socketInfo = this.sockets[index];
             // Clean up any pending connections for this client
             this.cleanupPendingConnections(socketInfo);
-            // Remove associated UDP info — try by localPort first (reliable even when
-            // TCP IP differs from UDP IP, e.g. symmetric NAT or proxy), then by both IPs
+            // Remove associated UDP info — prefer localPort (unique per peer, safe when
+            // multiple peers share the same public IP behind the same NAT).
+            // Only fall back to IP-based removal when localPort is unavailable, and even
+            // then only if no other socket shares that IP (to avoid killing a same-NAT peer).
             if (socketInfo.localPort) {
                 this.removeUDPInfoByLocalPort(socketInfo.localPort);
+            } else {
+                this.removeUDPInfo(socketInfo.ip);
             }
-            this.removeUDPInfo(socketInfo.ip);
-            // Also clean up by UDP IP if it differs from TCP IP (symmetric NAT with split IPs)
+            // Clean up by UDP IP only if no other socket shares it
             if (socketInfo.udpIp && socketInfo.udpIp !== socketInfo.ip) {
-                this.removeUDPInfo(socketInfo.udpIp);
+                const otherSameIp = this.sockets.find(s => s !== socketInfo &&
+                    (s.ip === socketInfo.udpIp || s.udpIp === socketInfo.udpIp));
+                if (!otherSameIp) {
+                    this.removeUDPInfo(socketInfo.udpIp);
+                }
             }
             this.sockets.splice(index, 1);
-            console.log(`Removed client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort})`);
             // Notify listener (network registry cleanup, introduction retries, etc.)
             if (this.onSocketRemoved && socketInfo.socket) {
                 try { this.onSocketRemoved(socketInfo.socket); } catch (e) { }
@@ -61,20 +67,21 @@ class ConnectionManager {
     }
 
     cleanupPendingConnections(socketInfo) {
-        // Find any connection pairs involving this socket and notify the other party.
-        // Match by clientID (unique per peer) instead of IP address to avoid
-        // accidentally cleaning up connections belonging to other peers on the same IP
-        // (e.g. reconnects, per-connection tunnels, or multiple peers behind the same NAT).
-        const clientID = socketInfo.clientID;
+        // Find connection pairs involving this EXACT socket and notify the other party.
+        // Match by socket reference (not clientID) because multiple per-connection tunnels
+        // from the same peer share the same clientID. Matching by clientID would cascade
+        // cleanup to unrelated tunnels, sending spurious ConnectionTimeout messages and
+        // killing established direct connections.
+        const socket = socketInfo.socket;
         Object.entries(this.currentConnectionPairs).forEach(([id, pair]) => {
-            if (pair.server_clientID === clientID || pair.client_clientID === clientID) {
-                // Find the other party in the connection by their clientID
-                const otherClientID = pair.server_clientID === clientID ? pair.client_clientID : pair.server_clientID;
-                const otherSocket = this.sockets.find(s => s.clientID === otherClientID);
+            if (pair.server_socket === socket || pair.client_socket === socket) {
+                // Find the other party's socket
+                const otherSocket = pair.server_socket === socket ? pair.client_socket : pair.server_socket;
+                const otherSocketInfo = this.sockets.find(s => s.socket === otherSocket);
 
-                if (otherSocket) {
+                if (otherSocketInfo) {
                     try {
-                        otherSocket.socket.write(Buffer.from(JSON.stringify({
+                        otherSocketInfo.socket.write(Buffer.from(JSON.stringify({
                             ID: MessageTypes.ConnectionTimeout,
                             Message: "Peer disconnected"
                         })));
@@ -97,9 +104,20 @@ class ConnectionManager {
     }
 
     addUDPInfo(address, port, localPort = null) {
-        const existing = this.udpConnectionInfo.find(info => info.ip === address);
+        // Key by localPort when available (unique per peer even behind the same NAT).
+        // Fall back to IP-only matching for legacy keepalive messages that don't carry localPort.
+        let existing = null;
+        if (localPort !== null) {
+            existing = this.udpConnectionInfo.find(info => info.localPort === localPort);
+        } else {
+            // Legacy path: match by IP, but only entries that were also created without
+            // an explicit localPort (localPort === port means it was defaulted, not set by NAT test)
+            existing = this.udpConnectionInfo.find(info => info.ip === address);
+        }
+
         if (existing) {
-            // Update the port to the most recent one observed
+            // Update the IP and port to the most recent ones observed
+            existing.ip = address;
             existing.port = port;
             if (localPort !== null) existing.localPort = localPort;
         } else {
@@ -206,9 +224,8 @@ class ConnectionManager {
             } else {
                 socket.externalPortTwo = port;
             }
-            return socket;
         }
-        return null;
+        return socket;
     }
 }
 

@@ -319,7 +319,7 @@ public static class WireGuardNT
         public string PublicKey;
         public string Endpoint;
         public string AllowedIPs;
-        public ushort PersistentKeepalive = 25;
+        public ushort PersistentKeepalive = 5;
     }
 
     /// <summary>

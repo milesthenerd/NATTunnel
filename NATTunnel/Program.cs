@@ -97,23 +97,20 @@ public static class Program
             if (TunnelOptions.PeerID.HasValue)
             {
                 peerID = TunnelOptions.PeerID.Value;
-                Console.WriteLine($"[Mesh] Loaded persistent peer ID: {peerID}");
             }
             else
             {
                 peerID = Guid.NewGuid();
                 TunnelOptions.PeerID = peerID;
                 Config.SavePeerID(peerID);
-                Console.WriteLine($"[Mesh] Generated new peer ID: {peerID} (saved to config)");
             }
-            Console.WriteLine($"[Mesh] Network: {TunnelOptions.NetworkID}");
+            Console.WriteLine($"[Mesh] Peer ID: {peerID}, Network: {TunnelOptions.NetworkID}");
 
             // For mesh mode, we DON'T initialize WireGuard tunnel yet
             // We'll create it after we know our mesh IP address and have peer information
             // This avoids the port conflict and allows proper mesh configuration
 
             // Create UDP client for NAT traversal (shared across all peer connections)
-            Console.WriteLine("[Mesh] Creating UDP client for NAT traversal...");
             var udpClient = new UdpClient();
             udpClient.Client.ReceiveBufferSize = 128000;
             udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
@@ -126,11 +123,9 @@ public static class Program
             }
 
             int localUdpPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
-            Console.WriteLine($"[Mesh] UDP client bound to local port: {localUdpPort}");
 
             // Connect to mediation server for NAT type detection
             var endpoint = TunnelOptions.MediationEndpoint;
-            Console.WriteLine($"[Mesh] Connecting to mediation server at {endpoint}...");
 
             var tcpClient = new TcpClient();
             tcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
@@ -186,13 +181,11 @@ public static class Program
 
             // Wait for Connected message
             var connectedMsg = ReadOneTcpMessage();
-            Console.WriteLine($"[Mesh] Received: {connectedMsg.ID}");
-
             // Request NAT type detection
-            Console.WriteLine("[Mesh] Requesting NAT type detection...");
             var natTypeRequest = new MediationMessage(MediationMessageType.NATTypeRequest)
             {
                 LocalPort = localUdpPort,
+                LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
                 ClientID = peerID
             };
 
@@ -205,8 +198,6 @@ public static class Program
 
             if (natTestBegin.ID == MediationMessageType.NATTestBegin)
             {
-                Console.WriteLine($"[Mesh] NAT test started (ports: {natTestBegin.NATTestPortOne}, {natTestBegin.NATTestPortTwo})");
-
                 // Send NAT test packets
                 var natTestMsg = new MediationMessage(MediationMessageType.NATTest)
                 {
@@ -242,7 +233,6 @@ public static class Program
             var keepAliveMsgBeforeWg = new MediationMessage(MediationMessageType.KeepAlive);
             byte[] wgKeepAliveBuffer = Encoding.ASCII.GetBytes(keepAliveMsgBeforeWg.Serialize());
             stream.Write(wgKeepAliveBuffer, 0, wgKeepAliveBuffer.Length);
-            Console.WriteLine($"[Mesh] Sent KeepAlive before WireGuard initialization");
 
             // Initialize WireGuard tunnel for mesh mode
             string interfaceName = $"NATTunnel-{TunnelOptions.NetworkID}";
@@ -257,7 +247,6 @@ public static class Program
             // The proxy will forward WireGuard traffic between the NAT-traversed peer connections and local WireGuard interface
             var udpProxy = new WireGuardUdpProxy(udpClient);
             wireguardTunnel.SetUdpProxy(udpProxy);
-            Console.WriteLine($"[Mesh] UDP proxy initialized for WireGuard traffic forwarding");
 
             // Start mesh control listener on port 51888 (receives mesh messages over WireGuard)
             // These arrive as UDP packets from other peers' mesh IPs after WireGuard tunnels are established.
@@ -269,7 +258,6 @@ public static class Program
             var meshControlClient = new UdpClient(MeshControlPort);
             System.Threading.Tasks.Task.Run(async () =>
             {
-                Console.WriteLine($"[Mesh] Listening for mesh control messages on UDP port {MeshControlPort}");
                 while (true)
                 {
                     try
@@ -297,7 +285,6 @@ public static class Program
                             };
                             byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
                             meshControlClient.Send(ackBytes, ackBytes.Length, result.RemoteEndPoint);
-                            Console.WriteLine($"[Mesh] Responded to heartbeat from {result.RemoteEndPoint} with {connectedIPs.Length} connected peer(s)");
                         }
                         else if (controlMsg.ID == MediationMessageType.MeshHeartbeatAck)
                         {
@@ -306,7 +293,6 @@ public static class Program
                         else if (controlMsg.ID == MediationMessageType.MeshIntroduction)
                         {
                             // MeshIntroduction is no longer used — the introducer sends MeshConnectionBegin instead
-                            Console.WriteLine($"[Mesh] Received legacy MeshIntroduction from {result.RemoteEndPoint} — ignoring (use MeshConnectionBegin)");
                         }
                     }
                     catch (Exception ex)
@@ -391,34 +377,20 @@ public static class Program
 
                     // Skip if this is ourselves
                     if (targetPeerID == peerID.ToString())
-                    {
-                        Console.WriteLine($"  - Peer {targetPeerID} (self - skipping)");
                         continue;
-                    }
 
                     // Skip if we've already requested connection or have an active tunnel to this peer
                     // Check both by PeerID and by mesh IP
                     if (activePeerTunnels.ContainsKey(targetPeerID) || (peerMeshIP != null && activePeerTunnels.ContainsKey(peerMeshIP)))
-                    {
-                        Console.WriteLine($"  - Peer {targetPeerID} (tunnel active)");
                         continue;
-                    }
 
                     if (pendingConnectionRequests.Contains(targetPeerID))
-                    {
-                        Console.WriteLine($"  - Peer {targetPeerID} (connection pending)");
                         continue;
-                    }
 
                     // Skip symmetric-to-symmetric: hole punching is infeasible.
                     // The introducer will handle this pair via relay MeshConnectionBegin.
                     if (detectedNatType == NATType.Symmetric && (NATType)peerNatTypeInt == NATType.Symmetric)
-                    {
-                        Console.WriteLine($"  - Peer {targetPeerID} (symmetric-to-symmetric — waiting for introducer relay)");
                         continue;
-                    }
-
-                    Console.WriteLine($"  - Peer {targetPeerID}");
 
                     // Send connection request to mediation server for this peer
                     var connectionRequest = new MediationMessage(MediationMessageType.ConnectionRequest)
@@ -431,8 +403,6 @@ public static class Program
                     byte[] connBuffer = Encoding.ASCII.GetBytes(connRequestJson);
                     stream.Write(connBuffer, 0, connBuffer.Length);
                     stream.Flush();
-
-                    Console.WriteLine($"[Mesh] Sent connection request for peer {targetPeerID}");
 
                     // Mark as pending so we don't send duplicate connection requests
                     pendingConnectionRequests.Add(targetPeerID);
@@ -1107,16 +1077,12 @@ public static class Program
                         else if (msg.ID == MediationMessageType.ConnectionBegin)
                         {
                             Console.WriteLine($"[Mesh] *** ConnectionBegin received! ***");
-                            Console.WriteLine($"[Mesh]   ConnectionID: {msg.ConnectionID}");
-                            Console.WriteLine($"[Mesh]   Endpoint: {msg.EndpointString}");
-                            Console.WriteLine($"[Mesh]   NATType: {msg.NATType}");
-                            Console.WriteLine($"[Mesh]   IsServer: {msg.IsServer}");
+                            Console.WriteLine($"[Mesh] ConnectionBegin: connID={msg.ConnectionID}, endpoint={msg.EndpointString}, NAT={msg.NATType}, meshIP={msg.PrivateAddressString}");
 
                             // Store peer's mesh IP for later use in WireGuard key exchange
                             if (!string.IsNullOrEmpty(msg.PrivateAddressString))
                             {
                                 peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
-                                Console.WriteLine($"[Mesh]   Peer mesh IP: {msg.PrivateAddressString}");
                             }
 
                             // Check if we already have a tunnel for this ConnectionID
@@ -1152,7 +1118,7 @@ public static class Program
                                     retryInPlace: true,  // Retry in-place like server, don't recreate tunnel
                                     isServerOverride: false,  // Mesh tunnels always act as clients (both peers are equal)
                                     sharedClientID: peerID,  // Share clientID with mesh mode so server routes messages correctly
-                                    skipTcpConnection: false,  // Peer tunnels create their own TCP connection
+                                    skipTcpConnection: true,  // Don't create own TCP — use injected ConnectionBegin (preserves LAN endpoints for same-NAT)
                                     ownMeshIP: meshIP,  // Pass our mesh IP so tunnel can send it in WireGuard key exchange
                                     onConnectionComplete: () =>
                                     {
@@ -1206,8 +1172,6 @@ public static class Program
                                     activePeerTunnels[msg.PeerID] = peerTunnel;
                                 }
 
-                                Console.WriteLine($"[Mesh] Created tunnel for peer connection {msg.ConnectionID}");
-                                Console.WriteLine($"[Mesh] Peer endpoint: {msg.EndpointString}, Peer NAT: {msg.NATType}, Our NAT: {detectedNatType}");
 
                                 // Start the tunnel asynchronously.
                                 // pendingTunnelCount is decremented by onConnectionComplete (success)
@@ -1218,7 +1182,13 @@ public static class Program
                                     try
                                     {
                                         peerTunnel.Start();
-                                        Console.WriteLine($"[Mesh] Tunnel {capturedConnectionID} connected and hole-punching started");
+                                        // Inject the ConnectionBegin directly — this preserves LAN endpoints
+                                        // for same-NAT peers (the mediation server already substituted them)
+                                        peerTunnel.InjectConnectionBegin(
+                                            msg.EndpointString,
+                                            msg.NATType,
+                                            detectedNatType,
+                                            msg.PrivateAddressString);
                                     }
                                     catch (Exception ex)
                                     {
@@ -1301,6 +1271,8 @@ public static class Program
                                     string existingPeerEndpoint = peerElement.TryGetProperty("endpoint", out JsonElement epEl) ? epEl.GetString() : null;
                                     int existingPeerNatType = peerElement.TryGetProperty("natType", out JsonElement ntEl) ? ntEl.GetInt32() : -1;
                                     string existingPeerID = peerElement.TryGetProperty("peerID", out JsonElement pidEl) ? pidEl.GetString() : null;
+                                    string existingPeerLocalIP = peerElement.TryGetProperty("localIP", out JsonElement lipEl) ? lipEl.GetString() : null;
+                                    int existingPeerLocalPort = peerElement.TryGetProperty("localPort", out JsonElement lpEl) ? lpEl.GetInt32() : 0;
 
                                     if (string.IsNullOrEmpty(existingPeerMeshIP))
                                     {
@@ -1397,11 +1369,27 @@ public static class Program
                                         continue;
                                     }
 
+                                    // Detect same-NAT peers: if both share the same public IP, use LAN endpoints
+                                    // so they connect directly over the local network (NAT hairpinning is unreliable)
+                                    string newPeerEndpointForExisting = msg.EndpointString;
+                                    string existingPeerEndpointForNew = existingPeerEndpoint;
+
+                                    string newPeerPublicIP = msg.EndpointString?.Split(':')[0];
+                                    string existingPeerPublicIP = existingPeerEndpoint?.Split(':')[0];
+
+                                    if (newPeerPublicIP == existingPeerPublicIP &&
+                                        !string.IsNullOrEmpty(msg.LocalIP) && !string.IsNullOrEmpty(existingPeerLocalIP))
+                                    {
+                                        newPeerEndpointForExisting = $"{msg.LocalIP}:{msg.LocalPort}";
+                                        existingPeerEndpointForNew = $"{existingPeerLocalIP}:{existingPeerLocalPort}";
+                                        Console.WriteLine($"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
+                                    }
+
                                     // Send MeshConnectionBegin to existing peer: "here's the new peer's info"
                                     var connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                                     {
                                         PeerID = msg.PeerID,              // New peer's ID
-                                        EndpointString = msg.EndpointString,       // New peer's external endpoint
+                                        EndpointString = newPeerEndpointForExisting,  // New peer's endpoint (LAN if same-NAT)
                                         NATType = msg.NATType,              // New peer's NAT type
                                         PrivateAddressString = msg.PrivateAddressString   // New peer's mesh IP
                                     };
@@ -1425,7 +1413,7 @@ public static class Program
                                         var connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                                         {
                                             PeerID = existingPeerID,           // Existing peer's ID
-                                            EndpointString = existingPeerEndpoint,     // Existing peer's external endpoint
+                                            EndpointString = existingPeerEndpointForNew,  // Existing peer's endpoint (LAN if same-NAT)
                                             NATType = (NATType)existingPeerNatType, // Existing peer's NAT type
                                             PrivateAddressString = existingPeerMeshIP         // Existing peer's mesh IP
                                         };
@@ -1794,6 +1782,7 @@ public static class Program
                                 var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
                                 {
                                     LocalPort = localUdpPort,
+                                    LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
                                     ClientID = peerID
                                 };
                                 byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
@@ -1924,6 +1913,7 @@ public static class Program
                                 var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
                                 {
                                     LocalPort = localUdpPort,
+                                    LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
                                     ClientID = peerID
                                 };
                                 byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());

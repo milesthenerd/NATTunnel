@@ -24,7 +24,6 @@ public class WireGuardUdpProxy : IDisposable
     private bool disposed;
     private readonly object proxyLock = new object();
     private readonly object tunnelSocketLock = new object();
-    private int tunnelPort;
 
     // Callback to notify when a peer is active
     public Action<IPAddress> OnPeerActivity { get; set; }
@@ -36,7 +35,6 @@ public class WireGuardUdpProxy : IDisposable
 
     // Static persistent socket for forwarding TO WireGuard with fixed source port
     private static UdpClient inboundForwarder;
-    private static int inboundForwarderPort = 51821;
     private static readonly object inboundForwarderLock = new object();
 
     public WireGuardUdpProxy(UdpClient holePunchedSocket)
@@ -46,7 +44,6 @@ public class WireGuardUdpProxy : IDisposable
         this.peerEndpointToPort = new Dictionary<IPEndPoint, int>();
         this.tunnelIpToPeerEndpoint = new Dictionary<IPAddress, IPEndPoint>();
         this.peerLastActivity = new Dictionary<IPAddress, DateTime>();
-        this.tunnelPort = ((IPEndPoint)tunnelSocket.Client.LocalEndPoint).Port;
         this.cancellation = new CancellationTokenSource();
 
         // Create inbound forwarder on port 51821 (for forwarding FROM tunnel TO WireGuard)
@@ -60,11 +57,8 @@ public class WireGuardUdpProxy : IDisposable
             if (inboundForwarder == null)
             {
                 inboundForwarder = wireguardListener;
-                Console.WriteLine($"WireGuard inbound forwarder initialized on port {inboundForwarderPort}");
             }
         }
-
-        Console.WriteLine($"UDP Proxy initialized with per-peer routing (tunnel port: {tunnelPort})");
 
         // No shared outbound listener needed - each peer gets their own
         listenTask = Task.CompletedTask;
@@ -88,7 +82,7 @@ public class WireGuardUdpProxy : IDisposable
                 {
                     // Endpoint changed - remove old entries
                     peerEndpointToPort.Remove(oldEndpoint);
-                    Console.WriteLine($"[Proxy] Endpoint updated for {tunnelIp}: {oldEndpoint} -> {peerEndpoint}");
+                    peerEndpointToPort.Remove(oldEndpoint);
                 }
             }
 
@@ -101,16 +95,12 @@ public class WireGuardUdpProxy : IDisposable
             {
                 var listener = new PeerProxyListener(proxyPort, peerEndpoint, socketToUse, tunnelSocketLock);
                 peerListeners[proxyPort] = listener;
-                int socketPort = ((IPEndPoint)socketToUse.Client.LocalEndPoint).Port;
-                Console.WriteLine($"[Proxy] Created dedicated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint} (using tunnel socket {socketPort})");
             }
             else
             {
                 // Update existing listener's endpoint AND socket
                 peerListeners[proxyPort].UpdateEndpoint(peerEndpoint);
                 peerListeners[proxyPort].UpdateTunnelSocket(socketToUse);
-                int socketPort = ((IPEndPoint)socketToUse.Client.LocalEndPoint).Port;
-                Console.WriteLine($"[Proxy] Updated listener on port {proxyPort} for peer {tunnelIp} → {peerEndpoint} (using tunnel socket {socketPort})");
             }
 
         }
@@ -138,7 +128,6 @@ public class WireGuardUdpProxy : IDisposable
                     {
                         listener.Dispose();
                         peerListeners.Remove(port);
-                        Console.WriteLine($"[Proxy] Unregistered peer {tunnelIp} (port {port})");
                     }
                 }
             }
@@ -153,8 +142,6 @@ public class WireGuardUdpProxy : IDisposable
         lock (tunnelSocketLock)
         {
             tunnelSocket = newSocket;
-            tunnelPort = ((IPEndPoint)tunnelSocket.Client.LocalEndPoint).Port;
-            Console.WriteLine($"[Proxy] Tunnel socket updated to port {tunnelPort}");
 
             // Update all peer listeners with the new socket
             lock (proxyLock)
@@ -204,7 +191,13 @@ public class WireGuardUdpProxy : IDisposable
                     }
                 }
 
-                // NAT may change source port, so try matching by IP address only
+                // NAT may change source port, so try matching by IP address only.
+                // Forward the packet via the matched listener but do NOT update the
+                // registered endpoint. Updating causes flip-flopping when multiple peers
+                // share the same public IP (same NAT) — even if one peer's entry was
+                // removed, the surviving entry gets overwritten back and forth by packets
+                // from both peers. The outbound path still uses the original registered
+                // endpoint which remains valid (NAT mappings are bidirectional).
                 foreach (var kvp in peerEndpointToPort)
                 {
                     if (kvp.Key.Address.Equals(sourceEndpoint.Address))
@@ -212,25 +205,15 @@ public class WireGuardUdpProxy : IDisposable
                         proxyPort = kvp.Value;
                         if (peerListeners.TryGetValue(proxyPort, out listener))
                         {
-                            // Update the registered endpoint to the new port for future packets
-                            peerEndpointToPort.Remove(kvp.Key);
-                            peerEndpointToPort[sourceEndpoint] = proxyPort;
-
-                            // Also update the peer listener's target endpoint
-                            listener.UpdateEndpoint(sourceEndpoint);
-
-                            // Find the tunnel IP for this endpoint to track activity
+                            // Track activity without modifying endpoint registration
                             peerTunnelIp = tunnelIpToPeerEndpoint.FirstOrDefault(x => x.Value.Address.Equals(sourceEndpoint.Address)).Key;
                             if (peerTunnelIp != null)
                             {
                                 peerLastActivity[peerTunnelIp] = DateTime.UtcNow;
-                                // Update the endpoint mapping
-                                tunnelIpToPeerEndpoint[peerTunnelIp] = sourceEndpoint;
                             }
 
                             listener.ForwardInboundPacket(packet);
 
-                            // Notify activity callback
                             if (peerTunnelIp != null)
                             {
                                 OnPeerActivity?.Invoke(peerTunnelIp);
@@ -261,7 +244,6 @@ public class WireGuardUdpProxy : IDisposable
         if (disposed) return;
         disposed = true;
 
-        Console.WriteLine("[Proxy] Shutting down...");
         cancellation?.Cancel();
 
         // Dispose all peer listeners
@@ -292,7 +274,6 @@ public class WireGuardUdpProxy : IDisposable
         wireguardListener?.Dispose();
         cancellation?.Dispose();
 
-        Console.WriteLine("WireGuard UDP Proxy stopped");
     }
 }
 
@@ -326,7 +307,6 @@ internal class PeerProxyListener : IDisposable
         // Start listening task
         listenTask = Task.Run(() => ListenLoop(cancellation.Token));
 
-        Console.WriteLine($"[PeerProxy:{proxyPort}] Started for {peerEndpoint}");
     }
 
     public void UpdateEndpoint(IPEndPoint newEndpoint)
@@ -334,7 +314,6 @@ internal class PeerProxyListener : IDisposable
         lock (endpointLock)
         {
             peerEndpoint = newEndpoint;
-            Console.WriteLine($"[PeerProxy:{proxyPort}] Updated endpoint to {newEndpoint}");
         }
     }
 

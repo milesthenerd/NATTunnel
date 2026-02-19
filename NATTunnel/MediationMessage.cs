@@ -22,6 +22,11 @@ public class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int LocalPort { get; set; }
     /// <summary>
+    ///Local/LAN IP address of the client (for same-NAT peer detection)
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string LocalIP { get; set; }
+    /// <summary>
     ///NAT type of the client
     /// </summary>
     public NATType NATType { get; set; }
