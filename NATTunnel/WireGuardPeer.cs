@@ -15,8 +15,35 @@ public class WireGuardPeer
     public int ProxyPort { get; private set; } // Unique localhost port for this peer
     public DateTime LastActivity { get; set; } = DateTime.UtcNow; // Track when we last received traffic from this peer
 
+    /// <summary>
+    /// Validates that a WireGuard public key is valid (44-char base64 encoding 32 bytes).
+    /// Prevents argument injection when the key is passed to wg.exe commands.
+    /// </summary>
+    public static bool IsValidPublicKey(string key)
+    {
+        if (string.IsNullOrEmpty(key) || key.Length != 44 || key[43] != '=')
+            return false;
+        // Reject any whitespace or shell metacharacters
+        foreach (char c in key)
+        {
+            if (char.IsWhiteSpace(c) || c == '&' || c == '|' || c == ';' || c == '"' || c == '\'' || c == '`')
+                return false;
+        }
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(key);
+            return bytes.Length == 32;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     public WireGuardPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, int connectionId, bool isPersistent = false, int proxyPort = 0)
     {
+        if (!IsValidPublicKey(publicKey))
+            throw new ArgumentException($"Invalid WireGuard public key format: {publicKey?.Substring(0, Math.Min(publicKey?.Length ?? 0, 8))}...");
         PublicKey = publicKey;
         Endpoint = endpoint;
         PrivateAddress = privateAddress;
