@@ -62,6 +62,12 @@ public static class WireGuardNT
     {
         try
         {
+            if (!WireGuardPeer.IsValidPublicKey(peer.PublicKey))
+            {
+                Console.WriteLine($"Rejected invalid public key");
+                return false;
+            }
+
             // "wg set <iface> peer <pubkey> allowed-ips <ips> endpoint <ep> persistent-keepalive <ka>"
             // This merges a single peer into the running config without tearing down other peers.
             string args = $"set \"{interfaceName}\" peer {peer.PublicKey} allowed-ips {peer.AllowedIPs} endpoint 127.0.0.1:{peer.ProxyPort} persistent-keepalive {peer.KeepAliveInterval}";

@@ -12,6 +12,12 @@ public static class WireGuardDynamic
     {
         try
         {
+            if (!WireGuardPeer.IsValidPublicKey(publicKey))
+            {
+                Console.WriteLine($"Rejected invalid public key");
+                return false;
+            }
+
             // Build the wg set command
             // wg set <interface> peer <public-key> endpoint <ip>:<port> allowed-ips <ips> persistent-keepalive <interval>
             string arguments = $"set {interfaceName} peer {publicKey} endpoint {endpoint} allowed-ips {allowedIPs} persistent-keepalive {persistentKeepalive}";
@@ -61,6 +67,12 @@ public static class WireGuardDynamic
     {
         try
         {
+            if (!WireGuardPeer.IsValidPublicKey(publicKey))
+            {
+                Console.WriteLine($"Rejected invalid public key");
+                return false;
+            }
+
             // wg set <interface> peer <public-key> remove
             string arguments = $"set {interfaceName} peer {publicKey} remove";
 
