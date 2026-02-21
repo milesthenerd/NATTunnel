@@ -16,39 +16,9 @@ public static class Config
     #region Config Options
 
     /// <summary>
-    /// Text string for "mode" in the config.
-    /// </summary>
-    private const string Mode = "mode";
-
-    /// <summary>
-    /// Text string for "client" in the config.
-    /// </summary>
-    private const string Client = "client";
-
-    /// <summary>
-    /// Text string for "server" in the config.
-    /// </summary>
-    private const string Server = "server";
-
-    /// <summary>
     /// Text string for "mediationEndpoint" in the config.
     /// </summary>
     private const string MediationEndpoint = "mediationEndpoint";
-
-    /// <summary>
-    /// Text string for "remoteIP" in the config.
-    /// </summary>
-    private const string RemoteIp = "remoteIP";
-
-    /// <summary>
-    /// Text string for "usingWhitelist" in the config.
-    /// </summary>
-    private const string UsingWhitelist = "usingWhitelist";
-
-    /// <summary>
-    /// Text string for "whitelistedPorts" in the config.
-    /// </summary>
-    private const string WhitelistedPorts = "whitelistedPorts";
 
     /// <summary>
     /// Text string for "networkID" in the config (for mesh networking).
@@ -73,23 +43,6 @@ public static class Config
         TomlTable model = Toml.ToModel(configString);
 
         Console.WriteLine(Toml.FromModel(model));
-
-        try
-        {
-            //If mode is not valid, exit
-            if (!(model[Mode].Equals(Server) || model[Mode].Equals(Client)))
-            {
-                Console.Error.WriteLine($"Unknown option '{model[Mode]}' for {Mode}!");
-                return false;
-            }
-            //If valid, set IsServer
-            TunnelOptions.IsServer = (string)model[Mode] == Server;
-        }
-        catch
-        {
-            Console.Error.WriteLine($"Something went wrong reading the {Mode} field!");
-            return false;
-        }
 
         try
         {
@@ -122,56 +75,21 @@ public static class Config
             return false;
         }
 
-        // If the IP can't be resolved, error out
+        // Parse required networkID
         try
         {
-            TunnelOptions.RemoteIp = GetIPFromDnsResolve((string)model[RemoteIp]);
-        }
-        catch
-        {
-            Console.Error.WriteLine($"Could not resolve '{RemoteIp}' to an IP address!");
-            return false;
-        }
-
-        try
-        {
-            //If usingWhitelist is not valid, exit
-            TunnelOptions.UsingWhitelist = (bool)model[UsingWhitelist];
-        }
-        catch
-        {
-            Console.Error.WriteLine($"Something went wrong reading the {UsingWhitelist} field!");
-            return false;
-        }
-
-        //Try to parse whitelist into TomlArray
-        try
-        {
-            TunnelOptions.WhitelistedPorts = ((TomlArray)model[WhitelistedPorts]).Select(i => Convert.ToInt32(i)).ToList();
-        }
-        catch (Exception e)
-        {
-            Console.WriteLine(e);
-            Console.Error.WriteLine($"Failed to parse the {WhitelistedPorts} field! Make sure all entered values are numbers!");
-            return false;
-        }
-
-        // Parse optional networkID for mesh networking
-        try
-        {
-            if (model.ContainsKey(NetworkID))
+            if (!model.ContainsKey(NetworkID) || string.IsNullOrEmpty((string)model[NetworkID]))
             {
-                TunnelOptions.NetworkID = (string)model[NetworkID];
-                if (!string.IsNullOrEmpty(TunnelOptions.NetworkID))
-                {
-                    Console.WriteLine($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
-                }
+                Console.Error.WriteLine($"{NetworkID} is required in config.toml!");
+                return false;
             }
+            TunnelOptions.NetworkID = (string)model[NetworkID];
+            Console.WriteLine($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
         }
         catch (Exception e)
         {
-            Console.WriteLine($"[Config] Warning: Failed to parse {NetworkID}: {e.Message}");
-            // Network ID is optional, so don't fail config loading
+            Console.Error.WriteLine($"Failed to parse {NetworkID}: {e.Message}");
+            return false;
         }
 
         // Parse optional peerID (persistent mesh identity)
@@ -249,30 +167,19 @@ public static class Config
     }
 
     /// <summary>
-    /// Creates a new config file, filling it out with default values.
+    /// Creates a new config file with mesh networking defaults.
     /// </summary>
     public static void CreateNewConfig()
     {
-        //Yes this looks weird but it's what works
-        String defaultConfigString = $@"#{Mode}: Set to server if you want to allow others to connect to you, client if you want to connect to someone else
-{Mode} = ""{(TunnelOptions.IsServer ? Server : Client)}""
-
-#{MediationEndpoint}: The public IP and port of the matchmaking/holepunching server you want to connect to
+        String defaultConfigString = $@"#{MediationEndpoint}: The public IP and port of the matchmaking/holepunching server you want to connect to
 {MediationEndpoint} = ""{TunnelOptions.MediationEndpoint}""
 
-#{RemoteIp}: The public IP of the peer you want to connect to (unused for servers)
-{RemoteIp} = ""{TunnelOptions.RemoteIp}""
-
-#{UsingWhitelist}: Set true if you want to only expose a defined list of ports, false if you want to allow access to all ports
-{UsingWhitelist} = true
-
-#{WhitelistedPorts}: Array of whitelisted ports. If you want to define several, write it like an array such as [64198, 50000, 62415]
-{WhitelistedPorts} = [{TunnelOptions.DefaultPort}]";
+#{NetworkID}: The network identifier for mesh networking. Peers with the same networkID can discover and connect to each other.
+{NetworkID} = """"";
 
         using StreamWriter sw = new StreamWriter(GetConfigFilePath());
         sw.WriteLine(defaultConfigString);
     }
-
 
     /// <summary>
     /// Prompts in the console to create a new config file.
@@ -289,31 +196,10 @@ public static class Config
 
         if (!doesFileExist)
             Console.WriteLine("Unable to find config.toml");
-        Console.WriteLine("Creating a default:");
-        Console.WriteLine("c) Create a client config file");
-        Console.WriteLine("s) Create a server config file");
-        Console.WriteLine("Any other key: Quit");
-        ConsoleKeyInfo cki = Console.ReadKey();
-        switch (cki.KeyChar)
-        {
-            case 'c':
-                {
-                    TunnelOptions.IsServer = false;
-                    CreateNewConfig();
-                    return true;
-                }
-            case 's':
-                {
-                    TunnelOptions.IsServer = true;
-                    CreateNewConfig();
-                    return true;
-                }
-            default:
-                {
-                    Console.WriteLine("Quitting...");
-                    return false;
-                }
-        }
+        Console.WriteLine("Creating default mesh networking config...");
+        CreateNewConfig();
+        Console.WriteLine("Config created. Please edit config.toml to set your networkID, then restart.");
+        return true;
     }
 
     /// <summary>

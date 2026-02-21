@@ -15,16 +15,6 @@ public static class Program
     {
         try
         {
-            // Check if running as WireGuard service
-            // Per WireGuard spec: program /service <config_path> [server|client]
-            if (args.Length >= 2 && args[0] == "/service")
-            {
-                string configPath = args[1];
-                string mode = args.Length >= 3 ? args[2] : null; // Optional mode argument
-                RunServiceMode(configPath, mode);
-                return;
-            }
-
             // Normal startup
             if (!Config.CreateNewConfigPrompt())
                 Environment.Exit(-1);
@@ -37,31 +27,8 @@ public static class Program
                 Environment.Exit(-1);
             }
 
-            // Check if mesh networking is enabled
-            if (!string.IsNullOrEmpty(TunnelOptions.NetworkID))
-            {
-                Console.WriteLine($"Starting in MESH mode for network: {TunnelOptions.NetworkID}");
-                RunMeshMode();
-            }
-            else
-            {
-                // Start tunnel with WireGuard based on config (traditional client/server mode)
-                string interfaceName = "NATTunnel";
-                bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
-
-                // Pass isRunningAsService = false so it will try to install the service
-                using (var tunnel = new WireGuardTunnel(TunnelOptions.IsServer, interfaceName, debugMode, isRunningAsService: false))
-                {
-                    Console.WriteLine("Tunnel is running...");
-
-                    // Keep the tunnel running indefinitely
-                    // The tunnel will be cleaned up by the using statement when the process exits (e.g., via Stop-Service)
-                    while (true)
-                    {
-                        System.Threading.Thread.Sleep(1000);
-                    }
-                }
-            }
+            Console.WriteLine($"Starting mesh mode for network: {TunnelOptions.NetworkID}");
+            RunMeshMode();
         }
         catch (Exception ex)
         {
@@ -237,7 +204,7 @@ public static class Program
             // Initialize WireGuard tunnel for mesh mode
             string interfaceName = $"NATTunnel-{TunnelOptions.NetworkID}";
             bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
-            var wireguardTunnel = new WireGuardTunnel(isServer: false, interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
+            var wireguardTunnel = new WireGuardTunnel(interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
 
             // Set client IP for mesh mode with /16 netmask (covers 10.5.0.0 - 10.5.255.255 for all mesh peers)
             wireguardTunnel.SetClientIPAndRestart(meshIP, 16);
@@ -479,15 +446,10 @@ public static class Program
                             activePeerTunnels.Remove(capturedMeshIP);
                         pendingTunnelCount--;
                     },
-                    managedByTunnelManager: false,
-                    connectionId: capturedPeerID.GetHashCode(),  // Use hash of PeerID as connection ID
                     sharedUdpClient: udpClient,
-                    meshPeerMode: true,
                     meshPeerEndpoint: remoteEndpoint,
                     retryInPlace: true,
-                    isServerOverride: false,
                     sharedClientID: peerID,
-                    skipTcpConnection: true,  // No TCP to mediation — introducer relays
                     ownMeshIP: meshIP,
                     onConnectionComplete: () =>
                     {
@@ -1110,16 +1072,11 @@ public static class Program
                                             activePeerTunnels.Remove(capturedMeshIPForCleanup);
                                         pendingTunnelCount--;
                                     },
-                                    managedByTunnelManager: false,
-                                    connectionId: msg.ConnectionID,
-                                    sharedUdpClient: udpClient,  // Share UDP client with mesh mode (same port)
-                                    meshPeerMode: true,  // This is a mesh peer-to-peer connection
-                                    meshPeerEndpoint: msg.EndpointString,  // Remote peer endpoint
-                                    retryInPlace: true,  // Retry in-place like server, don't recreate tunnel
-                                    isServerOverride: false,  // Mesh tunnels always act as clients (both peers are equal)
-                                    sharedClientID: peerID,  // Share clientID with mesh mode so server routes messages correctly
-                                    skipTcpConnection: true,  // Don't create own TCP — use injected ConnectionBegin (preserves LAN endpoints for same-NAT)
-                                    ownMeshIP: meshIP,  // Pass our mesh IP so tunnel can send it in WireGuard key exchange
+                                    sharedUdpClient: udpClient,
+                                    meshPeerEndpoint: msg.EndpointString,
+                                    retryInPlace: true,
+                                    sharedClientID: peerID,
+                                    ownMeshIP: meshIP,
                                     onConnectionComplete: () =>
                                     {
                                         Console.WriteLine($"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
@@ -1569,15 +1526,10 @@ public static class Program
                                                     if (!string.IsNullOrEmpty(capturedMeshIPStr)) activePeerTunnels.Remove(capturedMeshIPStr);
                                                     pendingTunnelCount--;
                                                 },
-                                                managedByTunnelManager: false,
-                                                connectionId: capturedConnID,
                                                 sharedUdpClient: udpClient,
-                                                meshPeerMode: true,
                                                 meshPeerEndpoint: parsedMsg.EndpointString,
                                                 retryInPlace: true,
-                                                isServerOverride: false,
                                                 sharedClientID: peerID,
-                                                skipTcpConnection: false,
                                                 ownMeshIP: meshIP,
                                                 onConnectionComplete: () =>
                                                 {
@@ -1980,63 +1932,4 @@ public static class Program
         }
     }
 
-    /// <summary>
-    /// Runs the application in Windows service mode with the specified config path.
-    /// This is called when Windows Service Manager starts the service with: program.exe /service "path\to\config.conf" [server|client]
-    /// Per WireGuard spec, this should be minimal - just initialize and run the tunnel.
-    /// </summary>
-    private static void RunServiceMode(string configPath, string mode)
-    {
-        try
-        {
-            // Validate config path
-            if (!File.Exists(configPath))
-            {
-                throw new FileNotFoundException($"Configuration file not found: {configPath}");
-            }
-
-            // Determine server/client mode
-            bool isServer;
-            if (!string.IsNullOrEmpty(mode))
-            {
-                // Use the mode passed as argument (most reliable)
-                isServer = mode.Equals("server", StringComparison.OrdinalIgnoreCase);
-            }
-            else
-            {
-                // Fallback: read from config file if no mode argument provided
-                string configContent = File.ReadAllText(configPath);
-                isServer = configContent.Contains("mode") && configContent.Contains("\"server\"");
-            }
-
-            string interfaceName = "NATTunnel";
-            bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
-
-            // Create tunnel with isRunningAsService = true to skip service installation
-            using (var tunnel = new WireGuardTunnel(isServer, interfaceName, debugMode, isRunningAsService: true))
-            {
-                // Service mode: Keep running indefinitely until stopped by Windows Service Manager
-                // The tunnel will be cleaned up by the using statement when the service stops
-                while (true)
-                {
-                    System.Threading.Thread.Sleep(1000);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            // Log service errors to a file since console output won't show in Service Manager
-            try
-            {
-                string errorLog = Path.Combine(Path.GetTempPath(), "NATTunnel_service_error.log");
-                File.AppendAllText(errorLog,
-                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] Service error: {ex.Message}\n" +
-                    $"Stack trace: {ex.StackTrace}\n\n");
-            }
-            catch { }
-
-            // Re-throw to exit with error code
-            throw;
-        }
-    }
 }

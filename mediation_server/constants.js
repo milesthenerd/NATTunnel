@@ -18,19 +18,19 @@ const MessageTypes = {
     ConnectionBegin: 7,
     ServerNotAvailable: 8,
     HolePunchAttempt: 9,
-    NATTunnelData: 10,
+    NATTunnelData: 10,             // Legacy — no longer used
     SymmetricHolePunchAttempt: 11,
     ConnectionComplete: 12,
-    ReceivedPeer: 13,
+    ReceivedPeer: 13,               // Legacy — no longer used
     ConnectionTimeout: 14,
-    PublicKeyRequest: 15,
-    PublicKeyResponse: 16,
-    SymmetricKeyRequest: 17,
-    SymmetricKeyResponse: 18,
-    SymmetricKeyConfirm: 19,
+    PublicKeyRequest: 15,           // Legacy — no longer used
+    PublicKeyResponse: 16,          // Legacy — no longer used
+    SymmetricKeyRequest: 17,        // Legacy — no longer used
+    SymmetricKeyResponse: 18,       // Legacy — no longer used
+    SymmetricKeyConfirm: 19,        // Legacy — no longer used
     WireGuardPublicKeyExchange: 20,
     WireGuardPublicKeyHash: 21,
-    ServerRegister: 22,
+    ServerRegister: 22,             // Legacy — no longer used
     // Mesh networking messages
     MeshJoinRequest: 23,        // Peer wants to join a mesh network
     MeshJoinResponse: 24,       // Response with list of peers in network
