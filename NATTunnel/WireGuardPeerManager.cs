@@ -14,18 +14,16 @@ public class WireGuardPeerManager
     private readonly object configLock = new();
     private readonly int basePort;
     private readonly IPAddress baseAddress;
-    private readonly bool isServer;
     private int nextPeerId = 2;  // Start at 2 since server is 10.5.0.1
     private int nextProxyPort = 51822; // Start allocating unique ports from 51822 (51821 is reserved for inbound forwarder)
     private readonly HashSet<int> allocatedPorts = new(); // Track allocated ports
     private readonly HashSet<int> allocatedPeerIds = new(); // Track allocated peer IDs for IP reuse
 
-    public WireGuardPeerManager(string configPath, IPAddress baseAddress, int basePort = 51820, bool isServer = false)
+    public WireGuardPeerManager(string configPath, IPAddress baseAddress, int basePort = 51820)
     {
         this.configPath = configPath;
         this.baseAddress = baseAddress;
         this.basePort = basePort;
-        this.isServer = isServer;
     }
 
     private int AllocateProxyPort()
@@ -238,12 +236,10 @@ public class WireGuardPeerManager
 
         newConfig.AppendLine();
 
-        // Add each peer
-        // Server uses localhost proxy endpoint, client uses real endpoint
-        bool useProxy = isServer;
+        // Add each peer (all use localhost proxy endpoint)
         foreach (var peer in peers)
         {
-            newConfig.AppendLine(peer.GenerateConfigSection(useProxy));
+            newConfig.AppendLine(peer.GenerateConfigSection());
             newConfig.AppendLine();
         }
 

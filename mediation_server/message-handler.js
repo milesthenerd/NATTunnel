@@ -7,11 +7,6 @@ class MessageHandler {
         this.connectionManager = connectionManager;
         this.networkRegistry = new NetworkRegistry();
 
-        // Set up callback for when server tunnel completes NAT detection
-        this.connectionManager.onServerTunnelReady = (connectionId, socketInfo, natType) => {
-            this.handleServerTunnelReady(connectionId, socketInfo, natType);
-        };
-
         // Track pending introductions so we can retry if the introducer disconnects before acking
         // Map of newPeerID -> { newPeerInfo, otherPeers, introducerPeerID, networkID }
         this.pendingIntroductions = new Map();
@@ -21,9 +16,6 @@ class MessageHandler {
         if (!message) return;
 
         switch (message.ID) {
-            case MessageTypes.ServerRegister:
-                this.handleServerRegister(message, socket);
-                break;
             case MessageTypes.NATTypeRequest:
                 this.handleNATTypeRequest(message, socket);
                 break;
@@ -32,9 +24,6 @@ class MessageHandler {
                 break;
             case MessageTypes.ConnectionRequest:
                 this.handleConnectionRequest(message, socket);
-                break;
-            case MessageTypes.ReceivedPeer:
-                this.handleReceivedPeer(message);
                 break;
             case MessageTypes.ConnectionTimeout:
                 this.handleConnectionTimeout(message.ConnectionID);
@@ -77,14 +66,6 @@ class MessageHandler {
 
         if (socketInfo) {
             this.connectionManager.updateTimeout(socketInfo);  // Pass socketInfo object directly
-        }
-    }
-
-    handleServerRegister(message, socket) {
-        const socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
-        if (socketInfo) {
-            socketInfo.isServer = true;
-            console.log(`Registered server: ${socketInfo.ip}:${socketInfo.tcpPort}`);
         }
     }
 
@@ -204,7 +185,7 @@ class MessageHandler {
             clientSocketInfo.natType = message.NATType;
         }
 
-        // Check if this is a mesh connection request (has PeerID) or traditional client/server (has EndpointString)
+        // Find target peer by PeerID in network registry
         let targetSocket;
         let targetPeer = null;  // Store target peer info for mesh connections
         let clientPeer = null;  // Store client peer info for mesh connections
@@ -224,12 +205,6 @@ class MessageHandler {
 
                 clientPeer = this.networkRegistry.findPeerBySocket(socket);
             }
-        } else if (message.EndpointString) {
-            // Traditional client/server mode: Find server by IP
-            const requestedIp = message.EndpointString;
-            targetSocket = this.connectionManager.sockets.find(s =>
-                requestedIp.includes(s.ip) && s.isServer
-            );
         }
 
         if (!targetSocket) {
@@ -391,139 +366,7 @@ class MessageHandler {
             // Mark connection as complete immediately for mesh connections
             this.connectionManager.currentConnectionPairs[connectionId].server_connected = true;
             this.connectionManager.currentConnectionPairs[connectionId].client_connected = true;
-        } else {
-            // Traditional client/server mode - wait for the server-side tunnel
-            // to complete NAT detection and register its UDP port
-
-            // Set up connection timeout
-            setTimeout(() => {
-                const pair = this.connectionManager.currentConnectionPairs[connectionId];
-                if (pair && (!pair.server_connected || !pair.client_connected)) {
-                    console.log(`Connection ${connectionId} timed out`);
-                    this.handleConnectionTimeout(connectionId);
-                }
-            }, 30000); // 30 second timeout
         }
-    }
-
-    handleServerTunnelReady(connectionId, serverSocketInfo, natType) {
-        const pair = this.connectionManager.currentConnectionPairs[connectionId];
-        if (!pair) {
-            return;
-        }
-
-        // Update the connection pair with the actual per-client tunnel's clientID
-        // (not the TunnelManager's clientID that was stored initially)
-        pair.server_clientID = serverSocketInfo.clientID;
-
-        // Get server tunnel's UDP info - use the most recent UDP info from this IP
-        // Since the server tunnel just completed NAT detection, its UDP port should be the latest
-        const allServerUDPInfo = this.connectionManager.udpConnectionInfo.filter(
-            info => serverSocketInfo.ip.includes(info.ip)
-        );
-
-        if (allServerUDPInfo.length === 0) {
-            return;
-        }
-
-        // Get the most recently added (last) entry for this IP - that's the server tunnel's port
-        const serverUDPInfo = allServerUDPInfo[allServerUDPInfo.length - 1];
-        const serverEndpoint = `${serverSocketInfo.ip}:${serverUDPInfo.port}`;
-
-        // Find the waiting client
-        const clientSocketInfo = this.connectionManager.sockets.find(s => s.clientID === pair.client_clientID);
-        if (!clientSocketInfo) {
-            return;
-        }
-
-        // Get client's UDP info
-        const clientUDPInfo = this.connectionManager.udpConnectionInfo.find(
-            info => clientSocketInfo.ip.includes(info.ip)
-        );
-
-        if (!clientUDPInfo) {
-            return;
-        }
-
-        const clientEndpoint = `${clientSocketInfo.ip}:${clientUDPInfo.port}`;
-
-        // Get client's NAT type (should be stored from ConnectionRequest)
-        const clientNatType = clientSocketInfo.natType !== undefined ? clientSocketInfo.natType : -1;
-
-        if (clientNatType === -1) {
-            console.log(`Warning: Client NAT type not available for connection ${connectionId}`);
-        }
-
-        // Send ConnectionBegin to client with server's tunnel endpoint
-        const clientMessage = {
-            ID: MessageTypes.ConnectionBegin,
-            EndpointString: serverEndpoint,
-            NATType: natType,  // Server tunnel's NAT type
-            ConnectionID: connectionId,
-            IsServer: false
-        };
-
-        clientSocketInfo.socket.write(Buffer.from(JSON.stringify(clientMessage)));
-
-        // Also send ConnectionBegin to server tunnel with client's endpoint
-        const serverMessage = {
-            ID: MessageTypes.ConnectionBegin,
-            EndpointString: clientEndpoint,
-            NATType: clientNatType,  // Client's NAT type
-            ConnectionID: connectionId,
-            IsServer: true
-        };
-
-        serverSocketInfo.socket.write(Buffer.from(JSON.stringify(serverMessage)));
-    }
-
-    handleReceivedPeer(message) {
-        const pair = this.connectionManager.currentConnectionPairs[message.ConnectionID];
-        if (!pair) return;
-
-        if (message.IsServer) {
-            pair.server_connected = true;
-        } else {
-            pair.client_connected = true;
-        }
-
-        if (pair.server_connected && pair.client_connected) {
-            this.completeConnection(message.ConnectionID);
-        }
-    }
-
-    completeConnection(connectionId) {
-        const pair = this.connectionManager.currentConnectionPairs[connectionId];
-
-        // Notify both server and client - use clientID to find the correct socket
-        // (not IP, since there may be multiple tunnels from same IP)
-        const serverSocket = this.connectionManager.sockets.find(s => s.clientID === pair.server_clientID);
-        const clientSocket = this.connectionManager.sockets.find(s => s.clientID === pair.client_clientID);
-
-        console.log(`Completing connection ${connectionId}`);
-
-        if (serverSocket) {
-            serverSocket.socket.write(Buffer.from(JSON.stringify({
-                ID: MessageTypes.ConnectionComplete
-            })));
-        }
-
-        if (clientSocket) {
-            clientSocket.socket.write(Buffer.from(JSON.stringify({
-                ID: MessageTypes.ConnectionComplete
-            })));
-        }
-
-        // Reset connection status
-        this.connectionManager.udpConnectionInfo.forEach(info => {
-            if (pair.server_info.includes(info.ip) || pair.client_info.includes(info.ip)) {
-                info.status.type = StatusTypes.Free;
-            }
-        });
-
-        // Remove the completed connection pair so cleanupPendingConnections
-        // won't send spurious ConnectionTimeout messages on future reconnects
-        delete this.connectionManager.currentConnectionPairs[connectionId];
     }
 
     handleConnectionTimeout(connectionId) {

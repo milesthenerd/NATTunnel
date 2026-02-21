@@ -1,6 +1,4 @@
 using System;
-using System.Data.SqlTypes;
-using System.Linq;
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -31,15 +29,10 @@ public class MediationMessage
     /// </summary>
     public NATType NATType { get; set; }
     /// <summary>
-    ///Server's IP address and port as a string becaause IPEndpoint is not deserializable
+    ///Server's IP address and port as a string because IPEndpoint is not deserializable
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string EndpointString { get; set; }
-    /// <summary>
-    ///NATTunnel data included within the packet
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] Data { get; set; }
     /// <summary>
     ///First port for nat type detection returned by the server
     /// </summary>
@@ -51,7 +44,7 @@ public class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int NATTestPortTwo { get; set; }
     /// <summary>
-    ///ID assigned to a server/client pair attempting to make a connection
+    ///ID assigned to a peer pair attempting to make a connection
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int ConnectionID { get; set; }
@@ -61,55 +54,10 @@ public class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public System.Guid ClientID { get; set; }
     /// <summary>
-    ///Whether or not the peer sending the packet is a NATTunnel server
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public bool IsServer { get; set; }
-    /// <summary>
-    ///The private IP of a client
+    ///The private/mesh IP of a peer
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string PrivateAddressString { get; set; }
-    /// <summary>
-    ///Public key modulus
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] Modulus { get; set; }
-    /// <summary>
-    ///Public key exponent
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] Exponent { get; set; }
-    /// <summary>
-    ///Symmetric key
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] SymmetricKey { get; set; }
-    /// <summary>
-    ///One-time use value
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] Nonce { get; set; }
-    /// <summary>
-    ///Authentication tag generated when encrypting with AES-GCM
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] AuthTag { get; set; }
-    /// <summary>
-    ///SHA256 hash to verify that public key modulus is intact after being transported
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] ModulusHash { get; set; }
-    /// <summary>
-    ///SHA256 hash to verify that public key exponent is intact after being transported
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] ExponentHash { get; set; }
-    /// <summary>
-    ///SHA256 hash to verify that symmetric key is intact after being transported
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] SymmetricKeyHash { get; set; }
     /// <summary>
     ///WireGuard public key (base64 encoded)
     /// </summary>
@@ -120,21 +68,6 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public byte[] WireGuardPublicKeyHash { get; set; }
-    /// <summary>
-    ///ID of a fragmented packet
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] FragmentID { get; set; }
-    /// <summary>
-    ///Data offset of a fragmented packet
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] FragmentOffset { get; set; }
-    /// <summary>
-    ///Variable to determine if there are more fragments
-    /// </summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public byte[] MoreFragments { get; set; }
 
     // Mesh networking fields
     /// <summary>
@@ -204,67 +137,6 @@ public class MediationMessage
     }
 
     /// <summary>
-    ///Construct byte[] representation rather than JSON (only used for NATTunnelData type)
-    /// </summary>
-    public byte[] SerializeBytes()
-    {
-        if (FragmentID == null) FragmentID = BitConverter.GetBytes((ushort)0);
-        if (FragmentOffset == null) FragmentOffset = BitConverter.GetBytes((ushort)0);
-        if (MoreFragments == null) MoreFragments = BitConverter.GetBytes((ushort)0);
-        //No need to include nonce and auth tag length as they are always 12 and 16 bytes respectively
-        byte[] id = BitConverter.GetBytes((ushort)ID);
-        byte[] dataLength = BitConverter.GetBytes((ushort)Data.Length);
-        byte[] header = id.Concat(dataLength).Concat(FragmentID).Concat(FragmentOffset).Concat(MoreFragments).Concat(GetPrivateAddress().GetAddressBytes()).ToArray();
-        byte[] message = header.Concat(Nonce).Concat(AuthTag).Concat(Data).ToArray();
-        return message;
-    }
-
-    /// <summary>
-    ///Construct MediationMessage from byte[] representation (only used for NATTunnelData type)
-    /// </summary>
-    public void DeserializeBytes(byte[] messageBytes)
-    {
-        int offset = 0;
-
-        ID = (MediationMessageType)BitConverter.ToUInt16(messageBytes, offset);
-        offset += 2;
-
-        ushort dataLength = BitConverter.ToUInt16(messageBytes, offset);
-        offset += 2;
-
-        FragmentID = new byte[2];
-        Array.Copy(messageBytes, offset, FragmentID, 0, 2);
-        offset += 2;
-
-        FragmentOffset = new byte[2];
-        Array.Copy(messageBytes, offset, FragmentOffset, 0, 2);
-        offset += 2;
-
-        MoreFragments = new byte[2];
-        Array.Copy(messageBytes, offset, MoreFragments, 0, 2);
-        offset += 2;
-
-        //IPv4 private address conversion
-        byte[] address = new byte[4];
-        Array.Copy(messageBytes, offset, address, 0, 4);
-        SetPrivateAddress(new IPAddress(address));
-        offset += 4;
-
-        //12 byte nonce length
-        Nonce = new byte[12];
-        Array.Copy(messageBytes, offset, Nonce, 0, 12);
-        offset += 12;
-
-        //16 byte auth tag length
-        AuthTag = new byte[16];
-        Array.Copy(messageBytes, offset, AuthTag, 0, 16);
-        offset += 16;
-
-        Data = new byte[dataLength];
-        Array.Copy(messageBytes, offset, Data, 0, dataLength);
-    }
-
-    /// <summary>
     ///Converts the endpoint string to an IPEndPoint and returns it
     /// </summary>
     public IPEndPoint GetEndpoint()
@@ -302,141 +174,142 @@ public class MediationMessage
 }
 /// <summary>
 ///Different message types sent from the mediation server
+/// NOTE: Do not renumber existing values — the mediation server JS uses matching numbers.
 /// </summary>
 public enum MediationMessageType
 {
     /// <summary>
     ///Successful TCP connection to the mediation server
     /// </summary>
-    Connected,
+    Connected,          // 0
     /// <summary>
     ///Request mediation server for NAT type
     /// </summary>
-    NATTypeRequest,
+    NATTypeRequest,     // 1
     /// <summary>
     ///Response from server permitting client to begin NAT test
     /// </summary>
-    NATTestBegin,
+    NATTestBegin,       // 2
     /// <summary>
     ///Packet sent during NAT test
     /// </summary>
-    NATTest,
+    NATTest,            // 3
     /// <summary>
     ///Response from the mediation server with the discovered NAT type
     /// </summary>
-    NATTypeResponse,
+    NATTypeResponse,    // 4
     /// <summary>
     ///Packet type to keep the udp connection alive
     /// </summary>
-    KeepAlive,
+    KeepAlive,          // 5
     /// <summary>
-    ///Request from a NATTunnel client to begin a connection attempt with a NATTunnel server
+    ///Request to begin a connection attempt with a peer
     /// </summary>
-    ConnectionRequest,
+    ConnectionRequest,  // 6
     /// <summary>
-    ///Reponse from the mediation server to begin a connection attempt with a NATTunnel server
+    ///Response from the mediation server to begin a connection attempt
     /// </summary>
-    ConnectionBegin,
+    ConnectionBegin,    // 7
     /// <summary>
-    ///Response from the mediation server stating that the specified NATTunnel server is not available
+    ///Response from the mediation server stating that the specified peer is not available
     /// </summary>
-    ServerNotAvailable,
+    ServerNotAvailable, // 8
     /// <summary>
     ///Packet sent during hole punch attempts
     /// </summary>
-    HolePunchAttempt,
+    HolePunchAttempt,   // 9
     /// <summary>
-    ///Packet sent for normal NATTunnel data between clients and servers
+    ///(Legacy) Packet sent for NATTunnel data — no longer used
     /// </summary>
-    NATTunnelData,
+    NATTunnelData,      // 10
     /// <summary>
     ///Packet sent during symmetric NAT hole punch attempts
     /// </summary>
-    SymmetricHolePunchAttempt,
+    SymmetricHolePunchAttempt, // 11
     /// <summary>
-    ///Packet sent indicating NATTunnel client/server pair have reached each other
+    ///Packet sent indicating connection complete
     /// </summary>
-    ConnectionComplete,
+    ConnectionComplete, // 12
     /// <summary>
-    ///Packet sent indicating NATTunnel client/server received from peer
+    ///(Legacy) Packet sent indicating received from peer — no longer used
     /// </summary>
-    ReceivedPeer,
+    ReceivedPeer,       // 13
     /// <summary>
     ///Packet sent to timeout connection attempt after failed communication
     /// </summary>
-    ConnectionTimeout,
+    ConnectionTimeout,  // 14
     /// <summary>
-    ///Packet sent to peer requesting public key
+    ///(Legacy) Public key request — no longer used
     /// </summary>
-    PublicKeyRequest,
+    PublicKeyRequest,   // 15
     /// <summary>
-    ///Packet sent to peer containing public key
+    ///(Legacy) Public key response — no longer used
     /// </summary>
-    PublicKeyResponse,
+    PublicKeyResponse,  // 16
     /// <summary>
-    ///Encrypted packet sent to peer requesting symmetric key
+    ///(Legacy) Symmetric key request — no longer used
     /// </summary>
-    SymmetricKeyRequest,
+    SymmetricKeyRequest, // 17
     /// <summary>
-    ///Encrypted packet sent to peer containing symmetric key
+    ///(Legacy) Symmetric key response — no longer used
     /// </summary>
-    SymmetricKeyResponse,
+    SymmetricKeyResponse, // 18
     /// <summary>
-    ///Packet sent to confirm server received client's symmetric key
+    ///(Legacy) Symmetric key confirm — no longer used
     /// </summary>
-    SymmetricKeyConfirm,
+    SymmetricKeyConfirm, // 19
     /// <summary>
-    ///Packet sent to exchange WireGuard public keys between client and server
+    ///Packet sent to exchange WireGuard public keys between peers
     /// </summary>
-    WireGuardPublicKeyExchange,
+    WireGuardPublicKeyExchange, // 20
     /// <summary>
     ///Hash of WireGuard public key for integrity verification
     /// </summary>
-    WireGuardPublicKeyHash,
+    WireGuardPublicKeyHash, // 21
     /// <summary>
-    ///Packet sent by server to register with mediation server for connection management
+    ///(Legacy) Server registration — no longer used
     /// </summary>
-    ServerRegister,
+    ServerRegister,     // 22
     /// <summary>
     ///Request to join a mesh network by network ID
     /// </summary>
-    MeshJoinRequest,
+    MeshJoinRequest,    // 23
     /// <summary>
     ///Response containing list of peers in the mesh network
     /// </summary>
-    MeshJoinResponse,
+    MeshJoinResponse,   // 24
     /// <summary>
     ///Updated list of peers in the mesh network
     /// </summary>
-    MeshPeerList,
+    MeshPeerList,       // 25
     /// <summary>
     ///Message sent over WireGuard from introducer to existing peers to introduce a new peer
     /// </summary>
-    MeshIntroduction,
+    MeshIntroduction,   // 26
     /// <summary>
-    ///Acknowledgement of a MeshIntroduction message (optional, sent back to introducer over WireGuard)
+    ///Acknowledgement of a MeshIntroduction message
     /// </summary>
-    MeshIntroductionAck,
+    MeshIntroductionAck, // 27
     /// <summary>
-    ///Sent from mediation server to the selected introducer peer via TCP, telling it to forward new peer info to other peers
+    ///Sent from mediation server to the selected introducer peer via TCP
     /// </summary>
-    MeshIntroduceRequest,
+    MeshIntroduceRequest, // 28
     /// <summary>
-    ///Sent from introducer to mediation server via TCP after all MeshIntroduction messages have been sent over WireGuard
+    ///Sent from introducer to mediation server via TCP after introductions complete
     /// </summary>
-    MeshIntroduceAck,
+    MeshIntroduceAck,   // 29
     /// <summary>
-    ///Sent by introducer to both peers over WireGuard to initiate direct hole-punching between them (no mediation server needed)
+    ///Sent by introducer to both peers over WireGuard to initiate direct hole-punching
     /// </summary>
-    MeshConnectionBegin,
+    MeshConnectionBegin, // 30
     /// <summary>
-    ///Sent by introducer to each peer over WireGuard to check which other mesh peers it can reach
+    ///Sent by introducer to each peer over WireGuard to check connectivity
     /// </summary>
-    MeshHeartbeat,
+    MeshHeartbeat,      // 31
     /// <summary>
-    ///Response to MeshHeartbeat — contains the list of mesh IPs this peer has active WireGuard tunnels to
+    ///Response to MeshHeartbeat — contains active WireGuard tunnel list
     /// </summary>
-    MeshHeartbeatAck
+    MeshHeartbeatAck    // 32
 }
 
 /// <summary>

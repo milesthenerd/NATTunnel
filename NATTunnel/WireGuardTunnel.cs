@@ -28,8 +28,6 @@ namespace NATTunnel
         private string clientAssignedIP; // Track client's assigned IP (null until assigned)
         private byte clientPrefixLength = 24; // Default /24, can be changed for mesh mode (/16)
         private Tunnel tunnel; // Instance of the Tunnel class (for clients)
-        private TunnelManager tunnelManager; // Instance of TunnelManager (for servers)
-        private readonly bool isServer;
         // Track relay routes: relayedIP -> gatewayIP (so we can remove/migrate them on introducer change)
         private readonly Dictionary<IPAddress, IPAddress> relayRoutes = new Dictionary<IPAddress, IPAddress>();
 
@@ -60,9 +58,8 @@ namespace NATTunnel
             }
         }
 
-        public WireGuardTunnel(bool isServer, string interfaceName, bool debugMode = false, bool isRunningAsService = false, bool skipTunnelCreation = false)
+        public WireGuardTunnel(string interfaceName, bool debugMode = false, bool isRunningAsService = false, bool skipTunnelCreation = false)
         {
-            this.isServer = isServer;
             this.interfaceName = interfaceName;
             this.debugMode = debugMode;
             this.isRunningAsService = isRunningAsService;
@@ -70,7 +67,7 @@ namespace NATTunnel
 
             try
             {
-                Console.WriteLine($"Creating new WireGuard tunnel (Server: {isServer}, Interface: {interfaceName})");
+                Console.WriteLine($"Creating new WireGuard tunnel (Interface: {interfaceName})");
                 if (debugMode)
                 {
                     Console.WriteLine(">>> DEBUG MODE ENABLED - Skipping service installation");
@@ -164,9 +161,8 @@ namespace NATTunnel
 
                 Console.WriteLine("Generating/updating WireGuard config...");
 
-                // Determine interface address based on role
-                // For clients, use placeholder IP (10.5.0.254) until server assigns actual IP
-                string interfaceAddress = isServer ? "10.5.0.1/24" : "10.5.0.254/24";
+                // Use placeholder IP until mesh mode assigns the real mesh IP
+                string interfaceAddress = "10.5.0.254/24";
 
                 // Generate config with ONLY the [Interface] section
                 // Peers will be added dynamically by WireGuardPeerManager
@@ -182,7 +178,7 @@ namespace NATTunnel
                 // Initialize peer manager
                 Console.WriteLine("Initializing peer manager...");
                 var baseAddress = IPAddress.Parse("10.5.0.0");
-                peerManager = new WireGuardPeerManager(configFilePath, baseAddress, 51820, TunnelOptions.IsServer);
+                peerManager = new WireGuardPeerManager(configFilePath, baseAddress, 51820);
 
                 // Initialize the tunnel (skip in debug mode or if already running as service)
                 if (!debugMode && !isRunningAsService)
@@ -316,9 +312,8 @@ namespace NATTunnel
                 Console.WriteLine("Configuring WireGuard-NT interface...");
                 ConfigureWireGuardNT();
 
-                // Assign IP address to the interface based on role
-                // For clients, use placeholder IP (10.5.0.254) until server assigns actual IP
-                string assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.254";
+                // Assign placeholder IP until mesh mode assigns the real mesh IP
+                string assignedIp = "10.5.0.254";
                 Console.WriteLine($"Assigning IP address {assignedIp}/24 to interface...");
                 WireGuardAPI.AssignIPAddress(wireguardAdapter, interfaceName, assignedIp, 24);
 
@@ -398,71 +393,41 @@ namespace NATTunnel
                     }
                 }
 
-                // Register this tunnel with the Clients class so it can add peers
-                Clients.SetWireGuardTunnel(this);
-
-                // Initialize tunnel/tunnel manager based on mode
-                if (isServer)
+                // Initialize tunnel based on mode
+                if (!skipTunnelCreation)
                 {
-                    // Server mode: Create registration tunnel + TunnelManager
-                    Console.WriteLine("Server mode: Initializing registration tunnel and TunnelManager...");
-
-                    // Create a tunnel for server registration and NAT detection
-                    tunnel = new Tunnel(onConnectionFailure: null);  // Server doesn't need restart on failure
+                    Console.WriteLine("Initializing Tunnel...");
+                    tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
                     tunnel.SetWireGuardTunnel(this);
 
-                    Console.WriteLine("Starting server registration and NAT detection...");
+                    // Start the mediation tunnel to connect to the mediation server
+                    Console.WriteLine("Starting mediation tunnel connection...");
                     tunnel.Start();
 
-                    // Create UDP proxy for the registration tunnel
+                    // Start UDP proxy to forward WireGuard traffic bidirectionally
                     Console.WriteLine("Starting WireGuard UDP proxy...");
                     udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
-
-                    // Also initialize TunnelManager for handling client connections
-                    // Pass the registration tunnel's UDP client so all tunnels share the same port
-                    tunnelManager = new TunnelManager(this, isServer, tunnel.GetUdpClient());
-                    tunnelManager.Start();
-
-                    Console.WriteLine("Server ready: Registration tunnel active, TunnelManager waiting for clients...");
                 }
                 else
                 {
-                    // Client mode: Use single Tunnel instance (unless skipTunnelCreation is true for mesh mode)
-                    if (!skipTunnelCreation)
-                    {
-                        Console.WriteLine("Client mode: Initializing single Tunnel...");
-                        tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
-                        tunnel.SetWireGuardTunnel(this);
+                    // Mesh mode: Don't create a tunnel, mesh mode will create its own peer tunnels
+                    Console.WriteLine("[Mesh] WireGuard initialized without creating Tunnel (mesh mode will manage peer tunnels)");
+                    // UDP proxy will be created later when needed
+                    udpProxy = null;
+                }
 
-                        // Start the mediation tunnel to connect to the mediation server
-                        Console.WriteLine("Starting mediation tunnel connection...");
-                        tunnel.Start();
-
-                        // Start UDP proxy to forward WireGuard traffic bidirectionally
-                        Console.WriteLine("Starting WireGuard UDP proxy...");
-                        udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
-                    }
-                    else
+                // Set up activity tracking callback (only if udpProxy was created)
+                if (udpProxy != null)
+                {
+                    udpProxy.OnPeerActivity = (tunnelIp) =>
                     {
-                        // Mesh mode: Don't create a tunnel, mesh mode will create its own peer tunnels
-                        Console.WriteLine("[Mesh] WireGuard initialized without creating Tunnel (mesh mode will manage peer tunnels)");
-                        // UDP proxy will be created later when needed
-                        udpProxy = null;
-                    }
-
-                    // Set up activity tracking callback (only if udpProxy was created)
-                    if (udpProxy != null)
-                    {
-                        udpProxy.OnPeerActivity = (tunnelIp) =>
+                        // Update last activity timestamp for the peer
+                        var peer = peerManager.GetAllPeers().FirstOrDefault(p => p.PrivateAddress.Equals(tunnelIp));
+                        if (peer != null)
                         {
-                            // Update last activity timestamp for the peer
-                            var peer = peerManager.GetAllPeers().FirstOrDefault(p => p.PrivateAddress.Equals(tunnelIp));
-                            if (peer != null)
-                            {
-                                peer.LastActivity = DateTime.UtcNow;
-                            }
-                        };
-                    }
+                            peer.LastActivity = DateTime.UtcNow;
+                        }
+                    };
                 }
 
                 // Start a task to periodically reset peer endpoints to their correct proxy ports
@@ -915,7 +880,7 @@ namespace NATTunnel
                 else
                 {
                     // Use placeholder IP for clients until server assigns actual IP
-                    assignedIp = TunnelOptions.IsServer ? "10.5.0.1" : "10.5.0.254";
+                    assignedIp = "10.5.0.254";
                 }
 
                 config.AppendLine($"Address = {assignedIp}/{clientPrefixLength}");

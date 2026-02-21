@@ -23,7 +23,6 @@ class ConnectionManager {
             externalPortOne: 0,
             externalPortTwo: 0,
             clientID: Math.random().toString(),
-            isServer: false  // Track if this is a registered server
         };
         this.sockets.push(socketInfo);
         return socketInfo;
@@ -197,15 +196,6 @@ class ConnectionManager {
             if (socketInfo) {
                 socketInfo.natType = natType;
 
-                // Check if this socket is for a specific connection (server-side per-client tunnel)
-                if (socketInfo.forConnectionID) {
-                    const connectionId = socketInfo.forConnectionID;
-
-                    // Trigger callback to send ConnectionBegin to waiting client
-                    if (this.onServerTunnelReady) {
-                        this.onServerTunnelReady(connectionId, socketInfo, natType);
-                    }
-                }
             }
         }
 
