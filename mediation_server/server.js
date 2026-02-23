@@ -13,6 +13,13 @@ class NATServer {
         this.udpServer = null;
         this.natTestServer1 = null;
         this.natTestServer2 = null;
+
+        // Per-IP rate limiting for TCP connections: Map<ip, [timestamp1, timestamp2, ...]>
+        this.tcpConnectionTimestamps = new Map();
+        this.tcpConnectionRateLimit = {
+            maxConnections: 10,      // max 10 connections
+            timeWindowSeconds: 60    // in last 60 seconds
+        };
     }
 
     start() {
@@ -74,6 +81,16 @@ class NATServer {
     }
 
     handleNewTCPConnection(socket) {
+        const clientIP = socket.remoteAddress;
+
+        // Task 4: Check TCP connection rate limit
+        if (!this.checkTCPConnectionRateLimit(clientIP)) {
+            console.warn(`[RateLimit] TCP connection rejected from ${clientIP} — exceeded rate limit (${this.tcpConnectionRateLimit.maxConnections} connections per ${this.tcpConnectionRateLimit.timeWindowSeconds}s)`);
+            socket.write(Buffer.from(JSON.stringify({ error: 'Rate limit exceeded' })));
+            socket.destroy();
+            return;
+        }
+
         console.log(`New connection from ${socket.remoteAddress}:${socket.remotePort}`);
 
         const socketInfo = this.connectionManager.addSocket(
@@ -106,6 +123,31 @@ class NATServer {
 
         // Send connected message
         socket.write(Buffer.from(JSON.stringify({ ID: MessageTypes.Connected })));
+    }
+
+    checkTCPConnectionRateLimit(clientIP) {
+        const now = Date.now();
+        const timeWindowMs = this.tcpConnectionRateLimit.timeWindowSeconds * 1000;
+
+        // Initialize timestamp list for this IP if it doesn't exist
+        if (!this.tcpConnectionTimestamps.has(clientIP)) {
+            this.tcpConnectionTimestamps.set(clientIP, []);
+        }
+
+        const timestamps = this.tcpConnectionTimestamps.get(clientIP);
+
+        // Remove timestamps older than the time window
+        const recentTimestamps = timestamps.filter(ts => now - ts < timeWindowMs);
+        this.tcpConnectionTimestamps.set(clientIP, recentTimestamps);
+
+        // Check if we've exceeded the rate limit
+        if (recentTimestamps.length >= this.tcpConnectionRateLimit.maxConnections) {
+            return false; // Rate limit exceeded
+        }
+
+        // Add current connection timestamp
+        recentTimestamps.push(now);
+        return true; // Connection allowed
     }
 
     handleTCPData(data, socket) {
@@ -155,7 +197,7 @@ class NATServer {
         // as the dedup key — otherwise same-NAT peers (same IP) would clobber each other.
         const socketInfo = this.connectionManager.sockets.find(
             s => (s.udpIp === info.address || s.ip === info.address) &&
-                 (s.externalPortOne === info.port || s.externalPortTwo === info.port)
+                (s.externalPortOne === info.port || s.externalPortTwo === info.port)
         );
         this.connectionManager.updateTimeout(socketInfo || info.address);
         const localPort = socketInfo ? socketInfo.localPort : null;

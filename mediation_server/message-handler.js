@@ -10,10 +10,26 @@ class MessageHandler {
         // Track pending introductions so we can retry if the introducer disconnects before acking
         // Map of newPeerID -> { newPeerInfo, otherPeers, introducerPeerID, networkID }
         this.pendingIntroductions = new Map();
+
+        // Per-socket message rate limiting: Map<socket, [timestamp1, timestamp2, ...]>
+        this.messageTimestamps = new Map();
+        this.messageRateLimit = {
+            maxMessages: 50,         // max 50 messages
+            timeWindowSeconds: 10    // in last 10 seconds
+        };
     }
 
     handleTCPMessage(message, socket) {
         if (!message) return;
+
+        // Task 5: Check message rate limit per socket
+        if (!this.checkMessageRateLimit(socket)) {
+            console.warn(`[RateLimit] Socket from ${socket.remoteAddress}:${socket.remotePort} closed — exceeded message rate limit (${this.messageRateLimit.maxMessages} messages per ${this.messageRateLimit.timeWindowSeconds}s)`);
+            socket.destroy();
+            // Clean up the rate limit tracking for this socket
+            this.messageTimestamps.delete(socket);
+            return;
+        }
 
         switch (message.ID) {
             case MessageTypes.NATTypeRequest:
@@ -39,6 +55,31 @@ class MessageHandler {
                 console.log(`[MessageHandler] Unknown message type: ${message.ID}`);
                 break;
         }
+    }
+
+    checkMessageRateLimit(socket) {
+        const now = Date.now();
+        const timeWindowMs = this.messageRateLimit.timeWindowSeconds * 1000;
+
+        // Initialize timestamp list for this socket if it doesn't exist
+        if (!this.messageTimestamps.has(socket)) {
+            this.messageTimestamps.set(socket, []);
+        }
+
+        const timestamps = this.messageTimestamps.get(socket);
+
+        // Remove timestamps older than the time window
+        const recentTimestamps = timestamps.filter(ts => now - ts < timeWindowMs);
+        this.messageTimestamps.set(socket, recentTimestamps);
+
+        // Check if we've exceeded the rate limit
+        if (recentTimestamps.length >= this.messageRateLimit.maxMessages) {
+            return false; // Rate limit exceeded
+        }
+
+        // Add current message timestamp
+        recentTimestamps.push(now);
+        return true; // Message allowed
     }
 
     handleKeepAlive(socket) {
@@ -405,6 +446,9 @@ class MessageHandler {
             this.retryPendingIntroduction(peer.peerID);
             this.networkRegistry.leaveNetwork(peer.peerID);
         }
+
+        // Clean up rate limit tracking for this socket
+        this.messageTimestamps.delete(socket);
     }
 
     /**
