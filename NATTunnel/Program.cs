@@ -223,6 +223,7 @@ public static class Program
             var meshConnectionBeginQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
             var meshHeartbeatAckQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
             var meshPeerRemovedQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
+            var meshPeerLeaveQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
             // Track when the last MeshHeartbeat was received from the introducer.
             // Used for introducer failover: WireGuard PersistentKeepalive (5s) keeps
             // LastActivity fresh even after the introducer process dies, so we need an
@@ -304,6 +305,11 @@ public static class Program
                             Console.WriteLine($"[Mesh] Received MeshPeerRemoved: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) declared dead by introducer");
                             meshPeerRemovedQueue.Enqueue(controlMsg);
                         }
+                        else if (controlMsg.ID == MediationMessageType.MeshPeerLeave)
+                        {
+                            Console.WriteLine($"[Mesh] Received MeshPeerLeave: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) left gracefully");
+                            meshPeerLeaveQueue.Enqueue(controlMsg);
+                        }
                         else if (controlMsg.ID == MediationMessageType.MeshIntroduction)
                         {
                             // MeshIntroduction is no longer used — the introducer sends MeshConnectionBegin instead
@@ -315,6 +321,47 @@ public static class Program
                     }
                 }
             });
+
+            // Register handler for graceful shutdown on Ctrl+C
+            // Send MeshPeerLeave to all connected peers to allow them to clean up immediately
+            Console.CancelKeyPress += (sender, e) =>
+            {
+                e.Cancel = true; // Prevent immediate termination
+                Console.WriteLine("[Mesh] Graceful shutdown initiated (Ctrl+C received)");
+                
+                // Send MeshPeerLeave message to all WireGuard peers
+                try
+                {
+                    var leaveMsg = new MediationMessage(MediationMessageType.MeshPeerLeave)
+                    {
+                        PrivateAddressString = meshIP,
+                        PeerID = peerID.ToString()
+                    };
+                    byte[] leaveBytes = Encoding.UTF8.GetBytes(leaveMsg.Serialize());
+                    
+                    var allPeers = wireguardTunnel.GetAllPeers();
+                    foreach (var peer in allPeers)
+                    {
+                        try
+                        {
+                            meshControlClient.Send(leaveBytes, leaveBytes.Length,
+                                new IPEndPoint(peer.PrivateAddress, MeshControlPort));
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Failed to send MeshPeerLeave to {peer.PrivateAddress}: {ex.Message}");
+                        }
+                    }
+                    Console.WriteLine($"[Mesh] Sent MeshPeerLeave to {allPeers.Count()} peer(s)");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Mesh] Error sending graceful shutdown message: {ex.Message}");
+                }
+                
+                // Allow process to exit
+                Environment.Exit(0);
+            };
 
             // Now join mesh network with REAL NAT type
             var joinRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
@@ -989,6 +1036,16 @@ public static class Program
                 {
                     if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
                         RemoveDeadPeer(rmMsg.PrivateAddressString);
+                }
+
+                // Process graceful peer leave notifications
+                while (meshPeerLeaveQueue.TryDequeue(out var leaveMsg))
+                {
+                    if (!string.IsNullOrEmpty(leaveMsg.PrivateAddressString))
+                    {
+                        Console.WriteLine($"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
+                        RemoveDeadPeer(leaveMsg.PrivateAddressString);
+                    }
                 }
 
                 // ── Non-introducer failover probe (primary loop) ─────────────────────
@@ -1910,6 +1967,16 @@ public static class Program
                 {
                     if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
                         RemoveDeadPeer(rmMsg.PrivateAddressString);
+                }
+
+                // Process graceful peer leave notifications
+                while (meshPeerLeaveQueue.TryDequeue(out var leaveMsg))
+                {
+                    if (!string.IsNullOrEmpty(leaveMsg.PrivateAddressString))
+                    {
+                        Console.WriteLine($"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
+                        RemoveDeadPeer(leaveMsg.PrivateAddressString);
+                    }
                 }
 
                 // ── Introducer heartbeat (failover introducer) ──────────────────────
