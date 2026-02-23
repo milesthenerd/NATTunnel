@@ -328,7 +328,7 @@ public static class Program
             {
                 e.Cancel = true; // Prevent immediate termination
                 Console.WriteLine("[Mesh] Graceful shutdown initiated (Ctrl+C received)");
-                
+
                 // Send MeshPeerLeave message to all WireGuard peers
                 try
                 {
@@ -338,7 +338,7 @@ public static class Program
                         PeerID = peerID.ToString()
                     };
                     byte[] leaveBytes = Encoding.UTF8.GetBytes(leaveMsg.Serialize());
-                    
+
                     var allPeers = wireguardTunnel.GetAllPeers();
                     foreach (var peer in allPeers)
                     {
@@ -358,7 +358,7 @@ public static class Program
                 {
                     Console.WriteLine($"[Mesh] Error sending graceful shutdown message: {ex.Message}");
                 }
-                
+
                 // Allow process to exit
                 Environment.Exit(0);
             };
