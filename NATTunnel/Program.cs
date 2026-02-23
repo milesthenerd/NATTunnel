@@ -237,9 +237,9 @@ public static class Program
             var lastHeartbeatReceivedFrom = new Dictionary<string, DateTime>();
             // Introducer failover probe state — shared across primary and mesh-control-only loops.
             var lastIntroducerProbe = DateTime.UtcNow;
-            var introducerProbeInterval = TimeSpan.FromSeconds(10);
+            var introducerProbeInterval = TimeSpan.FromSeconds(TunnelOptions.ProbeIntervalSeconds);
             int introducerMissedProbes = 0;
-            const int IntroducerMissedProbeThreshold = 3; // Declare dead after 3 consecutive missed acks (~30s)
+            const int IntroducerMissedProbeThreshold = 3; // Declare dead after 3 consecutive missed acks
             var meshControlClient = new UdpClient(MeshControlPort);
             System.Threading.Tasks.Task.Run(async () =>
             {
@@ -354,7 +354,7 @@ public static class Program
             // Stored as sorted "ipA|ipB" strings so lookup is order-independent.
             var relayedPairs = new HashSet<string>();
             var lastRepairAttempt = new Dictionary<string, DateTime>(); // "ipA|ipB" -> last repair time
-            var repairCooldown = TimeSpan.FromSeconds(60);
+            var repairCooldown = TimeSpan.FromSeconds(TunnelOptions.RepairCooldownSeconds);
 
             // Populate peerInfoByMeshIP and introducer mesh IP from the initial MeshJoinResponse.
             // This is critical for failover: if this peer later becomes the introducer,
@@ -655,7 +655,7 @@ public static class Program
 
             // Set up periodic keep-alive
             var lastKeepAlive = DateTime.UtcNow;
-            var keepAliveInterval = TimeSpan.FromSeconds(5);
+            var keepAliveInterval = TimeSpan.FromSeconds(5); // Keep-alive is fast; not configurable
 
             // Grace period: once all initial connections are established, wait before
             // disconnecting to give disconnected peers time to TransientReconnect.
@@ -665,11 +665,11 @@ public static class Program
             // Periodic peer discovery: if we're connected to mediation but have no WireGuard
             // peers (lone peer), periodically re-send MeshJoinRequest to discover new peers.
             var lastPeerDiscovery = DateTime.UtcNow;
-            var peerDiscoveryInterval = TimeSpan.FromSeconds(15);
+            var peerDiscoveryInterval = TimeSpan.FromSeconds(TunnelOptions.HeartbeatIntervalSeconds);
 
             // Introducer heartbeat: periodically check that all peers can reach each other
             var lastHeartbeat = DateTime.UtcNow;
-            var heartbeatInterval = TimeSpan.FromSeconds(15);
+            var heartbeatInterval = TimeSpan.FromSeconds(TunnelOptions.HeartbeatIntervalSeconds);
             // After sending heartbeats, wait this long to collect acks before processing
             DateTime? heartbeatAckDeadline = null;
             // Collected acks for the current heartbeat round: meshIP -> set of connected mesh IPs
@@ -678,7 +678,7 @@ public static class Program
             var heartbeatTargets = new HashSet<string>();
             // Track consecutive heartbeat misses per peer (introducer only)
             var heartbeatMissCount = new Dictionary<string, int>();
-            const int PeerDeadThreshold = 5; // Declare dead after 5 consecutive missed acks (~75s at 15s interval)
+            int PeerDeadThreshold = TunnelOptions.DeadThreshold; // Declare dead after N consecutive missed acks
 
             // Helper: remove a dead peer from all local tracking structures and WireGuard
             void RemoveDeadPeer(string deadMeshIP)
@@ -853,7 +853,7 @@ public static class Program
 
                     if (readyToDisconnect && disconnectAfter == null)
                     {
-                        int gracePeriod = detectedNatType != NATType.Symmetric ? 30 : 5;
+                        int gracePeriod = detectedNatType != NATType.Symmetric ? TunnelOptions.GracePeriodSecondsNonSymmetric : TunnelOptions.GracePeriodSecondsSymmetric;
                         disconnectAfter = DateTime.UtcNow.AddSeconds(gracePeriod);
                         Console.WriteLine($"[Mesh] All initial connections established — grace period started ({gracePeriod}s)");
                     }
@@ -886,7 +886,7 @@ public static class Program
                 // gone (disconnected, ServerNotAvailable lost, etc.)
                 if (pendingConnectionRequests.Count > 0)
                 {
-                    var staleTimeout = TimeSpan.FromSeconds(10);
+                    var staleTimeout = TimeSpan.FromSeconds(TunnelOptions.StaleTimeoutSeconds);
                     var now = DateTime.UtcNow;
                     var staleRequests = pendingConnectionRequests
                         .Where(kvp => now - kvp.Value > staleTimeout)
@@ -1884,12 +1884,12 @@ public static class Program
             var lastIsolationCheck = DateTime.UtcNow;
             var isolationCheckInterval = TimeSpan.FromSeconds(30);
             DateTime? isolationDetectedAt = null;
-            const int IsolationGracePeriodSeconds = 60; // Wait before reconnecting to avoid thrashing
+            int IsolationGracePeriodSeconds = TunnelOptions.IsolationGracePeriodSeconds; // Wait before reconnecting to avoid thrashing
             TcpClient reconnectedTcpClient = null;
             NetworkStream reconnectedStream = null;
             string reconnectedTcpBuffer = ""; // Accumulates partial TCP data across reads
             DateTime? lastReconnectDiscovery = null;
-            var reconnectDiscoveryInterval = TimeSpan.FromSeconds(15);
+            var reconnectDiscoveryInterval = TimeSpan.FromSeconds(TunnelOptions.HeartbeatIntervalSeconds);
 
             // Reset probe state when entering mesh-control-only loop
             lastIntroducerProbe = DateTime.UtcNow;
