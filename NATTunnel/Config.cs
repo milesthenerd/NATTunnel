@@ -30,6 +30,46 @@ public static class Config
     /// </summary>
     private const string PeerID = "peerID";
 
+    /// <summary>
+    /// Text string for "heartbeatInterval" in the config (introducer heartbeat interval in seconds).
+    /// </summary>
+    private const string HeartbeatInterval = "heartbeatInterval";
+
+    /// <summary>
+    /// Text string for "probeInterval" in the config (introducer probe interval in seconds).
+    /// </summary>
+    private const string ProbeInterval = "probeInterval";
+
+    /// <summary>
+    /// Text string for "staleTimeout" in the config (pending connection stale timeout in seconds).
+    /// </summary>
+    private const string StaleTimeout = "staleTimeout";
+
+    /// <summary>
+    /// Text string for "repairCooldown" in the config (relay repair cooldown in seconds).
+    /// </summary>
+    private const string RepairCooldown = "repairCooldown";
+
+    /// <summary>
+    /// Text string for "deadThreshold" in the config (consecutive missed acks before declaring peer dead).
+    /// </summary>
+    private const string DeadThreshold = "deadThreshold";
+
+    /// <summary>
+    /// Text string for "gracePeriod" in the config (grace period before disconnect for non-symmetric NAT in seconds).
+    /// </summary>
+    private const string GracePeriodSeconds = "gracePeriod";
+
+    /// <summary>
+    /// Text string for "gracePeriodSymmetric" in the config (grace period before disconnect for symmetric NAT in seconds).
+    /// </summary>
+    private const string GracePeriodSecondsSymmetric = "gracePeriodSymmetric";
+
+    /// <summary>
+    /// Text string for "isolationGracePeriod" in the config (isolation grace period in seconds).
+    /// </summary>
+    private const string IsolationGracePeriod = "isolationGracePeriod";
+
     #endregion
 
     /// <summary>
@@ -43,6 +83,9 @@ public static class Config
         TomlTable model = Toml.ToModel(configString);
 
         Console.WriteLine(Toml.FromModel(model));
+
+        // Ensure config has all new timeout/interval fields with defaults if missing
+        EnsureConfigFieldsExist();
 
         try
         {
@@ -110,6 +153,16 @@ public static class Config
             Console.WriteLine($"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
         }
 
+        // Parse optional timeout and interval settings
+        TryParseConfigInt(model, HeartbeatInterval, (val) => TunnelOptions.HeartbeatIntervalSeconds = val);
+        TryParseConfigInt(model, ProbeInterval, (val) => TunnelOptions.ProbeIntervalSeconds = val);
+        TryParseConfigInt(model, StaleTimeout, (val) => TunnelOptions.StaleTimeoutSeconds = val);
+        TryParseConfigInt(model, RepairCooldown, (val) => TunnelOptions.RepairCooldownSeconds = val);
+        TryParseConfigInt(model, DeadThreshold, (val) => TunnelOptions.DeadThreshold = val);
+        TryParseConfigInt(model, GracePeriodSeconds, (val) => TunnelOptions.GracePeriodSecondsNonSymmetric = val);
+        TryParseConfigInt(model, GracePeriodSecondsSymmetric, (val) => TunnelOptions.GracePeriodSecondsSymmetric = val);
+        TryParseConfigInt(model, IsolationGracePeriod, (val) => TunnelOptions.IsolationGracePeriodSeconds = val);
+
         return true;
     }
 
@@ -175,7 +228,35 @@ public static class Config
 {MediationEndpoint} = ""{TunnelOptions.MediationEndpoint}""
 
 #{NetworkID}: The network identifier for mesh networking. Peers with the same networkID can discover and connect to each other.
-{NetworkID} = """"";
+{NetworkID} = """"
+
+# Mesh networking timeouts and intervals (all in seconds unless noted)
+# These control the timing behavior of the mesh network protocol.
+
+# Introducer heartbeat interval: how often the introducer sends heartbeats to all peers to verify connectivity
+{HeartbeatInterval} = {TunnelOptions.HeartbeatIntervalSeconds}
+
+# Introducer probe interval: how often non-introducer peers probe the introducer's health
+{ProbeInterval} = {TunnelOptions.ProbeIntervalSeconds}
+
+# Stale connection timeout: how long to wait for a response to a connection request before removing it
+{StaleTimeout} = {TunnelOptions.StaleTimeoutSeconds}
+
+# Relay repair cooldown: minimum time between attempts to repair a broken relay route
+{RepairCooldown} = {TunnelOptions.RepairCooldownSeconds}
+
+# Dead peer threshold: number of consecutive missed heartbeat acks before declaring a peer dead
+{DeadThreshold} = {TunnelOptions.DeadThreshold}
+
+# Grace period (non-symmetric NAT): seconds to wait after initial setup before disconnecting from mediation
+{GracePeriodSeconds} = {TunnelOptions.GracePeriodSecondsNonSymmetric}
+
+# Grace period (symmetric NAT): seconds to wait after initial setup before disconnecting from mediation
+{GracePeriodSecondsSymmetric} = {TunnelOptions.GracePeriodSecondsSymmetric}
+
+# Isolation grace period: seconds to wait after detecting isolation before attempting to reconnect to mediation
+{IsolationGracePeriod} = {TunnelOptions.IsolationGracePeriodSeconds}
+";
 
         using StreamWriter sw = new StreamWriter(GetConfigFilePath());
         sw.WriteLine(defaultConfigString);
@@ -224,5 +305,81 @@ public static class Config
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Helper method to parse an optional integer config value with a callback to set the TunnelOptions field.
+    /// </summary>
+    private static void TryParseConfigInt(TomlTable model, string key, Action<int> setValue)
+    {
+        try
+        {
+            if (model.ContainsKey(key))
+            {
+                object value = model[key];
+                if (value is long longValue)
+                {
+                    int intValue = (int)longValue;
+                    setValue(intValue);
+                    Console.WriteLine($"[Config] Loaded {key}: {intValue}");
+                }
+                else if (value is int intValue2)
+                {
+                    setValue(intValue2);
+                    Console.WriteLine($"[Config] Loaded {key}: {intValue2}");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"[Config] Warning: Failed to parse {key}: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Ensures that the config file contains all required timeout/interval fields.
+    /// If any fields are missing, they are added with their default values.
+    /// </summary>
+    private static void EnsureConfigFieldsExist()
+    {
+        string configPath = GetConfigFilePath();
+        if (configPath == null || !File.Exists(configPath))
+            return;
+
+        string[] lines = File.ReadAllLines(configPath);
+        bool modified = false;
+
+        // Check for each timeout/interval field and add if missing
+        var fieldsToCheck = new[]
+        {
+            (key: HeartbeatInterval, value: TunnelOptions.HeartbeatIntervalSeconds, comment: "Introducer heartbeat interval (seconds)"),
+            (key: ProbeInterval, value: TunnelOptions.ProbeIntervalSeconds, comment: "Introducer probe interval (seconds)"),
+            (key: StaleTimeout, value: TunnelOptions.StaleTimeoutSeconds, comment: "Stale connection timeout (seconds)"),
+            (key: RepairCooldown, value: TunnelOptions.RepairCooldownSeconds, comment: "Relay repair cooldown (seconds)"),
+            (key: DeadThreshold, value: TunnelOptions.DeadThreshold, comment: "Dead peer threshold (missed heartbeats)"),
+            (key: GracePeriodSeconds, value: TunnelOptions.GracePeriodSecondsNonSymmetric, comment: "Grace period for non-symmetric NAT (seconds)"),
+            (key: GracePeriodSecondsSymmetric, value: TunnelOptions.GracePeriodSecondsSymmetric, comment: "Grace period for symmetric NAT (seconds)"),
+            (key: IsolationGracePeriod, value: TunnelOptions.IsolationGracePeriodSeconds, comment: "Isolation grace period (seconds)")
+        };
+
+        foreach (var field in fieldsToCheck)
+        {
+            // Check if field already exists
+            bool fieldExists = lines.Any(line => line.TrimStart().StartsWith(field.key + " ") || line.TrimStart().StartsWith(field.key + "="));
+            if (!fieldExists)
+            {
+                // Add comment line and field with default value (two separate lines)
+                Array.Resize(ref lines, lines.Length + 2);
+                lines[lines.Length - 2] = $"# {field.comment}";
+                lines[lines.Length - 1] = $"{field.key} = {field.value}";
+                modified = true;
+            }
+        }
+
+        if (modified)
+        {
+            File.WriteAllLines(configPath, lines);
+            Console.WriteLine("[Config] Added missing timeout/interval fields to config.toml with defaults");
+        }
     }
 }
