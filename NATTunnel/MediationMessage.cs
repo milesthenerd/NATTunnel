@@ -313,7 +313,11 @@ public enum MediationMessageType
     /// <summary>
     ///Sent by introducer to all peers when a peer is declared dead (no heartbeat acks)
     /// </summary>
-    MeshPeerRemoved     // 33
+    MeshPeerRemoved,    // 33
+    /// <summary>
+    ///Sent by a peer to all connected peers when shutting down gracefully
+    /// </summary>
+    MeshPeerLeave       // 34
 }
 
 /// <summary>
