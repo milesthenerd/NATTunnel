@@ -222,6 +222,24 @@ public static class Program
             // MeshIntroduction is no longer used — the introducer sends MeshConnectionBegin instead
             var meshConnectionBeginQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
             var meshHeartbeatAckQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
+            var meshPeerRemovedQueue = new System.Collections.Concurrent.ConcurrentQueue<MediationMessage>();
+            // Track when the last MeshHeartbeat was received from the introducer.
+            // Used for introducer failover: WireGuard PersistentKeepalive (5s) keeps
+            // LastActivity fresh even after the introducer process dies, so we need an
+            // application-level signal (heartbeats on port 51888) to detect process death.
+            // Introducer's mesh IP — populated from MeshJoinResponse, used for failover probing.
+            // Declared here (before mesh control listener) so the listener can check ack sources.
+            string introducerMeshIP = null;
+            // Active probe ack flag — set by mesh control listener when introducer responds
+            bool introducerProbeAckReceived = true;
+            // Track last heartbeat activity from each peer (for local staleness fallback).
+            // Declared here so the mesh control listener can update it.
+            var lastHeartbeatReceivedFrom = new Dictionary<string, DateTime>();
+            // Introducer failover probe state — shared across primary and mesh-control-only loops.
+            var lastIntroducerProbe = DateTime.UtcNow;
+            var introducerProbeInterval = TimeSpan.FromSeconds(10);
+            int introducerMissedProbes = 0;
+            const int IntroducerMissedProbeThreshold = 3; // Declare dead after 3 consecutive missed acks (~30s)
             var meshControlClient = new UdpClient(MeshControlPort);
             System.Threading.Tasks.Task.Run(async () =>
             {
@@ -237,10 +255,26 @@ public static class Program
                         if (controlMsg.ID == MediationMessageType.MeshConnectionBegin)
                         {
                             Console.WriteLine($"[Mesh] Received MeshConnectionBegin from {result.RemoteEndPoint}: peer {controlMsg.PeerID} at {controlMsg.EndpointString}");
+                            // The sender of MeshConnectionBegin is the introducer — learn its mesh IP
+                            // so the active probe mechanism can monitor it for failover.
+                            string senderIP = result.RemoteEndPoint.Address.ToString();
+                            if (string.IsNullOrEmpty(introducerMeshIP) && senderIP != meshIP)
+                            {
+                                introducerMeshIP = senderIP;
+                                Console.WriteLine($"[Mesh] Learned introducer mesh IP from MeshConnectionBegin: {introducerMeshIP}");
+                            }
                             meshConnectionBeginQueue.Enqueue(controlMsg);
                         }
                         else if (controlMsg.ID == MediationMessageType.MeshHeartbeat)
                         {
+                            // The sender of MeshHeartbeat is the introducer — learn its mesh IP
+                            string heartbeatSenderIP = result.RemoteEndPoint.Address.ToString();
+                            lastHeartbeatReceivedFrom[heartbeatSenderIP] = DateTime.UtcNow;
+                            if (string.IsNullOrEmpty(introducerMeshIP) && heartbeatSenderIP != meshIP)
+                            {
+                                introducerMeshIP = heartbeatSenderIP;
+                                Console.WriteLine($"[Mesh] Learned introducer mesh IP from MeshHeartbeat: {introducerMeshIP}");
+                            }
                             // Respond with our list of connected WireGuard peer mesh IPs
                             var allPeers = wireguardTunnel.GetAllPeers();
                             var connectedIPs = allPeers.Select(p => p.PrivateAddress.ToString()).ToArray();
@@ -248,6 +282,7 @@ public static class Program
                             {
                                 PeerID = peerID.ToString(),
                                 PrivateAddressString = meshIP,
+                                NATType = detectedNatType,
                                 ConnectedMeshIPs = connectedIPs
                             };
                             byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
@@ -255,7 +290,19 @@ public static class Program
                         }
                         else if (controlMsg.ID == MediationMessageType.MeshHeartbeatAck)
                         {
+                            // If this ack is from the introducer, mark our probe as answered
+                            string ackSourceIP = result.RemoteEndPoint.Address.ToString();
+                            lastHeartbeatReceivedFrom[ackSourceIP] = DateTime.UtcNow;
+                            if (!string.IsNullOrEmpty(introducerMeshIP) && ackSourceIP == introducerMeshIP)
+                            {
+                                introducerProbeAckReceived = true;
+                            }
                             meshHeartbeatAckQueue.Enqueue(controlMsg);
+                        }
+                        else if (controlMsg.ID == MediationMessageType.MeshPeerRemoved)
+                        {
+                            Console.WriteLine($"[Mesh] Received MeshPeerRemoved: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) declared dead by introducer");
+                            meshPeerRemovedQueue.Enqueue(controlMsg);
                         }
                         else if (controlMsg.ID == MediationMessageType.MeshIntroduction)
                         {
@@ -290,7 +337,7 @@ public static class Program
 
             // Store active peer tunnels
             var activePeerTunnels = new Dictionary<string, Tunnel>();  // PeerID -> Tunnel
-            var pendingConnectionRequests = new HashSet<string>();  // Track peers we've sent connection requests to
+            var pendingConnectionRequests = new Dictionary<string, DateTime>();  // PeerID -> time requested
             var activeConnectionTunnels = new Dictionary<int, Tunnel>();  // ConnectionID -> Tunnel
             var connectionIDToPeerID = new Dictionary<int, string>();  // ConnectionID -> PeerID mapping
             var peerMeshIPs = new Dictionary<int, string>();  // ConnectionID -> Peer's mesh IP
@@ -306,32 +353,46 @@ public static class Program
             // Pairs of mesh IPs that are connected via relay through this introducer.
             // Stored as sorted "ipA|ipB" strings so lookup is order-independent.
             var relayedPairs = new HashSet<string>();
+            var lastRepairAttempt = new Dictionary<string, DateTime>(); // "ipA|ipB" -> last repair time
+            var repairCooldown = TimeSpan.FromSeconds(60);
 
-            // Track the introducer's mesh IP so we can detect when it goes offline.
-            // Populated from MeshJoinResponse by matching IntroducerPeerID to peers list.
-            string introducerMeshIP = null;
-            if (!string.IsNullOrEmpty(joinResponse.IntroducerPeerID) && joinResponse.Peers != null)
+            // Populate peerInfoByMeshIP and introducer mesh IP from the initial MeshJoinResponse.
+            // This is critical for failover: if this peer later becomes the introducer,
+            // it needs to know every peer's NAT type to decide relay vs direct hole-punch.
+            if (joinResponse.Peers != null)
             {
                 foreach (var peer in joinResponse.Peers)
                 {
                     var pObj = JsonSerializer.Deserialize<JsonElement>(peer.ToString());
                     string pid = pObj.TryGetProperty("peerID", out JsonElement pidEl) ? pidEl.GetString() : null;
                     string mip = pObj.TryGetProperty("meshIP", out JsonElement mipEl) ? mipEl.GetString() : null;
-                    if (pid == joinResponse.IntroducerPeerID && !string.IsNullOrEmpty(mip))
+                    string ep = pObj.TryGetProperty("endpoint", out JsonElement epEl) ? epEl.GetString() : null;
+                    int nt = pObj.TryGetProperty("natType", out JsonElement ntEl) ? ntEl.GetInt32() : -1;
+
+                    if (!string.IsNullOrEmpty(mip))
+                    {
+                        peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt);
+                    }
+
+                    if (!string.IsNullOrEmpty(joinResponse.IntroducerPeerID) &&
+                        pid == joinResponse.IntroducerPeerID && !string.IsNullOrEmpty(mip))
                     {
                         introducerMeshIP = mip;
                         Console.WriteLine($"[Mesh] Introducer mesh IP: {introducerMeshIP} (peer {pid})");
-                        break;
                     }
                 }
+                Console.WriteLine($"[Mesh] Cached {peerInfoByMeshIP.Count} peer(s) from initial join response");
             }
 
 
             // Helper method to process discovered peers and send connection requests
-            void ProcessDiscoveredPeers(object[] peers)
+            void ProcessDiscoveredPeers(object[] peers, NetworkStream targetStream = null)
             {
                 if (peers == null || peers.Length == 0)
                     return;
+
+                // Use the provided stream, or fall back to the primary loop's stream
+                var writeStream = targetStream ?? stream;
 
                 Console.WriteLine($"[Mesh] Discovered {peers.Length} peer(s) in network:");
                 foreach (var peer in peers)
@@ -351,7 +412,7 @@ public static class Program
                     if (activePeerTunnels.ContainsKey(targetPeerID) || (peerMeshIP != null && activePeerTunnels.ContainsKey(peerMeshIP)))
                         continue;
 
-                    if (pendingConnectionRequests.Contains(targetPeerID))
+                    if (pendingConnectionRequests.ContainsKey(targetPeerID))
                         continue;
 
                     // Skip symmetric-to-symmetric: hole punching is infeasible.
@@ -368,11 +429,11 @@ public static class Program
 
                     string connRequestJson = connectionRequest.Serialize();
                     byte[] connBuffer = Encoding.ASCII.GetBytes(connRequestJson);
-                    stream.Write(connBuffer, 0, connBuffer.Length);
-                    stream.Flush();
+                    writeStream.Write(connBuffer, 0, connBuffer.Length);
+                    writeStream.Flush();
 
                     // Mark as pending so we don't send duplicate connection requests
-                    pendingConnectionRequests.Add(targetPeerID);
+                    pendingConnectionRequests[targetPeerID] = DateTime.UtcNow;
                 }
             }
 
@@ -386,19 +447,42 @@ public static class Program
                 string remoteEndpoint = cbMsg.EndpointString;
                 NATType remotePeerNatType = cbMsg.NATType;
 
-                if (string.IsNullOrEmpty(remotePeerID) || string.IsNullOrEmpty(remoteEndpoint))
+                if (string.IsNullOrEmpty(remotePeerID))
                 {
-                    Console.WriteLine($"[Mesh] MeshConnectionBegin missing PeerID or endpoint — skipping");
+                    Console.WriteLine($"[Mesh] MeshConnectionBegin missing PeerID — skipping");
+                    return;
+                }
+                // Relay mode only needs mesh IP + introducer IP, not endpoint
+                if (!cbMsg.IsRelay && string.IsNullOrEmpty(remoteEndpoint))
+                {
+                    Console.WriteLine($"[Mesh] MeshConnectionBegin missing endpoint (non-relay) — skipping");
                     return;
                 }
 
-                // Skip if already connected or pending
-                if (activePeerTunnels.ContainsKey(remotePeerID) ||
-                    (!string.IsNullOrEmpty(remoteMeshIP) && activePeerTunnels.ContainsKey(remoteMeshIP)) ||
-                    pendingConnectionRequests.Contains(remotePeerID))
+                // Cache peer info for heartbeat repair — ensures the failover introducer
+                // knows NAT types of peers that joined after this peer's initial connection.
+                if (!string.IsNullOrEmpty(remoteMeshIP))
                 {
-                    Console.WriteLine($"[Mesh] Ignoring MeshConnectionBegin for {remotePeerID} — already connected or pending");
+                    peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType);
+                }
+
+                // Skip if a connection attempt is already in progress for this peer.
+                // But if we have a completed (possibly dead) connection, allow the reconnect —
+                // the introducer wouldn't re-introduce a peer unless something changed.
+                if (pendingConnectionRequests.ContainsKey(remotePeerID))
+                {
+                    Console.WriteLine($"[Mesh] Ignoring MeshConnectionBegin for {remotePeerID} — connection already pending");
                     return;
+                }
+
+                bool alreadyTracked = activePeerTunnels.ContainsKey(remotePeerID) ||
+                    (!string.IsNullOrEmpty(remoteMeshIP) && activePeerTunnels.ContainsKey(remoteMeshIP));
+
+                if (alreadyTracked && !string.IsNullOrEmpty(remoteMeshIP))
+                {
+                    // Clean up the old connection to allow reconnect
+                    Console.WriteLine($"[Mesh] Peer {remotePeerID} ({remoteMeshIP}) being re-introduced — cleaning up old connection");
+                    RemoveDeadPeer(remoteMeshIP);
                 }
 
                 Console.WriteLine($"[Mesh] Processing MeshConnectionBegin: peer {remotePeerID} at {remoteEndpoint} (NAT: {remotePeerNatType}, meshIP: {remoteMeshIP}, relay: {cbMsg.IsRelay})");
@@ -427,11 +511,12 @@ public static class Program
                     {
                         Console.WriteLine($"[Mesh] Relay MeshConnectionBegin missing IntroducerMeshIP — cannot set up relay route");
                     }
+                    completedTunnelMeshIPs.Add(remoteMeshIP);
                     pendingConnectionRequests.Remove(remotePeerID);
                     return;
                 }
 
-                pendingConnectionRequests.Add(remotePeerID);
+                pendingConnectionRequests[remotePeerID] = DateTime.UtcNow;
                 pendingTunnelCount++;
                 var capturedPeerID = remotePeerID;
                 var capturedMeshIP = remoteMeshIP;
@@ -455,6 +540,31 @@ public static class Program
                     {
                         Console.WriteLine($"[Mesh] Introducer-relayed tunnel for {capturedPeerID} WireGuard established");
                         pendingTunnelCount--;
+                        pendingConnectionRequests.Remove(capturedPeerID);
+                        if (!string.IsNullOrEmpty(capturedMeshIP))
+                        {
+                            completedTunnelMeshIPs.Add(capturedMeshIP);
+
+                            // Flush deferred MeshConnectionBegin messages for this peer
+                            if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
+                            {
+                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) to {capturedMeshIP}");
+                                foreach (var deferredMsg in deferred)
+                                {
+                                    try
+                                    {
+                                        byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
+                                        meshControlClient.Send(deferredBytes, deferredBytes.Length,
+                                            new IPEndPoint(IPAddress.Parse(capturedMeshIP), MeshControlPort));
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {capturedMeshIP}: {ex.Message}");
+                                    }
+                                }
+                                deferredIntroductions.Remove(capturedMeshIP);
+                            }
+                        }
                     }
                 );
 
@@ -559,13 +669,64 @@ public static class Program
 
             // Introducer heartbeat: periodically check that all peers can reach each other
             var lastHeartbeat = DateTime.UtcNow;
-            var heartbeatInterval = TimeSpan.FromSeconds(30);
+            var heartbeatInterval = TimeSpan.FromSeconds(15);
             // After sending heartbeats, wait this long to collect acks before processing
             DateTime? heartbeatAckDeadline = null;
             // Collected acks for the current heartbeat round: meshIP -> set of connected mesh IPs
             var heartbeatAcks = new Dictionary<string, HashSet<string>>();
             // Track all known mesh IPs we've sent heartbeats to (for completeness checking)
             var heartbeatTargets = new HashSet<string>();
+            // Track consecutive heartbeat misses per peer (introducer only)
+            var heartbeatMissCount = new Dictionary<string, int>();
+            const int PeerDeadThreshold = 5; // Declare dead after 5 consecutive missed acks (~75s at 15s interval)
+
+            // Helper: remove a dead peer from all local tracking structures and WireGuard
+            void RemoveDeadPeer(string deadMeshIP)
+            {
+                string deadPeerID = null;
+                if (peerInfoByMeshIP.TryGetValue(deadMeshIP, out var deadInfo))
+                    deadPeerID = deadInfo.peerID;
+
+                Console.WriteLine($"[Mesh] Removing dead peer {deadMeshIP} (peerID: {deadPeerID ?? "unknown"})");
+
+                // Remove from WireGuard
+                var deadIPAddr = IPAddress.Parse(deadMeshIP);
+                var wgPeer = wireguardTunnel.GetPeer(deadIPAddr);
+                if (wgPeer != null)
+                {
+                    wireguardTunnel.RemovePeer(wgPeer.ConnectionId);
+                    Console.WriteLine($"[Mesh] Removed WireGuard peer {deadMeshIP}");
+                }
+
+                // Remove relay routes through this peer
+                var removedRelays = wireguardTunnel.RemoveRelayRoutesViaGateway(deadIPAddr);
+                if (removedRelays.Count > 0)
+                    Console.WriteLine($"[Mesh] Removed {removedRelays.Count} relay route(s) via {deadMeshIP}");
+
+                // Clean up tracking dictionaries
+                peerInfoByMeshIP.Remove(deadMeshIP);
+                completedTunnelMeshIPs.Remove(deadMeshIP);
+                heartbeatMissCount.Remove(deadMeshIP);
+                lastHeartbeatReceivedFrom.Remove(deadMeshIP);
+
+                if (!string.IsNullOrEmpty(deadPeerID))
+                {
+                    activePeerTunnels.Remove(deadPeerID);
+                    pendingConnectionRequests.Remove(deadPeerID);
+                }
+                activePeerTunnels.Remove(deadMeshIP);
+
+                // Clean up peerMeshIPs entries pointing to this mesh IP
+                var meshIPKeys = peerMeshIPs.Where(kvp => kvp.Value == deadMeshIP).Select(kvp => kvp.Key).ToList();
+                foreach (var key in meshIPKeys)
+                {
+                    peerMeshIPs.Remove(key);
+                    lock (activeConnectionTunnels) { activeConnectionTunnels.Remove(key); }
+                }
+
+                // Clean up relayedPairs containing this mesh IP
+                relayedPairs.RemoveWhere(pair => pair.Contains(deadMeshIP));
+            }
 
             // TCP reassembly buffer — accumulates partial JSON across reads
             // Seed with any leftover from early TCP reads (e.g. ConnectionBegin
@@ -587,39 +748,46 @@ public static class Program
                     {
                         byte[] data = udpClient.Receive(ref ep);
 
-                        // Take a snapshot of active tunnels to avoid locking issues
-                        Tunnel[] tunnels;
-                        lock (activeConnectionTunnels)
-                        {
-                            tunnels = new Tunnel[activeConnectionTunnels.Count];
-                            activeConnectionTunnels.Values.CopyTo(tunnels, 0);
-                        }
+                        // WireGuard packets (binary, message type 1-4): forward directly to the
+                        // proxy ONCE instead of dispatching to every tunnel. This avoids O(N)
+                        // duplicate forwards that degrade throughput with more peers.
+                        bool isWireGuard = data.Length > 0 &&
+                                          data[0] != (byte)'{' &&
+                                          data[0] != (byte)'[' &&
+                                          data[0] >= 1 && data[0] <= 4;
 
-                        // Log received packets for debugging (only non-WireGuard JSON packets)
-                        if (data.Length > 0 && data[0] == (byte)'{')
+                        if (isWireGuard)
                         {
-                            Console.WriteLine($"[Dispatcher] Received {data.Length}B from {ep.Address}:{ep.Port}, dispatching to {tunnels.Length} tunnel(s)");
+                            wireguardTunnel?.GetUdpProxy()?.ForwardToWireGuard(data, ep);
                         }
-
-                        // Dispatch to ALL active tunnels — each tunnel's ProcessUdpPacket
-                        // filters internally (by mesh IP content, source IP, etc.)
-                        foreach (var tunnel in tunnels)
+                        else
                         {
-                            try
+                            // JSON control packets: snapshot tunnels and dispatch for filtering
+                            Tunnel[] tunnels;
+                            lock (activeConnectionTunnels)
                             {
-                                tunnel.ProcessUdpPacket(data, ep);
+                                tunnels = new Tunnel[activeConnectionTunnels.Count];
+                                activeConnectionTunnels.Values.CopyTo(tunnels, 0);
                             }
-                            catch (System.Net.Sockets.SocketException)
+
+                            foreach (var tunnel in tunnels)
                             {
-                                // Non-matching tunnel — socket not connected to this endpoint, ignore
-                            }
-                            catch (System.Security.Cryptography.CryptographicException)
-                            {
-                                // Non-matching tunnel — can't decrypt with this tunnel's key, ignore
-                            }
-                            catch (Exception ex)
-                            {
-                                Console.WriteLine($"[Mesh] Error dispatching packet to tunnel: {ex.Message}");
+                                try
+                                {
+                                    tunnel.ProcessUdpPacket(data, ep);
+                                }
+                                catch (System.Net.Sockets.SocketException)
+                                {
+                                    // Non-matching tunnel — socket not connected to this endpoint, ignore
+                                }
+                                catch (System.Security.Cryptography.CryptographicException)
+                                {
+                                    // Non-matching tunnel — can't decrypt with this tunnel's key, ignore
+                                }
+                                catch (Exception ex)
+                                {
+                                    Console.WriteLine($"[Mesh] Error dispatching packet to tunnel: {ex.Message}");
+                                }
                             }
                         }
                     }
@@ -653,12 +821,14 @@ public static class Program
                     // Only ready to disconnect if no pending work AND at least one tunnel actually
                     // succeeded. If all connections failed and we have zero WireGuard peers, we're
                     // isolated — stay connected so the server can assign new connections.
+                    if (pendingTunnelCount < 0) pendingTunnelCount = 0; // Guard against double-decrement race
                     bool noPendingWork = pendingConnectionRequests.Count == 0 && pendingTunnelCount == 0;
                     bool hasEstablishedTunnels = activePeerTunnels.Count > 0;
 
-                    // Before disconnecting, verify we have a WireGuard tunnel to the introducer
-                    // (or at least one non-symmetric peer). Without this, the introducer can't
-                    // send us MeshConnectionBegin messages for newly joining peers.
+                    // Before disconnecting, verify we have a WireGuard tunnel specifically
+                    // to the introducer. Without this, the introducer can't send us
+                    // MeshConnectionBegin messages for newly joining peers, cutting us off
+                    // from the rest of the network.
                     bool hasIntroducerPath = false;
                     if (hasEstablishedTunnels)
                     {
@@ -667,15 +837,19 @@ public static class Program
                         {
                             hasIntroducerPath = true;
                         }
-                        else
+                        else if (!string.IsNullOrEmpty(introducerMeshIP) && completedTunnelMeshIPs.Contains(introducerMeshIP))
                         {
-                            // Check if we have a tunnel to ANY peer (who might be the introducer)
-                            // Any established tunnel means the introducer can reach us over WireGuard
-                            hasIntroducerPath = completedTunnelMeshIPs.Count > 0;
+                            hasIntroducerPath = true;
                         }
                     }
 
                     bool readyToDisconnect = noPendingWork && hasEstablishedTunnels && hasIntroducerPath;
+
+                    if (!readyToDisconnect && disconnectAfter == null &&
+                        DateTime.UtcNow.Second % 10 == 0) // Log every ~10s to avoid spam
+                    {
+                        Console.WriteLine($"[Mesh] Not ready to disconnect: noPendingWork={noPendingWork}(pending={pendingConnectionRequests.Count},tunnels={pendingTunnelCount}), established={hasEstablishedTunnels}(count={activePeerTunnels.Count}), introducerPath={hasIntroducerPath}(introducerIP={introducerMeshIP ?? "null"},completed={completedTunnelMeshIPs.Count},introducerPeerID={joinResponse.IntroducerPeerID ?? "null"})");
+                    }
 
                     if (readyToDisconnect && disconnectAfter == null)
                     {
@@ -705,6 +879,24 @@ public static class Program
                     else
                         Console.WriteLine("[Mesh] TCP connection to mediation server lost during setup");
                     break;
+                }
+
+                // Clean up stale pending connection requests: if a request has been pending
+                // for over 10s without a ConnectionBegin arriving, the target peer is likely
+                // gone (disconnected, ServerNotAvailable lost, etc.)
+                if (pendingConnectionRequests.Count > 0)
+                {
+                    var staleTimeout = TimeSpan.FromSeconds(10);
+                    var now = DateTime.UtcNow;
+                    var staleRequests = pendingConnectionRequests
+                        .Where(kvp => now - kvp.Value > staleTimeout)
+                        .Select(kvp => kvp.Key)
+                        .ToList();
+                    foreach (var staleID in staleRequests)
+                    {
+                        pendingConnectionRequests.Remove(staleID);
+                        Console.WriteLine($"[Mesh] Removed stale pending connection request for {staleID} (no response in {staleTimeout.TotalSeconds}s)");
+                    }
                 }
 
                 // Send periodic keep-alive to prevent timeout during setup
@@ -754,11 +946,117 @@ public static class Program
                     }
                 }
 
+                // Retry connecting to the introducer if we don't have a tunnel to it yet.
+                // The initial attempt may fail (e.g. hole-punch timeout) but we must stay
+                // connected to mediation and keep retrying until the introducer link is up,
+                // otherwise we can't receive MeshConnectionBegin for future peers.
+                if (!isIntroducer && tcpClient.Connected &&
+                    !string.IsNullOrEmpty(joinResponse.IntroducerPeerID) &&
+                    !activePeerTunnels.ContainsKey(joinResponse.IntroducerPeerID) &&
+                    !(introducerMeshIP != null && activePeerTunnels.ContainsKey(introducerMeshIP)) &&
+                    !pendingConnectionRequests.ContainsKey(joinResponse.IntroducerPeerID) &&
+                    pendingTunnelCount == 0)
+                {
+                    Console.WriteLine($"[Mesh] Retrying connection to introducer {joinResponse.IntroducerPeerID}");
+                    try
+                    {
+                        var retryReq = new MediationMessage(MediationMessageType.ConnectionRequest)
+                        {
+                            PeerID = joinResponse.IntroducerPeerID,
+                            NATType = detectedNatType
+                        };
+                        byte[] retryBuf = Encoding.ASCII.GetBytes(retryReq.Serialize());
+                        stream.Write(retryBuf, 0, retryBuf.Length);
+                        stream.Flush();
+                        pendingConnectionRequests[joinResponse.IntroducerPeerID] = DateTime.UtcNow;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Mesh] Introducer retry write failed: {ex.Message}");
+                        break;
+                    }
+                }
+
                 // Process MeshConnectionBegin messages: create tunnels that hole-punch directly
                 // without going through the mediation server (introducer-relayed coordination).
                 while (meshConnectionBeginQueue.TryDequeue(out var cbMsg))
                 {
                     ProcessMeshConnectionBegin(cbMsg);
+                }
+
+                // Process peer removal notifications from the introducer
+                while (meshPeerRemovedQueue.TryDequeue(out var rmMsg))
+                {
+                    if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
+                        RemoveDeadPeer(rmMsg.PrivateAddressString);
+                }
+
+                // ── Non-introducer failover probe (primary loop) ─────────────────────
+                // If we're not the introducer and we have a known introducer mesh IP,
+                // periodically probe it. If dead, take over as introducer.
+                // This is needed because peers that stay connected to mediation (haven't
+                // disconnected yet) would otherwise never detect a dead introducer.
+                if (!isIntroducer && !string.IsNullOrEmpty(introducerMeshIP) &&
+                    detectedNatType != NATType.Symmetric &&
+                    completedTunnelMeshIPs.Contains(introducerMeshIP) &&
+                    DateTime.UtcNow - lastIntroducerProbe > introducerProbeInterval)
+                {
+                    if (!introducerProbeAckReceived)
+                    {
+                        introducerMissedProbes++;
+                        Console.WriteLine($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
+                    }
+                    else
+                    {
+                        if (introducerMissedProbes > 0)
+                            Console.WriteLine($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
+                        introducerMissedProbes = 0;
+                    }
+
+                    if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
+                    {
+                        Console.WriteLine("[Mesh] Introducer confirmed dead (detected in primary loop) — taking over as introducer");
+                        isIntroducer = true;
+                        introducerMissedProbes = 0;
+
+                        // Re-register with mediation server as the new introducer
+                        try
+                        {
+                            var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
+                            {
+                                NetworkID = TunnelOptions.NetworkID,
+                                PeerID = peerID.ToString(),
+                                NATType = detectedNatType,
+                                PrivateAddressString = meshIP
+                            };
+                            byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
+                            stream.Write(joinBytes, 0, joinBytes.Length);
+                            stream.Flush();
+                            Console.WriteLine("[Mesh] Re-registered with mediation as new introducer");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Failed to re-register as introducer: {ex.Message}");
+                        }
+                    }
+                    else
+                    {
+                        // Send a new probe
+                        introducerProbeAckReceived = false;
+                        try
+                        {
+                            var probe = new MediationMessage(MediationMessageType.MeshHeartbeat);
+                            byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
+                            meshControlClient.Send(probeBytes, probeBytes.Length,
+                                new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Failed to send introducer probe: {ex.Message}");
+                        }
+                    }
+
+                    lastIntroducerProbe = DateTime.UtcNow;
                 }
 
                 // ── Introducer heartbeat ────────────────────────────────────────────
@@ -812,6 +1110,14 @@ public static class Program
                         {
                             heartbeatAcks[ackMeshIP] = new HashSet<string>(ackMsg.ConnectedMeshIPs);
                         }
+                        // Cache peer info from heartbeat acks — this is the most reliable
+                        // source since every peer responds with its NAT type on every cycle.
+                        if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
+                        {
+                            // Preserve existing endpoint — heartbeat acks don't include it
+                            string existingEndpoint = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing) ? existing.endpoint : null;
+                            peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType);
+                        }
                     }
 
                     // Process after deadline
@@ -819,8 +1125,49 @@ public static class Program
                     {
                         Console.WriteLine($"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
 
+                        // Track consecutive misses per peer and remove dead ones
+                        var deadPeers = new List<string>();
+                        foreach (var ip in heartbeatTargets)
+                        {
+                            if (heartbeatAcks.ContainsKey(ip))
+                            {
+                                heartbeatMissCount[ip] = 0;
+                            }
+                            else
+                            {
+                                heartbeatMissCount.TryGetValue(ip, out int prev);
+                                heartbeatMissCount[ip] = prev + 1;
+                                Console.WriteLine($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{PeerDeadThreshold})");
+                                if (heartbeatMissCount[ip] >= PeerDeadThreshold)
+                                    deadPeers.Add(ip);
+                            }
+                        }
+                        foreach (var deadIP in deadPeers)
+                        {
+                            Console.WriteLine($"[Mesh] Peer {deadIP} declared dead after {PeerDeadThreshold} consecutive missed heartbeats");
+                            // Notify all remaining peers before removing locally
+                            string deadPID = peerInfoByMeshIP.TryGetValue(deadIP, out var di) ? di.peerID : null;
+                            var removeMsg = new MediationMessage(MediationMessageType.MeshPeerRemoved)
+                            {
+                                PrivateAddressString = deadIP,
+                                PeerID = deadPID ?? ""
+                            };
+                            byte[] rmBytes = Encoding.UTF8.GetBytes(removeMsg.Serialize());
+                            foreach (var peerIP in heartbeatTargets)
+                            {
+                                if (peerIP == deadIP) continue;
+                                try
+                                {
+                                    meshControlClient.Send(rmBytes, rmBytes.Length,
+                                        new IPEndPoint(IPAddress.Parse(peerIP), MeshControlPort));
+                                }
+                                catch { }
+                            }
+                            RemoveDeadPeer(deadIP);
+                        }
+
                         // Check every pair of peers for missing connectivity
-                        var targetList = heartbeatTargets.ToList();
+                        var targetList = heartbeatTargets.Where(ip => !deadPeers.Contains(ip)).ToList();
                         int repairCount = 0;
                         for (int i = 0; i < targetList.Count; i++)
                         {
@@ -843,11 +1190,20 @@ public static class Program
 
                                 if (!aReportsB && !bReportsA)
                                 {
-                                    peerInfoByMeshIP.TryGetValue(ipA, out var infoA);
-                                    peerInfoByMeshIP.TryGetValue(ipB, out var infoB);
+                                    // Cooldown: don't re-introduce the same pair repeatedly
+                                    string pairKey = $"{sortedA}|{sortedB}";
+                                    if (lastRepairAttempt.TryGetValue(pairKey, out var lastAttempt) &&
+                                        DateTime.UtcNow - lastAttempt < repairCooldown)
+                                        continue;
+
+                                    bool hasA = peerInfoByMeshIP.TryGetValue(ipA, out var infoA);
+                                    bool hasB = peerInfoByMeshIP.TryGetValue(ipB, out var infoB);
 
                                     // Check if both are symmetric — use relay instead of direct hole-punch
-                                    bool bothSymmetric = infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
+                                    bool bothSymmetric = hasA && hasB && infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
+
+                                    if (!hasA || !hasB)
+                                        Console.WriteLine($"[Mesh] Heartbeat: missing peer info for pair {ipA}(known={hasA}) <-> {ipB}(known={hasB}) — peerInfoByMeshIP has {peerInfoByMeshIP.Count} entries");
 
                                     if (bothSymmetric)
                                     {
@@ -901,6 +1257,7 @@ public static class Program
 
                                         // Track as relayed
                                         relayedPairs.Add($"{sortedA}|{sortedB}");
+                                        lastRepairAttempt[pairKey] = DateTime.UtcNow;
                                     }
                                     else
                                     {
@@ -952,6 +1309,45 @@ public static class Program
                                                 Console.WriteLine($"[Mesh] Failed to send repair MeshConnectionBegin to {ipB}: {ex.Message}");
                                             }
                                         }
+                                        lastRepairAttempt[pairKey] = DateTime.UtcNow;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Also check that each peer can reach US (the introducer).
+                        // If a peer's ConnectedMeshIPs doesn't include our mesh IP,
+                        // it lost its tunnel to us and needs a re-introduction via mediation.
+                        foreach (var ip in targetList)
+                        {
+                            if (!heartbeatAcks.ContainsKey(ip))
+                                continue; // Peer didn't respond — can't check
+                            if (!heartbeatAcks[ip].Contains(meshIP))
+                            {
+                                Console.WriteLine($"[Mesh] Heartbeat: peer {ip} cannot reach introducer ({meshIP}) — requesting re-connection via mediation");
+                                // We can't send MeshConnectionBegin over WireGuard because the
+                                // tunnel is down. Instead, send a ConnectionRequest through the
+                                // mediation server (if connected) to re-establish the link.
+                                if (tcpClient.Connected && peerInfoByMeshIP.TryGetValue(ip, out var lostPeerInfo) &&
+                                    !string.IsNullOrEmpty(lostPeerInfo.peerID) &&
+                                    !pendingConnectionRequests.ContainsKey(lostPeerInfo.peerID))
+                                {
+                                    try
+                                    {
+                                        var reconnReq = new MediationMessage(MediationMessageType.ConnectionRequest)
+                                        {
+                                            PeerID = lostPeerInfo.peerID,
+                                            NATType = detectedNatType
+                                        };
+                                        byte[] reconnBuf = Encoding.ASCII.GetBytes(reconnReq.Serialize());
+                                        stream.Write(reconnBuf, 0, reconnBuf.Length);
+                                        stream.Flush();
+                                        pendingConnectionRequests[lostPeerInfo.peerID] = DateTime.UtcNow;
+                                        repairCount++;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"[Mesh] Failed to send re-connection request for {ip}: {ex.Message}");
                                     }
                                 }
                             }
@@ -1045,6 +1441,32 @@ public static class Program
                             if (!string.IsNullOrEmpty(msg.PrivateAddressString))
                             {
                                 peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
+
+                                // Clean up any existing tunnel to the same mesh IP before creating a new one.
+                                // Without this, old tunnels completing late overwrite the WireGuard peer's
+                                // endpoint with a stale address, breaking mesh control traffic.
+                                string cbMeshIP = msg.PrivateAddressString;
+                                var oldConnIDs = peerMeshIPs
+                                    .Where(kvp => kvp.Value == cbMeshIP && kvp.Key != msg.ConnectionID)
+                                    .Select(kvp => kvp.Key).ToList();
+                                foreach (var oldConnID in oldConnIDs)
+                                {
+                                    Tunnel oldTunnel = null;
+                                    lock (activeConnectionTunnels)
+                                    {
+                                        if (activeConnectionTunnels.TryGetValue(oldConnID, out oldTunnel))
+                                            activeConnectionTunnels.Remove(oldConnID);
+                                    }
+                                    if (oldTunnel != null)
+                                    {
+                                        Console.WriteLine($"[Mesh] Disposing old tunnel {oldConnID} for {cbMeshIP} (superseded by {msg.ConnectionID})");
+                                        try { oldTunnel.Dispose(); } catch { }
+                                    }
+                                    peerMeshIPs.Remove(oldConnID);
+                                }
+                                activePeerTunnels.Remove(cbMeshIP);
+                                if (!string.IsNullOrEmpty(msg.PeerID))
+                                    activePeerTunnels.Remove(msg.PeerID);
                             }
 
                             // Check if we already have a tunnel for this ConnectionID
@@ -1197,6 +1619,15 @@ public static class Program
                                 t.NotifyConnectionComplete();
                             }
                         }
+                        else if (msg.ID == MediationMessageType.ServerNotAvailable)
+                        {
+                            Console.WriteLine($"[Mesh] ServerNotAvailable — target peer unavailable");
+                            // The mediation server couldn't establish this connection (target disconnected
+                            // or missing UDP info). Remove the pending request so it doesn't block disconnect.
+                            // We don't know which specific peer failed, but since this is a response to
+                            // our most recent ConnectionRequest, we can't easily map it. Instead, the
+                            // stale pending cleanup below will handle it after timeout.
+                        }
                         else if (msg.ID == MediationMessageType.MeshIntroduceRequest)
                         {
                             // The mediation server has selected us as the introducer for a new peer.
@@ -1215,12 +1646,6 @@ public static class Program
                             int introduced = 0;
                             if (msg.OtherPeers != null)
                             {
-                                Console.WriteLine($"[Mesh] MeshIntroduceRequest has {msg.OtherPeers.Length} peer(s) in OtherPeers:");
-                                for (int i = 0; i < msg.OtherPeers.Length; i++)
-                                {
-                                    Console.WriteLine($"[Mesh]   OtherPeers[{i}]: {msg.OtherPeers[i]}");
-                                }
-
                                 foreach (var peerObj in msg.OtherPeers)
                                 {
                                     var peerElement = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
@@ -1414,7 +1839,8 @@ public static class Program
                                 byte[] ackBuffer = Encoding.ASCII.GetBytes(ack.Serialize());
                                 stream.Write(ackBuffer, 0, ackBuffer.Length);
                                 stream.Flush();
-                                Console.WriteLine($"[Mesh] Sent MeshIntroduceAck for {msg.PeerID} ({introduced} peer pair(s) connected)");
+                                int deferredCount = deferredIntroductions.TryGetValue(msg.PrivateAddressString ?? "", out var dList) ? dList.Count : 0;
+                                Console.WriteLine($"[Mesh] Sent MeshIntroduceAck for {msg.PeerID} ({introduced} introduced, {deferredCount} deferred, completedTunnels={completedTunnelMeshIPs.Count})");
                             }
                             catch (Exception ex)
                             {
@@ -1461,16 +1887,15 @@ public static class Program
             const int IsolationGracePeriodSeconds = 60; // Wait before reconnecting to avoid thrashing
             TcpClient reconnectedTcpClient = null;
             NetworkStream reconnectedStream = null;
+            string reconnectedTcpBuffer = ""; // Accumulates partial TCP data across reads
             DateTime? lastReconnectDiscovery = null;
             var reconnectDiscoveryInterval = TimeSpan.FromSeconds(15);
 
-            // Introducer failover: detect when the introducer's WireGuard tunnel is dead
-            // and reconnect to mediation to become the new introducer.
-            // Only non-symmetric peers are eligible to take over.
-            var lastIntroducerCheck = DateTime.UtcNow;
-            var introducerCheckInterval = TimeSpan.FromSeconds(30);
-            DateTime? introducerDeadDetectedAt = null;
-            const int IntroducerDeadGracePeriodSeconds = 90; // Wait before assuming introducer is truly dead
+            // Reset probe state when entering mesh-control-only loop
+            lastIntroducerProbe = DateTime.UtcNow;
+            introducerMissedProbes = 0;
+
+            Console.WriteLine($"[Mesh] Entering mesh-control-only loop — isIntroducer={isIntroducer}, natType={detectedNatType}, introducerMeshIP={introducerMeshIP ?? "null"}");
 
             while (true)
             {
@@ -1478,6 +1903,297 @@ public static class Program
                 while (meshConnectionBeginQueue.TryDequeue(out var cbMsg))
                 {
                     ProcessMeshConnectionBegin(cbMsg);
+                }
+
+                // Process peer removal notifications from the introducer
+                while (meshPeerRemovedQueue.TryDequeue(out var rmMsg))
+                {
+                    if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
+                        RemoveDeadPeer(rmMsg.PrivateAddressString);
+                }
+
+                // ── Introducer heartbeat (failover introducer) ──────────────────────
+                // Same logic as the primary introducer loop — send heartbeats, collect
+                // acks, and repair missing peer-to-peer links.
+                if (isIntroducer && heartbeatAckDeadline == null &&
+                    DateTime.UtcNow - lastHeartbeat > heartbeatInterval)
+                {
+                    var allPeers = wireguardTunnel.GetAllPeers();
+                    heartbeatTargets.Clear();
+                    heartbeatAcks.Clear();
+
+                    foreach (var peer in allPeers)
+                    {
+                        string peerIP = peer.PrivateAddress.ToString();
+                        heartbeatTargets.Add(peerIP);
+
+                        var hb = new MediationMessage(MediationMessageType.MeshHeartbeat);
+                        try
+                        {
+                            byte[] hbBytes = Encoding.UTF8.GetBytes(hb.Serialize());
+                            meshControlClient.Send(hbBytes, hbBytes.Length,
+                                new IPEndPoint(peer.PrivateAddress, MeshControlPort));
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Failed to send heartbeat to {peerIP}: {ex.Message}");
+                        }
+                    }
+
+                    if (heartbeatTargets.Count > 1)
+                    {
+                        heartbeatAckDeadline = DateTime.UtcNow.AddSeconds(5);
+                        Console.WriteLine($"[Mesh] Heartbeat sent to {heartbeatTargets.Count} peer(s), collecting acks...");
+                    }
+                    else
+                    {
+                        lastHeartbeat = DateTime.UtcNow;
+                    }
+                }
+
+                // Collect heartbeat acks (failover introducer)
+                if (heartbeatAckDeadline != null)
+                {
+                    while (meshHeartbeatAckQueue.TryDequeue(out var ackMsg))
+                    {
+                        string ackMeshIP = ackMsg.PrivateAddressString;
+                        if (!string.IsNullOrEmpty(ackMeshIP) && ackMsg.ConnectedMeshIPs != null)
+                        {
+                            heartbeatAcks[ackMeshIP] = new HashSet<string>(ackMsg.ConnectedMeshIPs);
+                        }
+                        // Cache peer info from heartbeat acks — this is the most reliable
+                        // source since every peer responds with its NAT type on every cycle.
+                        if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
+                        {
+                            // Preserve existing endpoint — heartbeat acks don't include it
+                            string existingEndpoint = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing) ? existing.endpoint : null;
+                            peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType);
+                        }
+                    }
+
+                    if (DateTime.UtcNow > heartbeatAckDeadline.Value)
+                    {
+                        Console.WriteLine($"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
+
+                        // Track consecutive misses per peer and remove dead ones
+                        var deadPeers = new List<string>();
+                        foreach (var ip in heartbeatTargets)
+                        {
+                            if (heartbeatAcks.ContainsKey(ip))
+                            {
+                                heartbeatMissCount[ip] = 0;
+                            }
+                            else
+                            {
+                                heartbeatMissCount.TryGetValue(ip, out int prev);
+                                heartbeatMissCount[ip] = prev + 1;
+                                Console.WriteLine($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{PeerDeadThreshold})");
+                                if (heartbeatMissCount[ip] >= PeerDeadThreshold)
+                                    deadPeers.Add(ip);
+                            }
+                        }
+                        foreach (var deadIP in deadPeers)
+                        {
+                            Console.WriteLine($"[Mesh] Peer {deadIP} declared dead after {PeerDeadThreshold} consecutive missed heartbeats");
+                            string deadPID = peerInfoByMeshIP.TryGetValue(deadIP, out var di) ? di.peerID : null;
+                            var removeMsg = new MediationMessage(MediationMessageType.MeshPeerRemoved)
+                            {
+                                PrivateAddressString = deadIP,
+                                PeerID = deadPID ?? ""
+                            };
+                            byte[] rmBytes = Encoding.UTF8.GetBytes(removeMsg.Serialize());
+                            foreach (var peerIP in heartbeatTargets)
+                            {
+                                if (peerIP == deadIP) continue;
+                                try
+                                {
+                                    meshControlClient.Send(rmBytes, rmBytes.Length,
+                                        new IPEndPoint(IPAddress.Parse(peerIP), MeshControlPort));
+                                }
+                                catch { }
+                            }
+                            RemoveDeadPeer(deadIP);
+                        }
+
+                        var targetList = heartbeatTargets.Where(ip => !deadPeers.Contains(ip)).ToList();
+                        int repairCount = 0;
+                        for (int i = 0; i < targetList.Count; i++)
+                        {
+                            for (int j = i + 1; j < targetList.Count; j++)
+                            {
+                                string ipA = targetList[i];
+                                string ipB = targetList[j];
+
+                                bool aReportsB = heartbeatAcks.ContainsKey(ipA) && heartbeatAcks[ipA].Contains(ipB);
+                                bool bReportsA = heartbeatAcks.ContainsKey(ipB) && heartbeatAcks[ipB].Contains(ipA);
+
+                                string sortedA = string.Compare(ipA, ipB, StringComparison.Ordinal) < 0 ? ipA : ipB;
+                                string sortedB = sortedA == ipA ? ipB : ipA;
+                                if (relayedPairs.Contains($"{sortedA}|{sortedB}"))
+                                    continue;
+
+                                if (!aReportsB && !bReportsA)
+                                {
+                                    // Cooldown: don't re-introduce the same pair repeatedly
+                                    string pairKey = $"{sortedA}|{sortedB}";
+                                    if (lastRepairAttempt.TryGetValue(pairKey, out var lastAttempt) &&
+                                        DateTime.UtcNow - lastAttempt < repairCooldown)
+                                        continue;
+
+                                    bool hasA = peerInfoByMeshIP.TryGetValue(ipA, out var infoA);
+                                    bool hasB = peerInfoByMeshIP.TryGetValue(ipB, out var infoB);
+
+                                    bool bothSymmetric = hasA && hasB && infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
+
+                                    if (!hasA || !hasB)
+                                        Console.WriteLine($"[Mesh] Heartbeat: missing peer info for pair {ipA}(known={hasA}) <-> {ipB}(known={hasB}) — peerInfoByMeshIP has {peerInfoByMeshIP.Count} entries");
+
+                                    if (bothSymmetric)
+                                    {
+                                        Console.WriteLine($"[Mesh] Heartbeat: {ipA} <-> {ipB} disconnected (both symmetric) — re-establishing relay");
+
+                                        wireguardTunnel.EnableForwarding();
+
+                                        var relayToA = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                                        {
+                                            PeerID = infoB.peerID ?? "",
+                                            EndpointString = infoB.endpoint,
+                                            NATType = infoB.natType,
+                                            PrivateAddressString = ipB,
+                                            IsRelay = true,
+                                            IntroducerMeshIP = meshIP
+                                        };
+                                        try
+                                        {
+                                            byte[] rABytes = Encoding.UTF8.GetBytes(relayToA.Serialize());
+                                            meshControlClient.Send(rABytes, rABytes.Length,
+                                                new IPEndPoint(IPAddress.Parse(ipA), MeshControlPort));
+                                            repairCount++;
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[Mesh] Failed to send relay repair to {ipA}: {ex.Message}");
+                                        }
+
+                                        var relayToB = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                                        {
+                                            PeerID = infoA.peerID ?? "",
+                                            EndpointString = infoA.endpoint,
+                                            NATType = infoA.natType,
+                                            PrivateAddressString = ipA,
+                                            IsRelay = true,
+                                            IntroducerMeshIP = meshIP
+                                        };
+                                        try
+                                        {
+                                            byte[] rBBytes = Encoding.UTF8.GetBytes(relayToB.Serialize());
+                                            meshControlClient.Send(rBBytes, rBBytes.Length,
+                                                new IPEndPoint(IPAddress.Parse(ipB), MeshControlPort));
+                                            repairCount++;
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[Mesh] Failed to send relay repair to {ipB}: {ex.Message}");
+                                        }
+
+                                        relayedPairs.Add($"{sortedA}|{sortedB}");
+                                        lastRepairAttempt[pairKey] = DateTime.UtcNow;
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine($"[Mesh] Heartbeat: {ipA} <-> {ipB} disconnected — re-introducing");
+
+                                        if (!string.IsNullOrEmpty(infoB.endpoint))
+                                        {
+                                            var cbToA = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                                            {
+                                                PeerID = infoB.peerID ?? "",
+                                                EndpointString = infoB.endpoint,
+                                                NATType = infoB.natType,
+                                                PrivateAddressString = ipB
+                                            };
+                                            try
+                                            {
+                                                byte[] cbABytes = Encoding.UTF8.GetBytes(cbToA.Serialize());
+                                                meshControlClient.Send(cbABytes, cbABytes.Length,
+                                                    new IPEndPoint(IPAddress.Parse(ipA), MeshControlPort));
+                                                repairCount++;
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"[Mesh] Failed to send repair MeshConnectionBegin to {ipA}: {ex.Message}");
+                                            }
+                                        }
+
+                                        if (!string.IsNullOrEmpty(infoA.endpoint))
+                                        {
+                                            var cbToB = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                                            {
+                                                PeerID = infoA.peerID ?? "",
+                                                EndpointString = infoA.endpoint,
+                                                NATType = infoA.natType,
+                                                PrivateAddressString = ipA
+                                            };
+                                            try
+                                            {
+                                                byte[] cbBBytes = Encoding.UTF8.GetBytes(cbToB.Serialize());
+                                                meshControlClient.Send(cbBBytes, cbBBytes.Length,
+                                                    new IPEndPoint(IPAddress.Parse(ipB), MeshControlPort));
+                                                repairCount++;
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                Console.WriteLine($"[Mesh] Failed to send repair MeshConnectionBegin to {ipB}: {ex.Message}");
+                                            }
+                                        }
+                                        lastRepairAttempt[pairKey] = DateTime.UtcNow;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Also check that each peer can reach US (the introducer).
+                        // If a peer's ConnectedMeshIPs doesn't include our mesh IP,
+                        // it lost its tunnel to us and needs a re-introduction via mediation.
+                        foreach (var ip in targetList)
+                        {
+                            if (!heartbeatAcks.ContainsKey(ip))
+                                continue;
+                            if (!heartbeatAcks[ip].Contains(meshIP))
+                            {
+                                Console.WriteLine($"[Mesh] Heartbeat: peer {ip} cannot reach introducer ({meshIP}) — requesting re-connection via mediation");
+                                if (reconnectedTcpClient != null && reconnectedTcpClient.Connected &&
+                                    peerInfoByMeshIP.TryGetValue(ip, out var lostPeerInfo) &&
+                                    !string.IsNullOrEmpty(lostPeerInfo.peerID) &&
+                                    !pendingConnectionRequests.ContainsKey(lostPeerInfo.peerID))
+                                {
+                                    try
+                                    {
+                                        var reconnReq = new MediationMessage(MediationMessageType.ConnectionRequest)
+                                        {
+                                            PeerID = lostPeerInfo.peerID,
+                                            NATType = detectedNatType
+                                        };
+                                        byte[] reconnBuf = Encoding.ASCII.GetBytes(reconnReq.Serialize());
+                                        reconnectedStream.Write(reconnBuf, 0, reconnBuf.Length);
+                                        reconnectedStream.Flush();
+                                        pendingConnectionRequests[lostPeerInfo.peerID] = DateTime.UtcNow;
+                                        repairCount++;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"[Mesh] Failed to send re-connection request for {ip}: {ex.Message}");
+                                    }
+                                }
+                            }
+                        }
+
+                        if (repairCount > 0)
+                            Console.WriteLine($"[Mesh] Heartbeat: sent {repairCount} repair MeshConnectionBegin message(s)");
+
+                        heartbeatAckDeadline = null;
+                        lastHeartbeat = DateTime.UtcNow;
+                    }
                 }
 
                 // If we have a reconnected TCP connection, process incoming messages
@@ -1491,9 +2207,13 @@ public static class Program
                             int bytesRead = reconnectedStreamLocal.Read(buffer, 0, buffer.Length);
                             if (bytesRead > 0)
                             {
-                                string data = Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                                // Parse JSON messages from the reconnected TCP stream
-                                var (parsedMsg, remainder) = ExtractFirstJson(data);
+                                reconnectedTcpBuffer += Encoding.ASCII.GetString(buffer, 0, bytesRead);
+                            }
+                        }
+                        // Process any complete JSON messages accumulated in the buffer
+                        if (reconnectedTcpBuffer.Length > 0)
+                        {
+                                var (parsedMsg, remainder) = ExtractFirstJson(reconnectedTcpBuffer);
                                 while (parsedMsg != null)
                                 {
                                     if (parsedMsg.ID == MediationMessageType.MeshJoinResponse ||
@@ -1502,7 +2222,23 @@ public static class Program
                                         if (parsedMsg.Peers != null && parsedMsg.Peers.Length > 0)
                                         {
                                             Console.WriteLine($"[Mesh] Reconnect discovery: found {parsedMsg.Peers.Length} peer(s)");
-                                            ProcessDiscoveredPeers(parsedMsg.Peers);
+                                            // Cache peer info for heartbeat repair (NAT type, endpoint, etc.)
+                                            // Without this, the failover introducer can't detect symmetric peers
+                                            // and falls back to direct hole-punching instead of relay mode.
+                                            foreach (var peerObj2 in parsedMsg.Peers)
+                                            {
+                                                var pe2 = JsonSerializer.Deserialize<JsonElement>(peerObj2.ToString());
+                                                string mip2 = pe2.TryGetProperty("meshIP", out JsonElement mipEl2) ? mipEl2.GetString() : null;
+                                                string ep2 = pe2.TryGetProperty("endpoint", out JsonElement epEl2) ? epEl2.GetString() : null;
+                                                int nt2 = pe2.TryGetProperty("natType", out JsonElement ntEl2) ? ntEl2.GetInt32() : -1;
+                                                string pid2 = pe2.TryGetProperty("peerID", out JsonElement pidEl2) ? pidEl2.GetString() : null;
+                                                if (!string.IsNullOrEmpty(mip2))
+                                                {
+                                                    peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2);
+                                                    Console.WriteLine($"[Mesh] Cached peer info: {mip2} = NAT:{(NATType)nt2}, endpoint:{ep2}");
+                                                }
+                                            }
+                                            ProcessDiscoveredPeers(parsedMsg.Peers, reconnectedStreamLocal);
                                         }
                                     }
                                     else if (parsedMsg.ID == MediationMessageType.ConnectionBegin)
@@ -1511,6 +2247,38 @@ public static class Program
                                         // Store peer's mesh IP
                                         if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
                                             peerMeshIPs[parsedMsg.ConnectionID] = parsedMsg.PrivateAddressString;
+
+                                        // Clean up any existing tunnel to the same mesh IP before creating a new one.
+                                        // Without this, old tunnels completing late overwrite the WireGuard peer's
+                                        // endpoint with a stale address, breaking mesh control traffic.
+                                        if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
+                                        {
+                                            string reconMeshIP = parsedMsg.PrivateAddressString;
+                                            // Find and dispose old tunnels to this mesh IP
+                                            var oldConnIDs = peerMeshIPs
+                                                .Where(kvp => kvp.Value == reconMeshIP && kvp.Key != parsedMsg.ConnectionID)
+                                                .Select(kvp => kvp.Key).ToList();
+                                            foreach (var oldConnID in oldConnIDs)
+                                            {
+                                                Tunnel oldTunnel = null;
+                                                lock (activeConnectionTunnels)
+                                                {
+                                                    if (activeConnectionTunnels.TryGetValue(oldConnID, out oldTunnel))
+                                                        activeConnectionTunnels.Remove(oldConnID);
+                                                }
+                                                if (oldTunnel != null)
+                                                {
+                                                    Console.WriteLine($"[Mesh] Reconnect: disposing old tunnel {oldConnID} for {reconMeshIP} (superseded by {parsedMsg.ConnectionID})");
+                                                    try { oldTunnel.Dispose(); } catch { }
+                                                }
+                                                peerMeshIPs.Remove(oldConnID);
+                                            }
+                                            // Clean up tracking for this mesh IP so the new tunnel starts fresh
+                                            activePeerTunnels.Remove(reconMeshIP);
+                                            if (!string.IsNullOrEmpty(parsedMsg.PeerID))
+                                                activePeerTunnels.Remove(parsedMsg.PeerID);
+                                            heartbeatMissCount.Remove(reconMeshIP);
+                                        }
 
                                         if (!activeConnectionTunnels.ContainsKey(parsedMsg.ConnectionID))
                                         {
@@ -1548,9 +2316,18 @@ public static class Program
                                             }
                                             if (!string.IsNullOrEmpty(capturedMeshIPStr))
                                                 activePeerTunnels[capturedMeshIPStr] = reconnectTunnel;
+                                            var capturedMsg = parsedMsg;
                                             System.Threading.Tasks.Task.Run(() =>
                                             {
-                                                try { reconnectTunnel.Start(); }
+                                                try
+                                                {
+                                                    reconnectTunnel.Start();
+                                                    reconnectTunnel.InjectConnectionBegin(
+                                                        capturedMsg.EndpointString,
+                                                        capturedMsg.NATType,
+                                                        capturedMsg.OwnNATType ?? detectedNatType,
+                                                        capturedMsg.PrivateAddressString);
+                                                }
                                                 catch (Exception ex)
                                                 {
                                                     Console.WriteLine($"[Mesh] Reconnect tunnel error: {ex.Message}");
@@ -1649,7 +2426,7 @@ public static class Program
                                     }
                                     (parsedMsg, remainder) = ExtractFirstJson(remainder);
                                 }
-                            }
+                                reconnectedTcpBuffer = remainder ?? "";
                         }
 
                         // Periodic keep-alive on reconnected connection
@@ -1678,13 +2455,16 @@ public static class Program
                                 reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
                                 Console.WriteLine("[Mesh] Re-sent discovery request on reconnected connection");
                             }
-                            else if (!stillIsolated)
+                            else if (!stillIsolated && !isIntroducer)
                             {
-                                // Peers recovered — close reconnected connection
+                                // Peers recovered — close reconnected connection.
+                                // Skip this when we're the introducer: the introducer must stay
+                                // connected to mediation to coordinate new peers joining the mesh.
                                 Console.WriteLine("[Mesh] Peers recovered — closing reconnected mediation connection");
                                 reconnectedTcpClient.Close();
                                 reconnectedTcpClient = null;
                                 reconnectedStream = null;
+                                reconnectedTcpBuffer = "";
                                 isolationDetectedAt = null;
                             }
                             lastReconnectDiscovery = DateTime.UtcNow;
@@ -1695,6 +2475,7 @@ public static class Program
                         Console.WriteLine($"[Mesh] Reconnected TCP error: {ex.Message}");
                         reconnectedTcpClient = null;
                         reconnectedStream = null;
+                        reconnectedTcpBuffer = "";
                     }
                 }
 
@@ -1824,100 +2605,131 @@ public static class Program
                     }
                 }
 
-                // ── Introducer failover ────────────────────────────────────────────
-                // If we're non-symmetric and the introducer's WireGuard tunnel is dead,
-                // reconnect to mediation to become the new introducer. Without this,
-                // no one can coordinate connections for newly joining peers.
+                // ── Introducer failover (active probe) ──────────────────────────────
+                // Periodically send MeshHeartbeat to the introducer over port 51888.
+                // If the introducer's NATTunnel process is alive, it responds with
+                // MeshHeartbeatAck. WireGuard PersistentKeepalive (5s) keeps the tunnel
+                // alive at the driver level even after the process exits, so we CANNOT
+                // rely on WireGuard LastActivity — only application-level responses.
                 if (!isIntroducer && reconnectedTcpClient == null &&
                     detectedNatType != NATType.Symmetric &&
                     !string.IsNullOrEmpty(introducerMeshIP) &&
-                    DateTime.UtcNow - lastIntroducerCheck > introducerCheckInterval)
+                    DateTime.UtcNow - lastIntroducerProbe > introducerProbeInterval)
                 {
-                    lastIntroducerCheck = DateTime.UtcNow;
-
-                    var introducerPeer = wireguardTunnel.GetPeer(IPAddress.Parse(introducerMeshIP));
-                    bool introducerAlive = introducerPeer != null &&
-                        (DateTime.UtcNow - introducerPeer.LastActivity).TotalSeconds < RelayGatewayTimeoutSeconds;
-
-                    if (!introducerAlive)
+                    // Check if the previous probe was acked
+                    if (!introducerProbeAckReceived)
                     {
-                        if (introducerDeadDetectedAt == null)
+                        introducerMissedProbes++;
+                        Console.WriteLine($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
+                    }
+                    else
+                    {
+                        if (introducerMissedProbes > 0)
                         {
-                            introducerDeadDetectedAt = DateTime.UtcNow;
-                            Console.WriteLine($"[Mesh] Introducer ({introducerMeshIP}) appears dead. Will take over in {IntroducerDeadGracePeriodSeconds}s if not resolved.");
+                            Console.WriteLine($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
                         }
-                        else if ((DateTime.UtcNow - introducerDeadDetectedAt.Value).TotalSeconds >= IntroducerDeadGracePeriodSeconds)
-                        {
-                            Console.WriteLine("[Mesh] Introducer confirmed dead — reconnecting to mediation to take over introducer role");
-                            try
-                            {
-                                var mediationEP = TunnelOptions.MediationEndpoint;
-                                reconnectedTcpClient = new TcpClient();
-                                reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-                                reconnectedTcpClient.Connect(mediationEP);
-                                reconnectedStream = reconnectedTcpClient.GetStream();
+                        introducerMissedProbes = 0;
+                    }
 
-                                // Wait for Connected message
-                                byte[] connBuf = new byte[4096];
+                    if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
+                    {
+                        Console.WriteLine("[Mesh] Introducer confirmed dead — reconnecting to mediation to take over introducer role");
+                        try
+                        {
+                            var mediationEP = TunnelOptions.MediationEndpoint;
+                            reconnectedTcpClient = new TcpClient();
+                            reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                            reconnectedTcpClient.Connect(mediationEP);
+                            reconnectedStream = reconnectedTcpClient.GetStream();
+
+                            // Wait for Connected message
+                            byte[] connBuf = new byte[4096];
+                            reconnectedStream.Read(connBuf, 0, connBuf.Length);
+
+                            // NAT type detection handshake
+                            var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
+                            {
+                                LocalPort = localUdpPort,
+                                LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
+                                ClientID = peerID
+                            };
+                            byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
+                            reconnectedStream.Write(natReqBytes, 0, natReqBytes.Length);
+
+                            System.Threading.Thread.Sleep(1000);
+                            while (reconnectedStream.DataAvailable)
                                 reconnectedStream.Read(connBuf, 0, connBuf.Length);
 
-                                // NAT type detection handshake
-                                var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
-                                {
-                                    LocalPort = localUdpPort,
-                                    LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
-                                    ClientID = peerID
-                                };
-                                byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
-                                reconnectedStream.Write(natReqBytes, 0, natReqBytes.Length);
+                            var natTestMsg2 = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
+                            byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
+                            udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, 6511));
+                            udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, 6512));
 
-                                System.Threading.Thread.Sleep(1000);
-                                while (reconnectedStream.DataAvailable)
-                                    reconnectedStream.Read(connBuf, 0, connBuf.Length);
+                            System.Threading.Thread.Sleep(1000);
+                            while (reconnectedStream.DataAvailable)
+                                reconnectedStream.Read(connBuf, 0, connBuf.Length);
 
-                                var natTestMsg2 = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
-                                byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
-                                udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, 6511));
-                                udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, 6512));
-
-                                System.Threading.Thread.Sleep(1000);
-                                while (reconnectedStream.DataAvailable)
-                                    reconnectedStream.Read(connBuf, 0, connBuf.Length);
-
-                                // Send MeshJoinRequest — the server will select us as the new introducer
-                                // (since the old one disconnected and we're non-symmetric)
-                                var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
-                                {
-                                    NetworkID = TunnelOptions.NetworkID,
-                                    PeerID = peerID.ToString(),
-                                    NATType = detectedNatType,
-                                    PrivateAddressString = meshIP
-                                };
-                                byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
-                                reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
-                                reconnectedStream.Flush();
-
-                                lastReconnectDiscovery = DateTime.UtcNow;
-                                isIntroducer = true; // We're taking over
-                                introducerDeadDetectedAt = null;
-                                Console.WriteLine("[Mesh] Reconnected to mediation as new introducer — sent join request");
-                            }
-                            catch (Exception ex)
+                            // Send MeshJoinRequest — the server will select us as the new introducer
+                            // (since the old one disconnected and we're non-symmetric)
+                            var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
                             {
-                                Console.WriteLine($"[Mesh] Failed to reconnect for introducer takeover: {ex.Message}");
-                                reconnectedTcpClient = null;
-                                reconnectedStream = null;
-                                introducerDeadDetectedAt = null; // Reset to retry later
-                            }
+                                NetworkID = TunnelOptions.NetworkID,
+                                PeerID = peerID.ToString(),
+                                NATType = detectedNatType,
+                                PrivateAddressString = meshIP
+                            };
+                            byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
+                            reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
+                            reconnectedStream.Flush();
+
+                            lastReconnectDiscovery = DateTime.UtcNow;
+                            isIntroducer = true; // We're taking over
+                            introducerMissedProbes = 0;
+                            Console.WriteLine("[Mesh] Reconnected to mediation as new introducer — sent join request");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Failed to reconnect for introducer takeover: {ex.Message}");
+                            reconnectedTcpClient = null;
+                            reconnectedStream = null;
+                            introducerMissedProbes = 0; // Reset to retry later
                         }
                     }
                     else
                     {
-                        if (introducerDeadDetectedAt != null)
+                        // Send a new probe to the introducer
+                        introducerProbeAckReceived = false;
+                        try
                         {
-                            Console.WriteLine("[Mesh] Introducer recovered — cancelling failover");
-                            introducerDeadDetectedAt = null;
+                            var probe = new MediationMessage(MediationMessageType.MeshHeartbeat);
+                            byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
+                            meshControlClient.Send(probeBytes, probeBytes.Length,
+                                new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
                         }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Failed to send introducer probe: {ex.Message}");
+                        }
+                    }
+
+                    lastIntroducerProbe = DateTime.UtcNow;
+                }
+
+                // ── Local staleness fallback ─────────────────────────────────────────
+                // If a peer hasn't sent any heartbeat/ack in 5 minutes, assume it's dead.
+                // This catches cases where the introducer's MeshPeerRemoved was lost.
+                if (!isIntroducer)
+                {
+                    var staleThreshold = TimeSpan.FromMinutes(5);
+                    var now = DateTime.UtcNow;
+                    var stalePeers = lastHeartbeatReceivedFrom
+                        .Where(kvp => kvp.Key != meshIP && (now - kvp.Value) > staleThreshold)
+                        .Select(kvp => kvp.Key)
+                        .ToList();
+                    foreach (var staleIP in stalePeers)
+                    {
+                        Console.WriteLine($"[Mesh] Peer {staleIP} has been silent for >{staleThreshold.TotalMinutes}m — removing locally");
+                        RemoveDeadPeer(staleIP);
                     }
                 }
 
