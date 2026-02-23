@@ -704,6 +704,9 @@ public static class Program
             var lastKeepAlive = DateTime.UtcNow;
             var keepAliveInterval = TimeSpan.FromSeconds(5); // Keep-alive is fast; not configurable
 
+            // Track mesh startup time for uptime calculation in MeshState
+            var meshStartTime = DateTime.UtcNow;
+
             // Grace period: once all initial connections are established, wait before
             // disconnecting to give disconnected peers time to TransientReconnect.
             DateTime? disconnectAfter = null;
@@ -773,6 +776,77 @@ public static class Program
 
                 // Clean up relayedPairs containing this mesh IP
                 relayedPairs.RemoveWhere(pair => pair.Contains(deadMeshIP));
+            }
+
+            // Helper method to capture current mesh state for HTTP status endpoint
+            MeshState GetMeshState()
+            {
+                var state = new MeshState
+                {
+                    OwnMeshIP = meshIP,
+                    OwnPeerID = peerID.ToString(),
+                    IsIntroducer = isIntroducer,
+                    NATType = detectedNatType.ToString(),
+                    IntroducerMeshIP = introducerMeshIP,
+                    UptimeSeconds = (long)(DateTime.UtcNow - meshStartTime).TotalSeconds
+                };
+
+                // Populate connected peers from peerInfoByMeshIP (source of truth for known peers)
+                // Only include peers with completed WireGuard tunnels
+                foreach (var peerMeshIP in peerInfoByMeshIP.Keys)
+                {
+                    if (peerMeshIP != meshIP && completedTunnelMeshIPs.Contains(peerMeshIP))
+                    {
+                        var (peerId, endpoint, natType) = peerInfoByMeshIP[peerMeshIP];
+                        DateTime lastActivity = DateTime.MinValue;
+
+                        // Get LastActivity from the WireGuard peer if available
+                        try
+                        {
+                            var wgPeer = wireguardTunnel?.GetPeer(IPAddress.Parse(peerMeshIP));
+                            if (wgPeer != null)
+                            {
+                                lastActivity = wgPeer.LastActivity;
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] Error getting WireGuard peer info for {peerMeshIP}: {ex.Message}");
+                        }
+
+                        bool isRelayed = relayedPairs.Any(pair => pair.Contains(peerMeshIP) && pair.Contains(meshIP));
+                        bool isRelayGateway = relayedPairs.Any(pair => pair.Contains(peerMeshIP) && pair.Split('|')[0] == peerMeshIP || pair.Split('|')[1] == peerMeshIP);
+
+                        var peerInfo = new MeshState.ConnectedPeer
+                        {
+                            MeshIP = peerMeshIP,
+                            PeerID = peerId ?? "Unknown",
+                            NATType = natType.ToString(),
+                            Endpoint = endpoint ?? "Unknown",
+                            LastActivity = lastActivity,
+                            IsRelayed = isRelayed,
+                            IsRelayGateway = isRelayGateway
+                        };
+
+                        state.ConnectedPeers.Add(peerInfo);
+                    }
+                }
+
+                // Populate relay routes
+                foreach (var relayPair in relayedPairs)
+                {
+                    var parts = relayPair.Split('|');
+                    if (parts.Length == 2)
+                    {
+                        state.RelayRoutes.Add(new MeshState.RelayRoute
+                        {
+                            SourceMeshIP = parts[0],
+                            DestinationMeshIP = parts[1]
+                        });
+                    }
+                }
+
+                return state;
             }
 
             // TCP reassembly buffer — accumulates partial JSON across reads
@@ -851,6 +925,57 @@ public static class Program
                     {
                         Console.WriteLine($"[Mesh] UDP dispatcher error: {ex.Message}");
                     }
+                }
+            });
+
+            // HTTP status endpoint for mesh state queries (used by GUI and CLI tools)
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    var httpListener = new HttpListener();
+                    httpListener.Prefixes.Add("http://localhost:51889/");
+                    httpListener.Start();
+                    Console.WriteLine("[Mesh] HTTP status endpoint listening on http://localhost:51889/status");
+
+                    while (true)
+                    {
+                        try
+                        {
+                            var context = httpListener.GetContext();
+                            if (context.Request.HttpMethod == "GET" && context.Request.RawUrl == "/status")
+                            {
+                                var meshState = GetMeshState();
+                                var json = JsonSerializer.Serialize(meshState, new JsonSerializerOptions { WriteIndented = true });
+                                byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = buffer.Length;
+                                context.Response.OutputStream.Write(buffer, 0, buffer.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else
+                            {
+                                context.Response.StatusCode = 404;
+                                context.Response.OutputStream.Close();
+                            }
+                        }
+                        catch (HttpListenerException)
+                        {
+                            // Listener stopped or other HTTP error
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[Mesh] HTTP endpoint error: {ex.Message}");
+                        }
+                    }
+
+                    httpListener.Stop();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Mesh] Failed to start HTTP status endpoint: {ex.Message}");
                 }
             });
 
