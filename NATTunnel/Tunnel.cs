@@ -53,6 +53,7 @@ public class Tunnel : IDisposable
     private long totalBytesSent = 0; // Track total bytes sent for activity monitoring
     private IPEndPoint meshPeerEndpoint = null; // The peer's endpoint
     private bool retryInPlace = false; // If true, retry without recreating tunnel
+    private bool ownsUdpClient = true; // False when using a shared UDP client — Dispose must not close it
     private IPAddress ownMeshIP = null; // Our own mesh IP
     private IPAddress peerMeshIP = null; // Remote peer's mesh IP
 
@@ -97,6 +98,7 @@ public class Tunnel : IDisposable
         if (sharedUdpClient != null)
         {
             udpClient = sharedUdpClient;
+            ownsUdpClient = false;
         }
         else
         {
@@ -834,9 +836,12 @@ public class Tunnel : IDisposable
             connectionAttempt?.Stop();
             connectionAttempt?.Dispose();
 
-            // Close UDP client
-            udpClient?.Close();
-            udpClient?.Dispose();
+            // Close UDP client only if we own it (not shared)
+            if (ownsUdpClient)
+            {
+                udpClient?.Close();
+                udpClient?.Dispose();
+            }
 
             // Dispose symmetric NAT probe sockets
             foreach (var probe in symmetricConnectionUdpProbes)

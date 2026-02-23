@@ -41,7 +41,8 @@ const MessageTypes = {
     MeshIntroduceAck: 29,       // Sent from introducer to mediation server via TCP: introductions sent
     MeshConnectionBegin: 30,    // Sent by introducer to both peers over WireGuard: initiate direct hole-punching
     MeshHeartbeat: 31,           // Sent by introducer to each peer over WireGuard: check reachable peers
-    MeshHeartbeatAck: 32         // Response to MeshHeartbeat: list of reachable mesh IPs
+    MeshHeartbeatAck: 32,        // Response to MeshHeartbeat: list of reachable mesh IPs
+    MeshPeerRemoved: 33          // Sent by introducer to all peers when a peer is declared dead
 };
 
 // Client status types

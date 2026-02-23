@@ -309,7 +309,11 @@ public enum MediationMessageType
     /// <summary>
     ///Response to MeshHeartbeat — contains active WireGuard tunnel list
     /// </summary>
-    MeshHeartbeatAck    // 32
+    MeshHeartbeatAck,   // 32
+    /// <summary>
+    ///Sent by introducer to all peers when a peer is declared dead (no heartbeat acks)
+    /// </summary>
+    MeshPeerRemoved     // 33
 }
 
 /// <summary>
