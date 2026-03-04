@@ -33,10 +33,14 @@ public class MeshState
     [JsonPropertyName("uptimeSeconds")]
     public long UptimeSeconds { get; set; }
 
+    [JsonPropertyName("metrics")]
+    public MeshMetrics Metrics { get; set; }
+
     public MeshState()
     {
         ConnectedPeers = new List<ConnectedPeer>();
         RelayRoutes = new List<RelayRoute>();
+        Metrics = new MeshMetrics();
     }
 
     /// <summary>
@@ -64,6 +68,13 @@ public class MeshState
 
         [JsonPropertyName("isRelayGateway")]
         public bool IsRelayGateway { get; set; }
+
+        [JsonPropertyName("latencyMs")]
+        public long LatencyMs { get; set; } = -1;
+
+        [JsonPropertyName("relayedVia")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string RelayedVia { get; set; }
     }
 
     /// <summary>
@@ -76,5 +87,44 @@ public class MeshState
 
         [JsonPropertyName("destinationMeshIP")]
         public string DestinationMeshIP { get; set; }
+    }
+
+    /// <summary>
+    /// Aggregated metrics for mesh health monitoring.
+    /// </summary>
+    public class MeshMetrics
+    {
+        [JsonPropertyName("tunnelsEstablished")]
+        public int TunnelsEstablished { get; set; }
+
+        [JsonPropertyName("tunnelsFailed")]
+        public int TunnelsFailed { get; set; }
+
+        [JsonPropertyName("reconnects")]
+        public int Reconnects { get; set; }
+
+        [JsonPropertyName("peersLost")]
+        public int PeersLost { get; set; }
+
+        [JsonPropertyName("heartbeatsSent")]
+        public int HeartbeatsSent { get; set; }
+
+        [JsonPropertyName("heartbeatAcksReceived")]
+        public int HeartbeatAcksReceived { get; set; }
+
+        [JsonPropertyName("heartbeatsMissed")]
+        public int HeartbeatsMissed { get; set; }
+
+        [JsonPropertyName("lastHeartbeatResponseMs")]
+        public long LastHeartbeatResponseMs { get; set; }
+
+        [JsonPropertyName("relayRoutesEstablished")]
+        public int RelayRoutesEstablished { get; set; }
+
+        [JsonPropertyName("relayRoutesRemoved")]
+        public int RelayRoutesRemoved { get; set; }
+
+        [JsonPropertyName("activeRelayRouteCount")]
+        public int ActiveRelayRouteCount { get; set; }
     }
 }

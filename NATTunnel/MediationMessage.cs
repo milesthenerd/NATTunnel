@@ -122,7 +122,12 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string[] ConnectedMeshIPs { get; set; }
-
+    /// <summary>
+    /// Compact peer roster included in MeshHeartbeat by the introducer.
+    /// Each entry is "meshIP|peerID|natType|endpoint" so non-introducer peers can learn about all mesh members.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string[] PeerRoster { get; set; }
     public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;
@@ -318,6 +323,7 @@ public enum MediationMessageType
     ///Sent by a peer to all connected peers when shutting down gracefully
     /// </summary>
     MeshPeerLeave       // 34
+    // Note: Latency ping/pong uses binary 0xFF-prefixed packets, not JSON message types
 }
 
 /// <summary>
