@@ -1043,6 +1043,38 @@ namespace NATTunnel
         }
 
         /// <summary>
+        /// Remove a specific relay route by destination IP.
+        /// Returns true if a route was removed.
+        /// </summary>
+        public bool RemoveRelayRouteForPeer(IPAddress relayedPeerIP)
+        {
+            if (!relayRoutes.TryGetValue(relayedPeerIP, out var gatewayPeerIP))
+                return false;
+
+            relayRoutes.Remove(relayedPeerIP);
+
+            // Reset the gateway peer's AllowedIPs back to just its own IP
+            var gatewayPeer = peerManager.GetPeer(gatewayPeerIP);
+            if (gatewayPeer != null)
+            {
+                gatewayPeer.ResetAllowedIPs();
+                Console.WriteLine($"[WireGuard] Removed relay route for {relayedPeerIP} (was via {gatewayPeerIP})");
+
+                if (tunnelStarted)
+                {
+                    if (!WireGuardNT.AddPeerToInterface(interfaceName, gatewayPeer))
+                    {
+                        if (wireguardAdapter != IntPtr.Zero)
+                            WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                    }
+                }
+                RegenerateConfigWithPeers();
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Get all relay routes currently tracked (relayedIP -> gatewayIP)
         /// </summary>
         public Dictionary<IPAddress, IPAddress> GetRelayRoutes()

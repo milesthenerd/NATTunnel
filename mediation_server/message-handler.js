@@ -573,6 +573,17 @@ class MessageHandler {
         // This ensures future lookups by PeerID will work
         socketInfo.clientID = PeerID;
 
+        // Clean up any stale sockets with the same PeerID (peer reconnected before old socket timed out).
+        // Without this, the old socket stays in connectionManager.sockets and findPeerBySocket/findPeerByID
+        // may return the stale entry, causing introductions to be sent to a dead socket.
+        for (let i = this.connectionManager.sockets.length - 1; i >= 0; i--) {
+            const s = this.connectionManager.sockets[i];
+            if (s.clientID === PeerID && s.socket !== socket) {
+                console.log(`[MessageHandler] Cleaning up stale socket for ${PeerID} during mesh join`);
+                this.connectionManager.removeSocket(s.socket);
+            }
+        }
+
         // Update timeout for mesh peer to keep them alive
         // Mesh peers stay connected to receive peer updates and connection coordination
         this.connectionManager.updateTimeout(socketInfo);  // Pass socketInfo object directly
