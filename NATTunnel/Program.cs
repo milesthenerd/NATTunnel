@@ -632,11 +632,13 @@ public static class Program
 
                 bool alreadyTracked = activePeerTunnels.ContainsKey(remotePeerID) ||
                     (!string.IsNullOrEmpty(remoteMeshIP) && activePeerTunnels.ContainsKey(remoteMeshIP));
+                bool wasRelayed = !string.IsNullOrEmpty(remoteMeshIP) &&
+                    completedTunnelMeshIPs.Contains(remoteMeshIP) && !alreadyTracked;
 
-                if (alreadyTracked && !string.IsNullOrEmpty(remoteMeshIP))
+                if ((alreadyTracked || wasRelayed) && !string.IsNullOrEmpty(remoteMeshIP))
                 {
-                    // Clean up the old connection to allow reconnect
-                    Console.WriteLine($"[Mesh] Peer {remotePeerID} ({remoteMeshIP}) being re-introduced — cleaning up old connection");
+                    // Clean up the old connection (direct or relay) to allow reconnect
+                    Console.WriteLine($"[Mesh] Peer {remotePeerID} ({remoteMeshIP}) being re-introduced — cleaning up old connection (relay={wasRelayed})");
                     metricReconnects++;
                     RemoveDeadPeer(remoteMeshIP);
                 }
@@ -707,18 +709,26 @@ public static class Program
                             // Flush deferred MeshConnectionBegin messages for this peer
                             if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
                             {
-                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) to {capturedMeshIP}");
+                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {capturedMeshIP}");
                                 foreach (var deferredMsg in deferred)
                                 {
+                                    // Route to correct target: if IntroducerMeshIP is set, this message
+                                    // is meant for a different peer (e.g., notifying an existing peer about the new one)
+                                    string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                        ? deferredMsg.IntroducerMeshIP : capturedMeshIP;
                                     try
                                     {
+                                        // Clear the routing tag before sending so the receiver doesn't misinterpret it
+                                        if (targetIP != capturedMeshIP)
+                                            deferredMsg.IntroducerMeshIP = null;
                                         byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
                                         MeshSend(deferredBytes, deferredBytes.Length,
-                                            new IPEndPoint(IPAddress.Parse(capturedMeshIP), MeshControlPort));
+                                            new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
+                                        Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
                                     }
                                     catch (Exception ex)
                                     {
-                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {capturedMeshIP}: {ex.Message}");
+                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
                                     }
                                 }
                                 deferredIntroductions.Remove(capturedMeshIP);
@@ -864,12 +874,18 @@ public static class Program
                     Console.WriteLine($"[Mesh] Removed WireGuard peer {deadMeshIP}");
                 }
 
-                // Remove relay routes through this peer
+                // Remove relay routes through this peer (as gateway)
                 var removedRelays = wireguardTunnel.RemoveRelayRoutesViaGateway(deadIPAddr);
                 if (removedRelays.Count > 0)
                 {
                     metricRelayRoutesRemoved += removedRelays.Count;
                     Console.WriteLine($"[Mesh] Removed {removedRelays.Count} relay route(s) via {deadMeshIP}");
+                }
+
+                // Remove relay route targeting this peer (was relayed through a gateway)
+                if (wireguardTunnel.RemoveRelayRouteForPeer(deadIPAddr))
+                {
+                    metricRelayRoutesRemoved++;
                 }
 
                 // Clean up tracking dictionaries
@@ -1662,6 +1678,15 @@ public static class Program
                                     else
                                     {
                                         // Non-symmetric pair — re-introduce with direct hole-punch
+                                        // Skip if either peer no longer has a WireGuard tunnel to us
+                                        bool hasWgA = wireguardTunnel.GetPeer(IPAddress.Parse(ipA)) != null;
+                                        bool hasWgB = wireguardTunnel.GetPeer(IPAddress.Parse(ipB)) != null;
+                                        if (!hasWgA || !hasWgB)
+                                        {
+                                            Console.WriteLine($"[Mesh] Skipping repair for {ipA} <-> {ipB} — no WireGuard tunnel to {(!hasWgA ? ipA : ipB)}");
+                                            continue;
+                                        }
+
                                         Console.WriteLine($"[Mesh] Heartbeat: {ipA} <-> {ipB} disconnected — re-introducing");
 
                                         // Send MeshConnectionBegin to A about B
@@ -1949,19 +1974,23 @@ public static class Program
                                             completedTunnelMeshIPs.Add(completedMeshIP);
                                             if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
                                             {
-                                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) to {completedMeshIP}");
+                                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
                                                 foreach (var deferredMsg in deferred)
                                                 {
+                                                    string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                                        ? deferredMsg.IntroducerMeshIP : completedMeshIP;
                                                     try
                                                     {
+                                                        if (targetIP != completedMeshIP)
+                                                            deferredMsg.IntroducerMeshIP = null;
                                                         byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
                                                         MeshSend(deferredBytes, deferredBytes.Length,
-                                                            new IPEndPoint(IPAddress.Parse(completedMeshIP), MeshControlPort));
-                                                        Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {completedMeshIP} (about peer {deferredMsg.PeerID})");
+                                                            new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
+                                                        Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
                                                     }
                                                     catch (Exception ex)
                                                     {
-                                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {completedMeshIP}: {ex.Message}");
+                                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
                                                     }
                                                 }
                                                 deferredIntroductions.Remove(completedMeshIP);
@@ -2120,6 +2149,23 @@ public static class Program
                                         continue;
                                     }
 
+                                    // Clean up stale relay state if this pair was previously relayed
+                                    // (e.g., peer reconnected with a non-Symmetric NAT type)
+                                    if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+                                    {
+                                        string sortA = string.Compare(existingPeerMeshIP, msg.PrivateAddressString, StringComparison.Ordinal) < 0
+                                            ? existingPeerMeshIP : msg.PrivateAddressString;
+                                        string sortB = sortA == existingPeerMeshIP ? msg.PrivateAddressString : existingPeerMeshIP;
+                                        string pairKey = $"{sortA}|{sortB}";
+                                        if (relayedPairs.Remove(pairKey))
+                                        {
+                                            Console.WriteLine($"[Mesh] Removed stale relay pair {pairKey} (NAT types changed)");
+                                            // Remove relay routes on the introducer's WireGuard interface
+                                            wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
+                                            wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
+                                        }
+                                    }
+
                                     // Check for symmetric-to-symmetric: hole punching is infeasible
                                     // Instead, relay traffic through the introducer's WireGuard interface
                                     if (msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric)
@@ -2213,7 +2259,7 @@ public static class Program
                                         Console.WriteLine($"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
                                     }
 
-                                    // Send MeshConnectionBegin to existing peer: "here's the new peer's info"
+                                    // Build both MeshConnectionBegin messages
                                     var connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                                     {
                                         PeerID = msg.PeerID,              // New peer's ID
@@ -2222,33 +2268,38 @@ public static class Program
                                         PrivateAddressString = msg.PrivateAddressString   // New peer's mesh IP
                                     };
 
-                                    try
-                                    {
-                                        byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
-                                        MeshSend(toExistingBytes, toExistingBytes.Length,
-                                            new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
-                                        Console.WriteLine($"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Console.WriteLine($"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
-                                    }
-
-                                    // Send MeshConnectionBegin to new peer: "here's the existing peer's info"
-                                    // But only if we already have a WireGuard tunnel to P_new — otherwise defer
+                                    MediationMessage connBeginToNew = null;
                                     if (!string.IsNullOrEmpty(msg.PrivateAddressString) && !string.IsNullOrEmpty(existingPeerEndpoint))
                                     {
-                                        var connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                                        connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                                         {
                                             PeerID = existingPeerID,           // Existing peer's ID
                                             EndpointString = existingPeerEndpointForNew,  // Existing peer's endpoint (LAN if same-NAT)
                                             NATType = (NATType)existingPeerNatType, // Existing peer's NAT type
                                             PrivateAddressString = existingPeerMeshIP         // Existing peer's mesh IP
                                         };
+                                    }
 
-                                        if (completedTunnelMeshIPs.Contains(msg.PrivateAddressString))
+                                    bool tunnelToNewReady = completedTunnelMeshIPs.Contains(msg.PrivateAddressString);
+
+                                    if (tunnelToNewReady)
+                                    {
+                                        // Tunnel to new peer is ready — send both sides simultaneously
+                                        // so hole-punching starts at the same time
+                                        try
                                         {
-                                            // Tunnel to P_new is already up — send immediately
+                                            byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
+                                            MeshSend(toExistingBytes, toExistingBytes.Length,
+                                                new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
+                                            Console.WriteLine($"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                                        }
+
+                                        if (connBeginToNew != null)
+                                        {
                                             try
                                             {
                                                 byte[] toNewBytes = Encoding.UTF8.GetBytes(connBeginToNew.Serialize());
@@ -2261,14 +2312,22 @@ public static class Program
                                                 Console.WriteLine($"[Mesh] Failed to send MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
                                             }
                                         }
-                                        else
-                                        {
-                                            // Tunnel to P_new not yet established — defer until onConnectionComplete
-                                            if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
-                                                deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
+                                    }
+                                    else
+                                    {
+                                        // Tunnel to new peer not yet established — defer BOTH sides
+                                        // so hole-punching starts simultaneously when the tunnel is ready
+                                        if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
+                                            deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
+
+                                        // Defer the message to the existing peer (tagged with target mesh IP for routing)
+                                        connBeginToExisting.IntroducerMeshIP = existingPeerMeshIP; // Reuse field to store target
+                                        deferredIntroductions[msg.PrivateAddressString].Add(connBeginToExisting);
+
+                                        if (connBeginToNew != null)
                                             deferredIntroductions[msg.PrivateAddressString].Add(connBeginToNew);
-                                            Console.WriteLine($"[Mesh] Deferred MeshConnectionBegin to new peer {msg.PrivateAddressString} (WireGuard tunnel not yet established)");
-                                        }
+
+                                        Console.WriteLine($"[Mesh] Deferred MeshConnectionBegin for both peers (tunnel to {msg.PrivateAddressString} not yet established)");
                                     }
 
                                     introduced++;
@@ -2583,6 +2642,15 @@ public static class Program
                                     }
                                     else
                                     {
+                                        // Skip if either peer no longer has a WireGuard tunnel to us
+                                        bool hasWgA = wireguardTunnel.GetPeer(IPAddress.Parse(ipA)) != null;
+                                        bool hasWgB = wireguardTunnel.GetPeer(IPAddress.Parse(ipB)) != null;
+                                        if (!hasWgA || !hasWgB)
+                                        {
+                                            Console.WriteLine($"[Mesh] Skipping repair for {ipA} <-> {ipB} — no WireGuard tunnel to {(!hasWgA ? ipA : ipB)}");
+                                            continue;
+                                        }
+
                                         Console.WriteLine($"[Mesh] Heartbeat: {ipA} <-> {ipB} disconnected — re-introducing");
 
                                         if (!string.IsNullOrEmpty(infoB.endpoint))

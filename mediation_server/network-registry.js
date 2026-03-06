@@ -48,9 +48,10 @@ class NetworkRegistry {
 
         // Check if peer already exists (reconnection case)
         if (network.has(peerID)) {
-            console.log(`[NetworkRegistry] Peer ${peerID} rejoining network ${networkID}`);
-            // Update existing peer info
             const existingPeer = network.get(peerID);
+            const oldNatType = existingPeer.natType;
+            console.log(`[NetworkRegistry] Peer ${peerID} rejoining network ${networkID} (NAT: ${oldNatType} -> ${natType}, endpoint: ${existingPeer.endpoint} -> ${endpoint})`);
+            // Update existing peer info
             existingPeer.socket = socket;
             existingPeer.endpoint = endpoint;
             existingPeer.natType = natType;
