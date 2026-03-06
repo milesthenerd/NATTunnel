@@ -128,6 +128,12 @@ public class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string[] PeerRoster { get; set; }
+    /// <summary>
+    /// Authentication token: SHA256(networkID + ":" + networkSecret) as base64.
+    /// Sent in MeshJoinRequest; reused for error message in MeshJoinResponse on auth failure.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string AuthToken { get; set; }
     public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;

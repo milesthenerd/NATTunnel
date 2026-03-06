@@ -26,6 +26,11 @@ public static class Config
     private const string NetworkID = "networkID";
 
     /// <summary>
+    /// Text string for "networkSecret" in the config (shared secret for mesh authentication).
+    /// </summary>
+    private const string NetworkSecret = "networkSecret";
+
+    /// <summary>
     /// Text string for "peerID" in the config (persistent mesh peer identity).
     /// </summary>
     private const string PeerID = "peerID";
@@ -135,6 +140,23 @@ public static class Config
             return false;
         }
 
+        // Parse required networkSecret (shared secret for mesh authentication)
+        try
+        {
+            if (!model.ContainsKey(NetworkSecret) || string.IsNullOrEmpty((string)model[NetworkSecret]))
+            {
+                Console.Error.WriteLine($"{NetworkSecret} is required in config.toml!");
+                return false;
+            }
+            TunnelOptions.NetworkSecret = (string)model[NetworkSecret];
+            Console.WriteLine($"[Config] Network secret loaded");
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"Failed to parse {NetworkSecret}: {e.Message}");
+            return false;
+        }
+
         // Parse optional peerID (persistent mesh identity)
         try
         {
@@ -229,6 +251,9 @@ public static class Config
 
 #{NetworkID}: The network identifier for mesh networking. Peers with the same networkID can discover and connect to each other.
 {NetworkID} = """"
+
+#{NetworkSecret}: Shared secret for mesh network authentication. All peers and the mediation server must use the same secret.
+{NetworkSecret} = """"
 
 # Mesh networking timeouts and intervals (all in seconds unless noted)
 # These control the timing behavior of the mesh network protocol.
@@ -348,6 +373,16 @@ public static class Config
 
         string[] lines = File.ReadAllLines(configPath);
         bool modified = false;
+
+        // Check for networkSecret field
+        bool secretExists = lines.Any(line => line.TrimStart().StartsWith(NetworkSecret + " ") || line.TrimStart().StartsWith(NetworkSecret + "="));
+        if (!secretExists)
+        {
+            Array.Resize(ref lines, lines.Length + 2);
+            lines[lines.Length - 2] = $"# Shared secret for mesh network authentication";
+            lines[lines.Length - 1] = $"{NetworkSecret} = \"\"";
+            modified = true;
+        }
 
         // Check for each timeout/interval field and add if missing
         var fieldsToCheck = new[]

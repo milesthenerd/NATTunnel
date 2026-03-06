@@ -29,6 +29,13 @@ public static class TunnelOptions
     public static string NetworkID = null;
 
     /// <summary>
+    /// Shared secret for mesh network authentication.
+    /// Used to compute SHA256(networkID + ":" + networkSecret) as an auth token.
+    /// Required in config.toml.
+    /// </summary>
+    public static string NetworkSecret = null;
+
+    /// <summary>
     /// Persistent peer ID for mesh networking.
     /// Persisted in config.toml so the peer keeps its identity (and mesh IP) across restarts.
     /// If null, a new one will be generated and saved on first run.

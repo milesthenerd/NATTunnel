@@ -1,6 +1,10 @@
 const { MessageTypes, StatusTypes, Config, NATTypes } = require('./constants');
 const { Buffer } = require('buffer');
+const fs = require('fs');
+const path = require('path');
 const NetworkRegistry = require('./network-registry');
+
+const SECRETS_FILE = path.join(__dirname, 'network-secrets.json');
 
 class MessageHandler {
     constructor(connectionManager) {
@@ -466,6 +470,50 @@ class MessageHandler {
         if (!PeerID) {
             console.log('[MessageHandler] MeshJoinRequest missing PeerID');
             return;
+        }
+
+        // Authenticate: compare AuthToken hash against stored hash (or store on first join)
+        const { AuthToken } = message;
+        if (!AuthToken) {
+            const response = {
+                ID: MessageTypes.MeshJoinResponse,
+                NetworkID, PeerCount: 0, Peers: [],
+                AuthToken: 'Authentication required'
+            };
+            socket.write(Buffer.from(JSON.stringify(response)));
+            console.log(`[MessageHandler] Auth failed for peer ${PeerID} on network ${NetworkID}: no token`);
+            return;
+        }
+
+        // Load stored hashes from file
+        let storedHashes = {};
+        try {
+            storedHashes = JSON.parse(fs.readFileSync(SECRETS_FILE, 'utf8'));
+        } catch (e) {
+            // File missing or corrupt — start fresh
+        }
+
+        if (storedHashes[NetworkID]) {
+            // Network exists — validate the token
+            if (AuthToken !== storedHashes[NetworkID]) {
+                const response = {
+                    ID: MessageTypes.MeshJoinResponse,
+                    NetworkID, PeerCount: 0, Peers: [],
+                    AuthToken: 'Invalid network secret'
+                };
+                socket.write(Buffer.from(JSON.stringify(response)));
+                console.log(`[MessageHandler] Auth failed for peer ${PeerID} on network ${NetworkID}`);
+                return;
+            }
+        } else {
+            // First peer for this network — store the hash
+            storedHashes[NetworkID] = AuthToken;
+            try {
+                fs.writeFileSync(SECRETS_FILE, JSON.stringify(storedHashes, null, 2));
+                console.log(`[MessageHandler] Registered new network ${NetworkID}`);
+            } catch (e) {
+                console.error(`[MessageHandler] Failed to save network secret: ${e.message}`);
+            }
         }
 
         // Get peer's endpoint from socket info

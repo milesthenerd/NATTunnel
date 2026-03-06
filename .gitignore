@@ -4,3 +4,4 @@ bin
 /.idea/
 .jshintrc
 roadmap.md
+mediation_server/network-secrets.json
