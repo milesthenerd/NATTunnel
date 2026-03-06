@@ -274,6 +274,12 @@ public class WireGuardUdpProxy : IDisposable
         wireguardListener?.Dispose();
         cancellation?.Dispose();
 
+        // Clear static reference so next instance can rebind the port
+        lock (inboundForwarderLock)
+        {
+            if (inboundForwarder == wireguardListener)
+                inboundForwarder = null;
+        }
     }
 }
 

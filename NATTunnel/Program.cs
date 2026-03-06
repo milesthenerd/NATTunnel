@@ -11,6 +11,11 @@ namespace NATTunnel;
 
 public static class Program
 {
+    /// <summary>
+    /// Set to true to request graceful shutdown (used by GUI instead of Console.CancelKeyPress).
+    /// </summary>
+    public static volatile bool ShutdownRequested;
+
     public static void Main(string[] args)
     {
         try
@@ -54,8 +59,12 @@ public static class Program
     /// Runs the application in mesh networking mode.
     /// Peers with the same networkID can discover and connect to each other.
     /// </summary>
-    private static void RunMeshMode()
+    public static void RunMeshMode()
     {
+        UdpClient udpClient = null;
+        TcpClient tcpClient = null;
+        WireGuardTunnel wireguardTunnel = null;
+        WireGuardUdpProxy udpProxy = null;
         try
         {
             // Load persistent peer ID or generate and save a new one
@@ -78,7 +87,7 @@ public static class Program
             // This avoids the port conflict and allows proper mesh configuration
 
             // Create UDP client for NAT traversal (shared across all peer connections)
-            var udpClient = new UdpClient();
+            udpClient = new UdpClient();
             udpClient.Client.ReceiveBufferSize = 128000;
             udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
 
@@ -94,10 +103,11 @@ public static class Program
             // Connect to mediation server for NAT type detection
             var endpoint = TunnelOptions.MediationEndpoint;
 
-            var tcpClient = new TcpClient();
+            tcpClient = new TcpClient();
             tcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
             tcpClient.Connect(endpoint);
             var stream = tcpClient.GetStream();
+            stream.ReadTimeout = 15000; // 15 second timeout to prevent indefinite blocking
 
             Console.WriteLine("[Mesh] Connected to mediation server");
 
@@ -204,7 +214,7 @@ public static class Program
             // Initialize WireGuard tunnel for mesh mode
             string interfaceName = $"NATTunnel-{TunnelOptions.NetworkID}";
             bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
-            var wireguardTunnel = new WireGuardTunnel(interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
+            wireguardTunnel = new WireGuardTunnel(interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
 
             // Set client IP for mesh mode with /16 netmask (covers 10.5.0.0 - 10.5.255.255 for all mesh peers)
             wireguardTunnel.SetClientIPAndRestart(meshIP, 16);
@@ -212,7 +222,7 @@ public static class Program
 
             // Initialize UDP proxy for mesh mode
             // The proxy will forward WireGuard traffic between the NAT-traversed peer connections and local WireGuard interface
-            var udpProxy = new WireGuardUdpProxy(udpClient);
+            udpProxy = new WireGuardUdpProxy(udpClient);
             wireguardTunnel.SetUdpProxy(udpProxy);
 
             // Start mesh control listener on port 51888 (receives mesh messages over WireGuard)
@@ -261,7 +271,7 @@ public static class Program
             }
             System.Threading.Tasks.Task.Run(async () =>
             {
-                while (true)
+                while (!ShutdownRequested)
                 {
                     try
                     {
@@ -391,10 +401,10 @@ public static class Program
 
             // Register handler for graceful shutdown on Ctrl+C
             // Send MeshPeerLeave to all connected peers to allow them to clean up immediately
-            Console.CancelKeyPress += (sender, e) =>
+            // Graceful shutdown action — shared between Console.CancelKeyPress and ShutdownRequested
+            void PerformGracefulShutdown()
             {
-                e.Cancel = true; // Prevent immediate termination
-                Console.WriteLine("[Mesh] Graceful shutdown initiated (Ctrl+C received)");
+                Console.WriteLine("[Mesh] Graceful shutdown initiated");
 
                 // Send MeshPeerLeave message to all WireGuard peers
                 try
@@ -426,7 +436,13 @@ public static class Program
                     Console.WriteLine($"[Mesh] Error sending graceful shutdown message: {ex.Message}");
                 }
 
-                // Allow process to exit
+                ShutdownRequested = true;
+            }
+
+            Console.CancelKeyPress += (sender, e) =>
+            {
+                e.Cancel = true; // Prevent immediate termination
+                PerformGracefulShutdown();
                 Environment.Exit(0);
             };
 
@@ -458,6 +474,9 @@ public static class Program
                 return;
             }
             Console.WriteLine($"[Mesh] Joined network! Found {joinResponse.PeerCount} other peers");
+
+            // Clear read timeout now that handshake is complete
+            stream.ReadTimeout = System.Threading.Timeout.Infinite;
 
             // Store active peer tunnels
             var activePeerTunnels = new Dictionary<string, Tunnel>();  // PeerID -> Tunnel
@@ -1161,7 +1180,7 @@ public static class Program
             // Non-introducer peers disconnect once their initial connections are established
             // and reconnect transiently for each future introduced peer.
             // The introducer peer stays connected permanently to receive MeshIntroduceRequests.
-            while (true)
+            while (!ShutdownRequested)
             {
                 // Disconnect once all initial setup is done, but only if we haven't been
                 // selected as the introducer (introducers must stay connected).
@@ -2298,6 +2317,12 @@ public static class Program
             // They are fully self-sufficient: all new connections are coordinated by the
             // introducer over WireGuard (MeshConnectionBegin messages on port 51888).
             // If all WireGuard peers are lost, reconnect to the mediation server.
+            if (ShutdownRequested)
+            {
+                PerformGracefulShutdown();
+                return;
+            }
+
             Console.WriteLine("[Mesh] Entering mesh-control-only mode (fully disconnected from mediation server)");
 
             // Relay health check: periodically verify relay gateway peers are still alive.
@@ -2324,7 +2349,7 @@ public static class Program
 
             Console.WriteLine($"[Mesh] Entering mesh-control-only loop — isIntroducer={isIntroducer}, natType={detectedNatType}, introducerMeshIP={introducerMeshIP ?? "null"}");
 
-            while (true)
+            while (!ShutdownRequested)
             {
                 // Process MeshConnectionBegin messages (introducer-relayed, no mediation server needed)
                 while (meshConnectionBeginQueue.TryDequeue(out var cbMsg))
@@ -3234,12 +3259,23 @@ public static class Program
 
                 System.Threading.Thread.Sleep(100);
             }
+
+            // ShutdownRequested was set (e.g. by GUI) — perform graceful shutdown
+            PerformGracefulShutdown();
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Mesh] Error: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
             throw;
+        }
+        finally
+        {
+            // Dispose resources so retries can rebind ports
+            try { udpProxy?.Dispose(); } catch { }
+            try { wireguardTunnel?.Dispose(); } catch { }
+            try { tcpClient?.Dispose(); } catch { }
+            try { udpClient?.Dispose(); } catch { }
         }
     }
 
