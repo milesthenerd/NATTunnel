@@ -209,6 +209,24 @@ class MessageHandler {
             NATTestPortOne: Config.NAT_TEST_PORT_ONE,
             NATTestPortTwo: Config.NAT_TEST_PORT_TWO
         })));
+
+        // Timeout: if NAT test UDP packets don't arrive within 10s, respond with Unknown
+        // This prevents the client from blocking indefinitely on ReadOneTcpMessage()
+        socketInfo.natTestResponded = false;
+        setTimeout(() => {
+            if (socketInfo && !socketInfo.natTestResponded) {
+                socketInfo.natTestResponded = true;
+                console.warn(`[MessageHandler] NAT test timeout for ${socketInfo.clientID} — responding with Unknown`);
+                try {
+                    socket.write(Buffer.from(JSON.stringify({
+                        ID: MessageTypes.NATTypeResponse,
+                        NATType: NATTypes.Unknown,
+                    })));
+                } catch (e) {
+                    // Socket may have closed
+                }
+            }
+        }, 10000);
     }
 
     handleConnectionRequest(message, socket) {

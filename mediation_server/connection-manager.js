@@ -195,7 +195,7 @@ class ConnectionManager {
             const socketInfo = this.sockets.find(s => s.socket === socket);
             if (socketInfo) {
                 socketInfo.natType = natType;
-
+                socketInfo.natTestResponded = true;
             }
         }
 
