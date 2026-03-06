@@ -431,12 +431,17 @@ public static class Program
             };
 
             // Now join mesh network with REAL NAT type
+            // Compute auth token: SHA256(networkID + ":" + networkSecret) as base64
+            string authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(TunnelOptions.NetworkID + ":" + TunnelOptions.NetworkSecret)));
+
             var joinRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
             {
                 NetworkID = TunnelOptions.NetworkID,
                 PeerID = peerID.ToString(),
                 NATType = detectedNatType,
-                PrivateAddressString = meshIP  // Send our mesh IP to other peers
+                PrivateAddressString = meshIP,
+                AuthToken = authToken
             };
 
             string requestJson = joinRequest.Serialize();
@@ -447,6 +452,11 @@ public static class Program
 
             // Wait for join response
             var joinResponse = ReadOneTcpMessage();
+            if (!string.IsNullOrEmpty(joinResponse.AuthToken))
+            {
+                Console.Error.WriteLine($"[Mesh] Authentication failed: {joinResponse.AuthToken}");
+                return;
+            }
             Console.WriteLine($"[Mesh] Joined network! Found {joinResponse.PeerCount} other peers");
 
             // Store active peer tunnels
@@ -1271,7 +1281,8 @@ public static class Program
                             NetworkID = TunnelOptions.NetworkID,
                             PeerID = peerID.ToString(),
                             NATType = detectedNatType,
-                            PrivateAddressString = meshIP
+                            PrivateAddressString = meshIP,
+                            AuthToken = authToken
                         };
                         string discoveryJson = discoveryRequest.Serialize();
                         byte[] discoveryBuffer = Encoding.ASCII.GetBytes(discoveryJson);
@@ -1988,15 +1999,22 @@ public static class Program
                         }
                         else if (msg.ID == MediationMessageType.MeshJoinResponse)
                         {
-                            // Update hasPeers flag and process new peers
-                            if (msg.Peers != null && msg.Peers.Length > 0)
+                            if (!string.IsNullOrEmpty(msg.AuthToken))
                             {
-                                hasPeers = true;
-                                ProcessDiscoveredPeers(msg.Peers);
+                                Console.Error.WriteLine($"[Mesh] Authentication failed on rediscovery: {msg.AuthToken}");
                             }
+                            else
+                            {
+                                // Update hasPeers flag and process new peers
+                                if (msg.Peers != null && msg.Peers.Length > 0)
+                                {
+                                    hasPeers = true;
+                                    ProcessDiscoveredPeers(msg.Peers);
+                                }
 
-                            // Reset discovery timer
-                            lastPeerDiscovery = DateTime.UtcNow;
+                                // Reset discovery timer
+                                lastPeerDiscovery = DateTime.UtcNow;
+                            }
                         }
                         else if (msg.ID == MediationMessageType.MeshPeerList)
                         {
@@ -2689,7 +2707,11 @@ public static class Program
                                 if (parsedMsg.ID == MediationMessageType.MeshJoinResponse ||
                                     parsedMsg.ID == MediationMessageType.MeshPeerList)
                                 {
-                                    if (parsedMsg.Peers != null && parsedMsg.Peers.Length > 0)
+                                    if (!string.IsNullOrEmpty(parsedMsg.AuthToken))
+                                    {
+                                        Console.Error.WriteLine($"[Mesh] Authentication failed on reconnect: {parsedMsg.AuthToken}");
+                                    }
+                                    else if (parsedMsg.Peers != null && parsedMsg.Peers.Length > 0)
                                     {
                                         Console.WriteLine($"[Mesh] Reconnect discovery: found {parsedMsg.Peers.Length} peer(s)");
                                         // Cache peer info for heartbeat repair (NAT type, endpoint, etc.)
@@ -3019,7 +3041,8 @@ public static class Program
                                     NetworkID = TunnelOptions.NetworkID,
                                     PeerID = peerID.ToString(),
                                     NATType = detectedNatType,
-                                    PrivateAddressString = meshIP
+                                    PrivateAddressString = meshIP,
+                                    AuthToken = authToken
                                 };
                                 byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                                 reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
