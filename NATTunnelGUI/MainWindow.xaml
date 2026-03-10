@@ -9,7 +9,7 @@
 
     <Window.Resources>
         <Style x:Key="CopyableValue"
-                TargetType="TextBox">
+               TargetType="TextBox">
             <Setter Property="IsReadOnly"
                     Value="True"/>
             <Setter Property="Background"
@@ -51,111 +51,111 @@
             <StackPanel Margin="12">
                 <!-- Connection Status -->
                 <StackPanel Orientation="Horizontal"
-                        Margin="0,0,0,16">
+                            Margin="0,0,0,16">
                     <Ellipse x:Name="StatusDot"
-                            Width="10"
-                            Height="10"
-                            Fill="{StaticResource StatusRedBrush}"
-                            VerticalAlignment="Center"/>
+                             Width="10"
+                             Height="10"
+                             Fill="{StaticResource StatusRedBrush}"
+                             VerticalAlignment="Center"/>
                     <TextBlock x:Name="StatusText"
-                            Text="Connecting..."
-                            Foreground="{StaticResource TextSecondaryBrush}"
-                            Margin="8,0,0,0"
-                            FontSize="12"
-                            VerticalAlignment="Center"/>
+                               Text="Connecting..."
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               Margin="8,0,0,0"
+                               FontSize="12"
+                               VerticalAlignment="Center"/>
                 </StackPanel>
 
                 <!-- Network Name -->
                 <TextBlock Text="NETWORK"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"/>
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"/>
                 <TextBox x:Name="NetworkNameText"
-                        Text="-"
-                        Foreground="{StaticResource AccentBlueBrush}"
-                        FontSize="14"
-                        FontWeight="SemiBold"
-                        Style="{StaticResource CopyableValue}"/>
+                         Text="-"
+                         Foreground="{StaticResource AccentBlueBrush}"
+                         FontSize="14"
+                         FontWeight="SemiBold"
+                         Style="{StaticResource CopyableValue}"/>
 
                 <!-- Mesh IP -->
                 <TextBlock Text="MESH IP"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"/>
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"/>
                 <TextBox x:Name="MeshIPText"
-                        Text="-"
-                        Foreground="{StaticResource AccentTealBrush}"
-                        FontSize="13"
-                        FontFamily="Consolas"
-                        Style="{StaticResource CopyableValue}"/>
+                         Text="-"
+                         Foreground="{StaticResource AccentTealBrush}"
+                         FontSize="13"
+                         FontFamily="Consolas"
+                         Style="{StaticResource CopyableValue}"/>
 
                 <!-- Peer ID -->
                 <TextBlock Text="PEER ID"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"/>
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"/>
                 <TextBox x:Name="PeerIDText"
-                        Text="-"
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        FontSize="11"
-                        FontFamily="Consolas"
-                        Style="{StaticResource CopyableValue}"/>
+                         Text="-"
+                         Foreground="{StaticResource TextPrimaryBrush}"
+                         FontSize="11"
+                         FontFamily="Consolas"
+                         Style="{StaticResource CopyableValue}"/>
 
                 <!-- NAT Type -->
                 <TextBlock Text="NAT TYPE"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"/>
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"/>
                 <TextBox x:Name="NATTypeText"
-                        Text="-"
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        FontSize="12"
-                        Style="{StaticResource CopyableValue}"/>
+                         Text="-"
+                         Foreground="{StaticResource TextPrimaryBrush}"
+                         FontSize="12"
+                         Style="{StaticResource CopyableValue}"/>
 
                 <!-- Introducer -->
                 <TextBlock Text="ROLE"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"/>
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"/>
                 <TextBox x:Name="RoleText"
-                        Text="-"
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        FontSize="12"
-                        Style="{StaticResource CopyableValue}"/>
+                         Text="-"
+                         Foreground="{StaticResource TextPrimaryBrush}"
+                         FontSize="12"
+                         Style="{StaticResource CopyableValue}"/>
 
                 <!-- Introducer Mesh IP -->
                 <TextBlock x:Name="IntroducerLabel"
-                        Text="INTRODUCER"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"
-                        Visibility="Collapsed"/>
+                           Text="INTRODUCER"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"
+                           Visibility="Collapsed"/>
                 <TextBox x:Name="IntroducerText"
-                        Text="-"
-                        Foreground="{StaticResource AccentTealBrush}"
-                        FontSize="11"
-                        FontFamily="Consolas"
-                        Style="{StaticResource CopyableValue}"
-                        Visibility="Collapsed"/>
+                         Text="-"
+                         Foreground="{StaticResource AccentTealBrush}"
+                         FontSize="11"
+                         FontFamily="Consolas"
+                         Style="{StaticResource CopyableValue}"
+                         Visibility="Collapsed"/>
 
                 <!-- Uptime -->
                 <TextBlock Text="UPTIME"
-                        Foreground="{StaticResource TextSecondaryBrush}"
-                        FontSize="10"
-                        FontWeight="Bold"
-                        Margin="0,0,0,4"/>
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontWeight="Bold"
+                           Margin="0,0,0,4"/>
                 <TextBox x:Name="UptimeText"
-                        Text="-"
-                        Foreground="{StaticResource TextPrimaryBrush}"
-                        FontSize="12"
-                        Style="{StaticResource CopyableValue}"
-                        Margin="0"/>
+                         Text="-"
+                         Foreground="{StaticResource TextPrimaryBrush}"
+                         FontSize="12"
+                         Style="{StaticResource CopyableValue}"
+                         Margin="0"/>
             </StackPanel>
         </Border>
 
@@ -166,44 +166,26 @@
 
         <!-- Main Content: Peer List -->
         <DockPanel Grid.Column="2"
-                Grid.Row="0">
+                   Grid.Row="0">
             <!-- Header -->
             <Border DockPanel.Dock="Top"
                     Padding="12,8">
                 <DockPanel>
                     <TextBlock x:Name="PeerCountHeader"
-                            Text="Peers (0)"
-                            Foreground="{StaticResource AccentBlueBrush}"
-                            FontSize="14"
-                            FontWeight="SemiBold"/>
-                    <!-- Metrics summary -->
-                    <StackPanel Orientation="Horizontal"
-                            HorizontalAlignment="Right">
-                        <TextBlock x:Name="MetricsTunnels"
-                                Text=""
-                                Foreground="{StaticResource TextSecondaryBrush}"
-                                FontSize="11"
-                                Margin="0,0,12,0"/>
-                        <TextBlock x:Name="MetricsHeartbeats"
-                                Text=""
-                                Foreground="{StaticResource TextSecondaryBrush}"
-                                FontSize="11"
-                                Margin="0,0,12,0"/>
-                        <TextBlock x:Name="MetricsReconnects"
-                                Text=""
-                                Foreground="{StaticResource TextSecondaryBrush}"
-                                FontSize="11"/>
-                    </StackPanel>
+                               Text="Peers (0)"
+                               Foreground="{StaticResource AccentBlueBrush}"
+                               FontSize="14"
+                               FontWeight="SemiBold"/>
                 </DockPanel>
             </Border>
 
             <!-- Peer ListView -->
             <ListView x:Name="PeerListView"
-                    Background="Transparent"
-                    BorderThickness="0"
-                    Foreground="{StaticResource TextPrimaryBrush}"
-                    FontSize="12"
-                    FontFamily="Consolas">
+                      Background="Transparent"
+                      BorderThickness="0"
+                      Foreground="{StaticResource TextPrimaryBrush}"
+                      FontSize="12"
+                      FontFamily="Consolas">
                 <ListView.View>
                     <GridView>
                         <GridView.ColumnHeaderContainerStyle>
@@ -223,23 +205,23 @@
                             </Style>
                         </GridView.ColumnHeaderContainerStyle>
                         <GridViewColumn Header="Mesh IP"
-                                Width="110"
-                                DisplayMemberBinding="{Binding MeshIP}"/>
+                                        Width="110"
+                                        DisplayMemberBinding="{Binding MeshIP}"/>
                         <GridViewColumn Header="Peer ID"
-                                Width="90"
-                                DisplayMemberBinding="{Binding PeerIDShort}"/>
+                                        Width="90"
+                                        DisplayMemberBinding="{Binding PeerIDShort}"/>
                         <GridViewColumn Header="NAT"
-                                Width="80"
-                                DisplayMemberBinding="{Binding NATType}"/>
+                                        Width="80"
+                                        DisplayMemberBinding="{Binding NATType}"/>
                         <GridViewColumn Header="Endpoint"
-                                Width="140"
-                                DisplayMemberBinding="{Binding Endpoint}"/>
+                                        Width="140"
+                                        DisplayMemberBinding="{Binding Endpoint}"/>
                         <GridViewColumn Header="Latency"
-                                Width="60"
-                                DisplayMemberBinding="{Binding LatencyDisplay}"/>
+                                        Width="60"
+                                        DisplayMemberBinding="{Binding LatencyDisplay}"/>
                         <GridViewColumn Header="Status"
-                                Width="80"
-                                DisplayMemberBinding="{Binding StatusDisplay}"/>
+                                        Width="80"
+                                        DisplayMemberBinding="{Binding StatusDisplay}"/>
                     </GridView>
                 </ListView.View>
                 <ListView.ItemContainerStyle>
@@ -254,7 +236,7 @@
                                 Value="0,2"/>
                         <Style.Triggers>
                             <Trigger Property="IsMouseOver"
-                                    Value="True">
+                                     Value="True">
                                 <Setter Property="Background"
                                         Value="{StaticResource ListItemHoverBrush}"/>
                             </Trigger>
@@ -271,14 +253,14 @@
 
         <!-- Log Panel -->
         <TextBox x:Name="LogTextBox"
-                Grid.Column="0"
-                Grid.ColumnSpan="3"
-                Grid.Row="2"
+                 Grid.Column="0"
+                 Grid.ColumnSpan="3"
+                 Grid.Row="2"
                  IsReadOnly="True"
                  Background="#1A1A1A"
                  Foreground="{StaticResource TextSecondaryBrush}"
                  FontFamily="Consolas"
-                FontSize="11"
+                 FontSize="11"
                  BorderThickness="0"
                  VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Auto"

@@ -75,6 +75,9 @@ public class MeshState
         [JsonPropertyName("relayedVia")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string RelayedVia { get; set; }
+
+        [JsonPropertyName("status")]
+        public string Status { get; set; }
     }
 
     /// <summary>
