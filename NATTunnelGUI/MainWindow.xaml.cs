@@ -82,20 +82,13 @@ public partial class MainWindow : Window
                         NATType = peer.NATType ?? "-",
                         Endpoint = peer.Endpoint ?? "-",
                         LatencyDisplay = peer.LatencyMs >= 0 ? $"{peer.LatencyMs}ms" : "-",
-                        StatusDisplay = peer.IsRelayed ? "Relayed" : "Direct"
+                        StatusDisplay = peer.Status ?? (peer.IsRelayed ? "Relayed" : "Direct")
                     });
                 }
             }
             PeerListView.ItemsSource = peerItems;
 
-            // Update metrics
-            if (state.Metrics != null)
-            {
-                var m = state.Metrics;
-                MetricsTunnels.Text = $"Tunnels: {m.TunnelsEstablished}/{m.TunnelsEstablished + m.TunnelsFailed}";
-                MetricsHeartbeats.Text = $"HB: {m.HeartbeatAcksReceived}/{m.HeartbeatsSent}";
-                MetricsReconnects.Text = m.Reconnects > 0 ? $"Reconnects: {m.Reconnects}" : "";
-            }
+            // Metrics display is currently disabled in the XAML layout
         }
         catch
         {

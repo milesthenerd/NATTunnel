@@ -64,7 +64,13 @@ public static class TunnelOptions
     /// Cooldown before attempting to repair a broken relay route (in seconds).
     /// Default: 60 seconds
     /// </summary>
-    public static int RepairCooldownSeconds = 60;
+    public static int RepairCooldownSeconds = 30;
+
+    /// <summary>
+    /// Number of consecutive repair attempts before escalating to mediation server fallback.
+    /// Default: 3
+    /// </summary>
+    public static int MaxRepairAttempts = 3;
 
     /// <summary>
     /// Number of consecutive missed heartbeat acks before declaring a peer dead.
