@@ -1833,7 +1833,8 @@ public static class Program
                                 NetworkID = TunnelOptions.NetworkID,
                                 PeerID = peerID.ToString(),
                                 NATType = detectedNatType,
-                                PrivateAddressString = meshIP
+                                PrivateAddressString = meshIP,
+                                AuthToken = authToken
                             };
                             byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                             stream.Write(joinBytes, 0, joinBytes.Length);
@@ -3294,7 +3295,8 @@ public static class Program
                                     NetworkID = TunnelOptions.NetworkID,
                                     PeerID = peerID.ToString(),
                                     NATType = detectedNatType,
-                                    PrivateAddressString = meshIP
+                                    PrivateAddressString = meshIP,
+                                    AuthToken = authToken
                                 };
                                 byte[] rdBytes = Encoding.ASCII.GetBytes(rediscovery.Serialize());
                                 reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
@@ -3522,7 +3524,8 @@ public static class Program
                                 NetworkID = TunnelOptions.NetworkID,
                                 PeerID = peerID.ToString(),
                                 NATType = detectedNatType,
-                                PrivateAddressString = meshIP
+                                PrivateAddressString = meshIP,
+                                AuthToken = authToken
                             };
                             byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                             reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
