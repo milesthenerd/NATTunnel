@@ -18,40 +18,29 @@ public static class Program
 
     public static void Main(string[] args)
     {
+        // Normal startup
+        if (!Config.CreateNewConfigPrompt())
+            Environment.Exit(-1);
+
+        if (!Config.TryLoadConfig())
+        {
+            Console.WriteLine("Failed to load config.toml");
+            Console.WriteLine("Press any key to exit...");
+            Console.ReadKey();
+            Environment.Exit(-1);
+        }
+
         try
         {
-            // Normal startup
-            if (!Config.CreateNewConfigPrompt())
-                Environment.Exit(-1);
-
-            if (!Config.TryLoadConfig())
-            {
-                Console.WriteLine("Failed to load config.toml");
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
-                Environment.Exit(-1);
-            }
-
             Console.WriteLine($"Starting mesh mode for network: {TunnelOptions.NetworkID}");
             RunMeshMode();
         }
         catch (Exception ex)
         {
-            Console.WriteLine("\nError occurred:");
-            Console.WriteLine("=============");
-            Console.WriteLine(ex.Message);
-            if (ex.InnerException != null)
-            {
-                Console.WriteLine("\nInner Exception:");
-                Console.WriteLine("===============");
-                Console.WriteLine(ex.InnerException.Message);
-            }
-            Console.WriteLine("\nStack Trace:");
-            Console.WriteLine("===========");
+            Console.WriteLine($"\n[Mesh] Fatal error: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
             Console.WriteLine("\nPress any key to exit...");
             Console.ReadKey();
-            Environment.Exit(1);
         }
     }
 
@@ -65,6 +54,7 @@ public static class Program
         TcpClient tcpClient = null;
         WireGuardTunnel wireguardTunnel = null;
         WireGuardUdpProxy udpProxy = null;
+        UdpClient meshControlClient = null;
         try
         {
             // Load persistent peer ID or generate and save a new one
@@ -100,20 +90,27 @@ public static class Program
 
             int localUdpPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
 
-            // Connect to mediation server for NAT type detection
-            var endpoint = TunnelOptions.MediationEndpoint;
+            // Calculate mesh IP address from peer ID (deterministic, unique per peer)
+            var peerIDBytes = peerID.ToByteArray();
+            var hash = System.Security.Cryptography.SHA256.HashData(peerIDBytes);
+            byte octet3 = hash[0];
+            byte octet4 = (byte)((hash[1] % 254) + 1); // 1-254 to avoid .0 and .255
+            var meshIP = $"{TunnelOptions.MeshSubnet}.{octet3}.{octet4}";
+            Console.WriteLine($"[Mesh] Assigned mesh IP: {meshIP}");
 
-            tcpClient = new TcpClient();
-            tcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-            tcpClient.Connect(endpoint);
-            var stream = tcpClient.GetStream();
-            stream.ReadTimeout = 15000; // 15 second timeout to prevent indefinite blocking
+            // Initialize WireGuard tunnel BEFORE mediation handshake — this is expensive
+            // and must NOT be recreated on mediation reconnect (causes memory leak).
+            string interfaceName = $"NATTunnel-{TunnelOptions.NetworkID}";
+            bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
+            wireguardTunnel = new WireGuardTunnel(interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
+            wireguardTunnel.SetClientIPAndRestart(meshIP, 16);
+            Console.WriteLine($"[Mesh] WireGuard tunnel initialized with IP {meshIP}/16");
 
-            Console.WriteLine("[Mesh] Connected to mediation server");
+            // Initialize UDP proxy for mesh mode
+            udpProxy = new WireGuardUdpProxy(udpClient);
+            wireguardTunnel.SetUdpProxy(udpProxy);
 
             // Helper: extract the first complete JSON object from a string.
-            // Returns the parsed message and the remaining string after that object.
-            // If no complete object is found, returns null and the original string.
             (MediationMessage msg, string remainder) ExtractFirstJson(string data)
             {
                 int start = data.IndexOf('{');
@@ -136,10 +133,11 @@ public static class Program
                 return (null, data); // Incomplete
             }
 
-            // Read a single TCP message, accumulating reads until a complete JSON object is found.
-            // Returns the parsed message and stores any leftover in earlyTcpRemainder.
+            // Read a single TCP message with timeout.
             string earlyTcpRemainder = "";
             byte[] buffer = new byte[8192];
+            var endpoint = TunnelOptions.MediationEndpoint;
+            NetworkStream stream = null;
             MediationMessage ReadOneTcpMessage()
             {
                 while (true)
@@ -156,74 +154,99 @@ public static class Program
                 }
             }
 
-            // Wait for Connected message
-            var connectedMsg = ReadOneTcpMessage();
-            // Request NAT type detection
-            var natTypeRequest = new MediationMessage(MediationMessageType.NATTypeRequest)
-            {
-                LocalPort = localUdpPort,
-                LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
-                ClientID = peerID
-            };
+            // Compute auth token once — it doesn't depend on mediation state
+            string authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
+                Encoding.UTF8.GetBytes(TunnelOptions.NetworkID + ":" + TunnelOptions.NetworkSecret)));
 
-            string natRequestJson = natTypeRequest.Serialize();
-            byte[] natBuffer = Encoding.ASCII.GetBytes(natRequestJson);
-            stream.Write(natBuffer, 0, natBuffer.Length);
-
-            // Wait for NAT test begin
-            var natTestBegin = ReadOneTcpMessage();
-
-            if (natTestBegin.ID == MediationMessageType.NATTestBegin)
-            {
-                // Send NAT test packets
-                var natTestMsg = new MediationMessage(MediationMessageType.NATTest)
-                {
-                    ClientID = peerID
-                };
-                byte[] natTestBuffer = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
-                udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortOne));
-                udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortTwo));
-            }
-
-            // Wait for NAT type response
-            var natTypeResponse = ReadOneTcpMessage();
-
+            // Connect to mediation, perform NAT detection, and join mesh network.
+            // Retries indefinitely on failure — WireGuard is already initialized above
+            // and MUST NOT be recreated (native memory leak).
             NATType detectedNatType = NATType.Unknown;
-            if (natTypeResponse.ID == MediationMessageType.NATTypeResponse)
+            MediationMessage joinResponse = null;
             {
-                detectedNatType = natTypeResponse.NATType;
-                Console.WriteLine($"[Mesh] NAT type detected: {detectedNatType}");
+                int handshakeDelay = 5;
+                for (int attempt = 1; ; attempt++)
+                {
+                    if (ShutdownRequested) return;
+                    try
+                    {
+                        // 1. TCP connect
+                        tcpClient = new TcpClient();
+                        tcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                        tcpClient.Connect(endpoint);
+                        stream = tcpClient.GetStream();
+                        stream.ReadTimeout = 15000;
+                        earlyTcpRemainder = "";
+
+                        // 2. Wait for Connected message
+                        ReadOneTcpMessage();
+
+                        // 3. NAT type detection
+                        var natTypeRequest = new MediationMessage(MediationMessageType.NATTypeRequest)
+                        {
+                            LocalPort = localUdpPort,
+                            LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
+                            ClientID = peerID
+                        };
+                        byte[] natBuffer = Encoding.ASCII.GetBytes(natTypeRequest.Serialize());
+                        stream.Write(natBuffer, 0, natBuffer.Length);
+
+                        var natTestBegin = ReadOneTcpMessage();
+                        if (natTestBegin.ID == MediationMessageType.NATTestBegin)
+                        {
+                            var natTestMsg = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
+                            byte[] natTestBuffer = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
+                            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortOne));
+                            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortTwo));
+                        }
+
+                        var natTypeResponse = ReadOneTcpMessage();
+                        if (natTypeResponse.ID == MediationMessageType.NATTypeResponse)
+                        {
+                            detectedNatType = natTypeResponse.NATType;
+                            Console.WriteLine($"[Mesh] NAT type detected: {detectedNatType}");
+                        }
+
+                        // 4. Join mesh network
+                        var joinRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
+                        {
+                            NetworkID = TunnelOptions.NetworkID,
+                            PeerID = peerID.ToString(),
+                            NATType = detectedNatType,
+                            PrivateAddressString = meshIP,
+                            AuthToken = authToken
+                        };
+                        byte[] sendBuffer = Encoding.ASCII.GetBytes(joinRequest.Serialize());
+                        stream.Write(sendBuffer, 0, sendBuffer.Length);
+
+                        joinResponse = ReadOneTcpMessage();
+                        if (!string.IsNullOrEmpty(joinResponse.AuthToken))
+                        {
+                            Console.Error.WriteLine($"[Mesh] Authentication failed: {joinResponse.AuthToken}");
+                            return;
+                        }
+
+                        Console.WriteLine($"[Mesh] Joined network! Found {joinResponse.PeerCount} other peers");
+                        handshakeDelay = 5; // Reset on success
+                        break;
+                    }
+                    catch (Exception ex) when (!ShutdownRequested)
+                    {
+                        Console.WriteLine($"[Mesh] Mediation handshake failed: {ex.Message}");
+                        try { tcpClient?.Dispose(); } catch { }
+                        tcpClient = null;
+                        stream = null;
+                        earlyTcpRemainder = "";
+                        Console.WriteLine($"[Mesh] Retrying in {handshakeDelay}s (attempt {attempt})...");
+                        System.Threading.Thread.Sleep(handshakeDelay * 1000);
+                        handshakeDelay = Math.Min(handshakeDelay * 2, 30);
+                    }
+                }
+                if (ShutdownRequested) return;
             }
 
-            // Calculate mesh IP address from peer ID (deterministic, unique per peer)
-            // Use hash of peer ID to generate IP in 10.5.0.0/16 range
-            var peerIDBytes = peerID.ToByteArray();
-            var hash = System.Security.Cryptography.SHA256.HashData(peerIDBytes);
-            // Use first 2 bytes of hash for last 2 octets of IP (10.5.X.Y)
-            // Skip 10.5.0.0 (network) and 10.5.255.255 (broadcast)
-            byte octet3 = hash[0];
-            byte octet4 = (byte)((hash[1] % 254) + 1); // 1-254 to avoid .0 and .255
-            var meshIP = $"10.5.{octet3}.{octet4}";
-            Console.WriteLine($"[Mesh] Assigned mesh IP: {meshIP}");
-
-            // Send KeepAlive to prevent timeout during WireGuard initialization
-            var keepAliveMsgBeforeWg = new MediationMessage(MediationMessageType.KeepAlive);
-            byte[] wgKeepAliveBuffer = Encoding.ASCII.GetBytes(keepAliveMsgBeforeWg.Serialize());
-            stream.Write(wgKeepAliveBuffer, 0, wgKeepAliveBuffer.Length);
-
-            // Initialize WireGuard tunnel for mesh mode
-            string interfaceName = $"NATTunnel-{TunnelOptions.NetworkID}";
-            bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
-            wireguardTunnel = new WireGuardTunnel(interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
-
-            // Set client IP for mesh mode with /16 netmask (covers 10.5.0.0 - 10.5.255.255 for all mesh peers)
-            wireguardTunnel.SetClientIPAndRestart(meshIP, 16);
-            Console.WriteLine($"[Mesh] WireGuard tunnel initialized with IP {meshIP}/16");
-
-            // Initialize UDP proxy for mesh mode
-            // The proxy will forward WireGuard traffic between the NAT-traversed peer connections and local WireGuard interface
-            udpProxy = new WireGuardUdpProxy(udpClient);
-            wireguardTunnel.SetUdpProxy(udpProxy);
+            // Clear read timeout now that handshake is complete
+            stream.ReadTimeout = System.Threading.Timeout.Infinite;
 
             // Start mesh control listener on port 51888 (receives mesh messages over WireGuard)
             // These arrive as UDP packets from other peers' mesh IPs after WireGuard tunnels are established.
@@ -260,7 +283,15 @@ public static class Program
             // so the listener can update it from the introducer's peer roster in heartbeats.
             // ConcurrentDictionary because it's written from the listener thread and read/written from main loop.
             var peerInfoByMeshIP = new System.Collections.Concurrent.ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType)>();
-            var meshControlClient = new UdpClient(MeshControlPort);
+            try
+            {
+                meshControlClient = new UdpClient(MeshControlPort);
+            }
+            catch (System.Net.Sockets.SocketException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot bind mesh control port {MeshControlPort}/UDP — another instance may already be running. ({ex.Message})", ex);
+            }
             var meshControlSendLock = new object();
             // Thread-safe wrapper for meshControlClient.Send — UdpClient is not thread-safe
             void MeshSend(byte[] data, int length, IPEndPoint endpoint)
@@ -452,40 +483,12 @@ public static class Program
             {
                 e.Cancel = true; // Prevent immediate termination
                 PerformGracefulShutdown();
-                Environment.Exit(0);
+                // Don't call Environment.Exit — let the loops exit via ShutdownRequested
+                // so the finally block runs and cleans up WireGuard/ports properly.
             };
 
-            // Now join mesh network with REAL NAT type
-            // Compute auth token: SHA256(networkID + ":" + networkSecret) as base64
-            string authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
-                Encoding.UTF8.GetBytes(TunnelOptions.NetworkID + ":" + TunnelOptions.NetworkSecret)));
-
-            var joinRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
-            {
-                NetworkID = TunnelOptions.NetworkID,
-                PeerID = peerID.ToString(),
-                NATType = detectedNatType,
-                PrivateAddressString = meshIP,
-                AuthToken = authToken
-            };
-
-            string requestJson = joinRequest.Serialize();
-            byte[] sendBuffer = Encoding.ASCII.GetBytes(requestJson);
-            stream.Write(sendBuffer, 0, sendBuffer.Length);
-
-            Console.WriteLine($"[Mesh] Sent join request for network: {TunnelOptions.NetworkID}");
-
-            // Wait for join response
-            var joinResponse = ReadOneTcpMessage();
-            if (!string.IsNullOrEmpty(joinResponse.AuthToken))
-            {
-                Console.Error.WriteLine($"[Mesh] Authentication failed: {joinResponse.AuthToken}");
-                return;
-            }
-            Console.WriteLine($"[Mesh] Joined network! Found {joinResponse.PeerCount} other peers");
-
-            // Clear read timeout now that handshake is complete
-            stream.ReadTimeout = System.Threading.Timeout.Infinite;
+            // joinResponse, detectedNatType, stream, and tcpClient are all set
+            // by the mediation handshake retry loop above.
 
             // Store active peer tunnels
             var activePeerTunnels = new Dictionary<string, Tunnel>();  // PeerID -> Tunnel
@@ -653,12 +656,22 @@ public static class Program
                     completedTunnelMeshIPs.Contains(remoteMeshIP) && !alreadyTracked;
 
                 // If this is a relay MeshConnectionBegin for a peer that's already relayed,
-                // skip the teardown — the relay route is already in place and tearing it down
-                // then re-adding causes a ping gap that makes the introducer think it's still broken.
+                // check if the relay route still exists in WireGuard before skipping.
+                // The route may have been lost (peer removed, WireGuard reset) while
+                // completedTunnelMeshIPs still had the entry — let it through to re-establish.
                 if (cbMsg.IsRelay && wasRelayed && !string.IsNullOrEmpty(remoteMeshIP))
                 {
-                    Console.WriteLine($"[Mesh] Ignoring duplicate relay MeshConnectionBegin for {remotePeerID} ({remoteMeshIP}) — relay already established");
-                    return;
+                    var relayRoutes = wireguardTunnel.GetRelayRoutes();
+                    bool routeExists = relayRoutes.ContainsKey(IPAddress.Parse(remoteMeshIP));
+                    if (routeExists)
+                    {
+                        Console.WriteLine($"[Mesh] Ignoring duplicate relay MeshConnectionBegin for {remotePeerID} ({remoteMeshIP}) — relay route confirmed in WireGuard");
+                        return;
+                    }
+                    // Route is gone — clear stale tracking and let the message re-establish it
+                    Console.WriteLine($"[Mesh] Relay route for {remoteMeshIP} missing from WireGuard — allowing re-establishment");
+                    completedTunnelMeshIPs.Remove(remoteMeshIP);
+                    wasRelayed = false;
                 }
 
                 if ((alreadyTracked || wasRelayed) && !string.IsNullOrEmpty(remoteMeshIP))
@@ -1570,7 +1583,7 @@ public static class Program
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[Mesh] Failed to start HTTP status endpoint: {ex.Message}");
+                    Console.WriteLine($"[Mesh] Failed to start HTTP status endpoint on port 51889 — another instance may already be running. ({ex.Message})");
                 }
             });
 
@@ -2685,7 +2698,9 @@ public static class Program
             NetworkStream reconnectedStream = null;
             string reconnectedTcpBuffer = ""; // Accumulates partial TCP data across reads
             DateTime? lastReconnectDiscovery = null;
-            var reconnectDiscoveryInterval = TimeSpan.FromSeconds(TunnelOptions.HeartbeatIntervalSeconds);
+            int reconnectDiscoverySeconds = TunnelOptions.HeartbeatIntervalSeconds;
+            int reconnectDiscoveryAttempts = 0;
+            const int MaxReconnectDiscoveryAttempts = 5; // After this many re-sends, tear down and reconnect fresh
 
             // Reset probe state when entering mesh-control-only loop
             lastIntroducerProbe = DateTime.UtcNow;
@@ -3277,7 +3292,7 @@ public static class Program
 
                         // Periodic keep-alive on reconnected connection
                         if (lastReconnectDiscovery != null &&
-                            DateTime.UtcNow - lastReconnectDiscovery.Value > reconnectDiscoveryInterval)
+                            (DateTime.UtcNow - lastReconnectDiscovery.Value).TotalSeconds > reconnectDiscoverySeconds)
                         {
                             // Send keep-alive
                             var ka = new MediationMessage(MediationMessageType.KeepAlive);
@@ -3290,29 +3305,52 @@ public static class Program
                                 (DateTime.UtcNow - p.LastActivity).TotalSeconds < RelayGatewayTimeoutSeconds);
                             if (stillIsolated && pendingTunnelCount == 0 && pendingConnectionRequests.Count == 0)
                             {
-                                var rediscovery = new MediationMessage(MediationMessageType.MeshJoinRequest)
+                                reconnectDiscoveryAttempts++;
+                                if (reconnectDiscoveryAttempts > MaxReconnectDiscoveryAttempts)
                                 {
-                                    NetworkID = TunnelOptions.NetworkID,
-                                    PeerID = peerID.ToString(),
-                                    NATType = detectedNatType,
-                                    PrivateAddressString = meshIP,
-                                    AuthToken = authToken
-                                };
-                                byte[] rdBytes = Encoding.ASCII.GetBytes(rediscovery.Serialize());
-                                reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
-                                Console.WriteLine("[Mesh] Re-sent discovery request on reconnected connection");
+                                    // Too many failed rediscovery attempts — tear down and reconnect fresh
+                                    // so we get a new NAT test with fresh endpoint info
+                                    Console.WriteLine($"[Mesh] {MaxReconnectDiscoveryAttempts} rediscovery attempts failed — tearing down reconnected connection to start fresh");
+                                    reconnectedTcpClient.Close();
+                                    reconnectedTcpClient = null;
+                                    reconnectedStream = null;
+                                    reconnectedTcpBuffer = "";
+                                    isolationDetectedAt = null; // Will re-trigger isolation detection
+                                    reconnectDiscoverySeconds = TunnelOptions.HeartbeatIntervalSeconds;
+                                    reconnectDiscoveryAttempts = 0;
+                                }
+                                else
+                                {
+                                    var rediscovery = new MediationMessage(MediationMessageType.MeshJoinRequest)
+                                    {
+                                        NetworkID = TunnelOptions.NetworkID,
+                                        PeerID = peerID.ToString(),
+                                        NATType = detectedNatType,
+                                        PrivateAddressString = meshIP,
+                                        AuthToken = authToken
+                                    };
+                                    byte[] rdBytes = Encoding.ASCII.GetBytes(rediscovery.Serialize());
+                                    reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
+                                    // Exponential backoff: 15s → 30s → 60s → 60s → 60s
+                                    reconnectDiscoverySeconds = Math.Min(reconnectDiscoverySeconds * 2, 60);
+                                    Console.WriteLine($"[Mesh] Re-sent discovery request ({reconnectDiscoveryAttempts}/{MaxReconnectDiscoveryAttempts}), next in {reconnectDiscoverySeconds}s");
+                                }
                             }
-                            else if (!stillIsolated && !isIntroducer)
+                            else if (!stillIsolated)
                             {
-                                // Peers recovered — close reconnected connection.
-                                // Skip this when we're the introducer: the introducer must stay
-                                // connected to mediation to coordinate new peers joining the mesh.
-                                Console.WriteLine("[Mesh] Peers recovered — closing reconnected mediation connection");
-                                reconnectedTcpClient.Close();
-                                reconnectedTcpClient = null;
-                                reconnectedStream = null;
-                                reconnectedTcpBuffer = "";
-                                isolationDetectedAt = null;
+                                if (!isIntroducer)
+                                {
+                                    // Peers recovered — close reconnected connection.
+                                    Console.WriteLine("[Mesh] Peers recovered — closing reconnected mediation connection");
+                                    reconnectedTcpClient.Close();
+                                    reconnectedTcpClient = null;
+                                    reconnectedStream = null;
+                                    reconnectedTcpBuffer = "";
+                                    isolationDetectedAt = null;
+                                }
+                                // Reset backoff on success
+                                reconnectDiscoverySeconds = TunnelOptions.HeartbeatIntervalSeconds;
+                                reconnectDiscoveryAttempts = 0;
                             }
                             lastReconnectDiscovery = DateTime.UtcNow;
                         }
@@ -3354,11 +3392,30 @@ public static class Program
                                 reconnectedTcpClient.Connect(mediationEP);
                                 reconnectedStream = reconnectedTcpClient.GetStream();
 
-                                // Wait for Connected message
-                                byte[] connBuf = new byte[4096];
-                                reconnectedStream.Read(connBuf, 0, connBuf.Length);
+                                // Clear stale peer state — endpoints may have changed during isolation
+                                pendingConnectionRequests.Clear();
 
-                                // Send NAT type request (reuse known NAT type)
+                                // Perform full mediation handshake (Connected → NAT test → MeshJoinRequest)
+                                reconnectedStream.ReadTimeout = 15000;
+                                string reconRemainder = "";
+                                byte[] reconBuf = new byte[4096];
+
+                                MediationMessage ReadReconMessage()
+                                {
+                                    while (true)
+                                    {
+                                        var (m, r) = ExtractFirstJson(reconRemainder);
+                                        if (m != null) { reconRemainder = r; return m; }
+                                        int n = reconnectedStream.Read(reconBuf, 0, reconBuf.Length);
+                                        if (n == 0) throw new IOException("Reconnected mediation stream closed");
+                                        reconRemainder += Encoding.ASCII.GetString(reconBuf, 0, n);
+                                    }
+                                }
+
+                                // 1. Wait for Connected message
+                                ReadReconMessage();
+
+                                // 2. NAT type detection (proper handshake — must complete before MeshJoinRequest)
                                 var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
                                 {
                                     LocalPort = localUdpPort,
@@ -3368,23 +3425,26 @@ public static class Program
                                 byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
                                 reconnectedStream.Write(natReqBytes, 0, natReqBytes.Length);
 
-                                // Read NAT responses (NATTestBegin, send test packets, NATTypeResponse)
-                                // For simplicity, just drain responses until we can send MeshJoinRequest
-                                System.Threading.Thread.Sleep(1000);
-                                while (reconnectedStream.DataAvailable)
-                                    reconnectedStream.Read(connBuf, 0, connBuf.Length);
+                                // Read NATTestBegin to get the test ports
+                                var natTestBeginR = ReadReconMessage();
+                                if (natTestBeginR.ID == MediationMessageType.NATTestBegin)
+                                {
+                                    // Send UDP test packets to both NAT test ports
+                                    var natTestMsg = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
+                                    byte[] natTestBuf = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
+                                    udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortOne));
+                                    udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortTwo));
+                                }
 
-                                // Send UDP packets for NAT detection
-                                var natTestMsg = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
-                                byte[] natTestBuf = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
-                                udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, 6511));
-                                udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, 6512));
+                                // Read NATTypeResponse
+                                var natTypeRespR = ReadReconMessage();
+                                if (natTypeRespR.ID == MediationMessageType.NATTypeResponse)
+                                {
+                                    detectedNatType = natTypeRespR.NATType;
+                                    Console.WriteLine($"[Mesh] Reconnect NAT type: {detectedNatType}");
+                                }
 
-                                System.Threading.Thread.Sleep(1000);
-                                while (reconnectedStream.DataAvailable)
-                                    reconnectedStream.Read(connBuf, 0, connBuf.Length);
-
-                                // Send MeshJoinRequest for peer discovery
+                                // 3. Send MeshJoinRequest for peer discovery
                                 var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
                                 {
                                     NetworkID = TunnelOptions.NetworkID,
@@ -3490,11 +3550,30 @@ public static class Program
                             reconnectedTcpClient.Connect(mediationEP);
                             reconnectedStream = reconnectedTcpClient.GetStream();
 
-                            // Wait for Connected message
-                            byte[] connBuf = new byte[4096];
-                            reconnectedStream.Read(connBuf, 0, connBuf.Length);
+                            // Clear stale peer state
+                            pendingConnectionRequests.Clear();
 
-                            // NAT type detection handshake
+                            // Perform full mediation handshake
+                            reconnectedStream.ReadTimeout = 15000;
+                            string reconRemainder2 = "";
+                            byte[] reconBuf2 = new byte[4096];
+
+                            MediationMessage ReadReconMessage2()
+                            {
+                                while (true)
+                                {
+                                    var (m, r) = ExtractFirstJson(reconRemainder2);
+                                    if (m != null) { reconRemainder2 = r; return m; }
+                                    int n = reconnectedStream.Read(reconBuf2, 0, reconBuf2.Length);
+                                    if (n == 0) throw new IOException("Reconnected mediation stream closed");
+                                    reconRemainder2 += Encoding.ASCII.GetString(reconBuf2, 0, n);
+                                }
+                            }
+
+                            // 1. Wait for Connected message
+                            ReadReconMessage2();
+
+                            // 2. NAT type detection (proper handshake)
                             var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
                             {
                                 LocalPort = localUdpPort,
@@ -3504,20 +3583,23 @@ public static class Program
                             byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
                             reconnectedStream.Write(natReqBytes, 0, natReqBytes.Length);
 
-                            System.Threading.Thread.Sleep(1000);
-                            while (reconnectedStream.DataAvailable)
-                                reconnectedStream.Read(connBuf, 0, connBuf.Length);
+                            var natTestBeginR2 = ReadReconMessage2();
+                            if (natTestBeginR2.ID == MediationMessageType.NATTestBegin)
+                            {
+                                var natTestMsg2 = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
+                                byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
+                                udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortOne));
+                                udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortTwo));
+                            }
 
-                            var natTestMsg2 = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
-                            byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
-                            udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, 6511));
-                            udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, 6512));
+                            var natTypeRespR2 = ReadReconMessage2();
+                            if (natTypeRespR2.ID == MediationMessageType.NATTypeResponse)
+                            {
+                                detectedNatType = natTypeRespR2.NATType;
+                                Console.WriteLine($"[Mesh] Reconnect NAT type: {detectedNatType}");
+                            }
 
-                            System.Threading.Thread.Sleep(1000);
-                            while (reconnectedStream.DataAvailable)
-                                reconnectedStream.Read(connBuf, 0, connBuf.Length);
-
-                            // Send MeshJoinRequest — the server will select us as the new introducer
+                            // 3. Send MeshJoinRequest — the server will select us as the new introducer
                             // (since the old one disconnected and we're non-symmetric)
                             var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
                             {
@@ -3597,6 +3679,7 @@ public static class Program
         finally
         {
             // Dispose resources so retries can rebind ports
+            try { meshControlClient?.Dispose(); } catch { }
             try { udpProxy?.Dispose(); } catch { }
             try { wireguardTunnel?.Dispose(); } catch { }
             try { tcpClient?.Dispose(); } catch { }

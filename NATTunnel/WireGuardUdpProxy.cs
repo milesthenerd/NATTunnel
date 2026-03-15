@@ -48,7 +48,15 @@ public class WireGuardUdpProxy : IDisposable
 
         // Create inbound forwarder on port 51821 (for forwarding FROM tunnel TO WireGuard)
         // Per-peer outbound listeners will be created on 51822, 51823, etc.
-        wireguardListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, 51821));
+        try
+        {
+            wireguardListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, 51821));
+        }
+        catch (SocketException ex)
+        {
+            throw new InvalidOperationException(
+                $"Cannot bind WireGuard proxy port 51821/UDP — another instance may already be running. ({ex.Message})", ex);
+        }
         wireguardListener.Client.ReceiveBufferSize = 128000;
 
         // Initialize the inbound forwarder

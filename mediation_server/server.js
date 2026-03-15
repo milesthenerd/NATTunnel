@@ -86,7 +86,7 @@ class NATServer {
         // Task 4: Check TCP connection rate limit
         if (!this.checkTCPConnectionRateLimit(clientIP)) {
             console.warn(`[RateLimit] TCP connection rejected from ${clientIP} — exceeded rate limit (${this.tcpConnectionRateLimit.maxConnections} connections per ${this.tcpConnectionRateLimit.timeWindowSeconds}s)`);
-            socket.write(Buffer.from(JSON.stringify({ error: 'Rate limit exceeded' })));
+            try { socket.write(Buffer.from(JSON.stringify({ error: 'Rate limit exceeded' }))); } catch (e) { }
             socket.destroy();
             return;
         }
@@ -105,20 +105,21 @@ class NATServer {
 
         socket.on('data', (data) => this.handleTCPData(data, socket));
 
+        let socketRemoved = false;
+        const removeOnce = () => {
+            if (socketRemoved) return;
+            socketRemoved = true;
+            this.connectionManager.removeSocket(socket, socketInfo.clientID);
+        };
+
         socket.on('close', (hadError) => {
             console.log(`[Server] Socket closed for client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort}) - hadError: ${hadError}`);
-            // removeSocket triggers onSocketRemoved → handlePeerDisconnection automatically
-            this.connectionManager.removeSocket(socket, socketInfo.clientID);
+            removeOnce();
         });
 
         socket.on('error', (err) => {
-            console.error(`[Server] Socket error for client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort}):`, err.code, err.message);
-            // Gracefully handle common disconnection errors
-            if (err.code === 'ECONNRESET') {
-                this.connectionManager.removeSocket(socket, socketInfo.clientID);
-            } else {
-                console.error(`Socket error for client ${socketInfo.clientID}:`, err);
-            }
+            console.error(`[Server] Socket error for client ${socketInfo.clientID} (${socketInfo.ip}:${socketInfo.tcpPort}): ${err.code} ${err.message}`);
+            removeOnce();
         });
 
         // Send connected message
@@ -253,8 +254,50 @@ class NATServer {
         setInterval(() => {
             this.connectionManager.processTimeouts();
         }, 1000);
+
+        // Periodic cleanup every 60 seconds to prevent unbounded memory growth
+        setInterval(() => {
+            this.cleanupStaleMaps();
+        }, 60000);
+    }
+
+    cleanupStaleMaps() {
+        const now = Date.now();
+
+        // 1. Clean up tcpConnectionTimestamps: remove IPs with no recent connections
+        const tcpTimeWindowMs = this.tcpConnectionRateLimit.timeWindowSeconds * 1000;
+        for (const [ip, timestamps] of this.tcpConnectionTimestamps.entries()) {
+            const recent = timestamps.filter(ts => now - ts < tcpTimeWindowMs);
+            if (recent.length === 0) {
+                this.tcpConnectionTimestamps.delete(ip);
+            } else {
+                this.tcpConnectionTimestamps.set(ip, recent);
+            }
+        }
+
+        // 2. Clean up pendingIntroductions: remove entries older than 60 seconds
+        for (const [peerID, pending] of this.messageHandler.pendingIntroductions.entries()) {
+            if (!pending.createdAt || (now - pending.createdAt) > 60000) {
+                this.messageHandler.pendingIntroductions.delete(peerID);
+            }
+        }
+
+        // 3. Clean up stale currentConnectionPairs: remove pairs older than 5 minutes
+        for (const [id, pair] of Object.entries(this.connectionManager.currentConnectionPairs)) {
+            if (pair.connection_start_time && (now - pair.connection_start_time) > 300000) {
+                delete this.connectionManager.currentConnectionPairs[id];
+            }
+        }
     }
 }
+
+// Prevent unhandled errors from crashing the server
+process.on('uncaughtException', (err) => {
+    console.error('[Server] Uncaught exception:', err);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[Server] Unhandled rejection:', reason);
+});
 
 // Start the server
 const server = new NATServer();

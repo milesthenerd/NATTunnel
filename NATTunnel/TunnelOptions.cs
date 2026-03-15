@@ -61,8 +61,15 @@ public static class TunnelOptions
     public static int StaleTimeoutSeconds = 10;
 
     /// <summary>
+    /// Mesh subnet prefix (first two octets) for peer IP assignment.
+    /// Peers get IPs in {MeshSubnet}.X.Y/16 range.
+    /// Default: "10.5"
+    /// </summary>
+    public static string MeshSubnet = "10.5";
+
+    /// <summary>
     /// Cooldown before attempting to repair a broken relay route (in seconds).
-    /// Default: 60 seconds
+    /// Default: 30 seconds
     /// </summary>
     public static int RepairCooldownSeconds = 30;
 
