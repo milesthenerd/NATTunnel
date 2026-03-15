@@ -752,7 +752,8 @@ class MessageHandler {
                         },
                         peersToIntroduce,
                         introducerPeerID: introducer.peerID,
-                        networkID: NetworkID
+                        networkID: NetworkID,
+                        createdAt: Date.now()
                     });
                 } else {
                     console.log(`[MessageHandler] Introducer ${introducer.peerID} socket not available — skipping MeshIntroduceRequest`);

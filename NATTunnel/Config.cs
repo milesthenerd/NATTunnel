@@ -74,6 +74,7 @@ public static class Config
     /// Text string for "isolationGracePeriod" in the config (isolation grace period in seconds).
     /// </summary>
     private const string IsolationGracePeriod = "isolationGracePeriod";
+    private const string MeshSubnet = "meshSubnet";
 
     #endregion
 
@@ -87,7 +88,11 @@ public static class Config
 
         TomlTable model = Toml.ToModel(configString);
 
-        Console.WriteLine(Toml.FromModel(model));
+        // Log config without secrets
+        var configLog = Toml.FromModel(model);
+        if (model.ContainsKey("networkSecret"))
+            configLog = configLog.Replace(((string)model["networkSecret"]), "********");
+        Console.WriteLine(configLog);
 
         // Ensure config has all new timeout/interval fields with defaults if missing
         EnsureConfigFieldsExist();
@@ -184,6 +189,9 @@ public static class Config
         TryParseConfigInt(model, GracePeriodSeconds, (val) => TunnelOptions.GracePeriodSecondsNonSymmetric = val);
         TryParseConfigInt(model, GracePeriodSecondsSymmetric, (val) => TunnelOptions.GracePeriodSecondsSymmetric = val);
         TryParseConfigInt(model, IsolationGracePeriod, (val) => TunnelOptions.IsolationGracePeriodSeconds = val);
+
+        if (model.ContainsKey(MeshSubnet))
+            TunnelOptions.MeshSubnet = (string)model[MeshSubnet];
 
         return true;
     }

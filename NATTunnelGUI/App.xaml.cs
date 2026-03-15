@@ -29,6 +29,8 @@ public partial class App : Application
         }
 
         // Start mesh engine on background thread
+        // All retry logic is inside RunMeshMode itself — do NOT wrap in an outer retry
+        // loop, as recreating WireGuard adapters leaks native memory.
         meshTask = Task.Run(() =>
         {
             try
