@@ -209,6 +209,20 @@ public class WireGuardPeerManager
         return peers.AsReadOnly();
     }
 
+    public void RemoveAllPeers()
+    {
+        lock (configLock)
+        {
+            foreach (var peer in peers.ToList())
+            {
+                ReleaseProxyPort(peer.ProxyPort);
+                ReleasePeerId(peer.ConnectionId);
+            }
+            peers.Clear();
+            UpdateConfig();
+        }
+    }
+
     private void UpdateConfig()
     {
         // Read the current config to preserve the [Interface] section

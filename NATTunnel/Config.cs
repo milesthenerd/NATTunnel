@@ -228,6 +228,59 @@ public static class Config
     }
 
     /// <summary>
+    /// Saves all current settings back to config.toml using line-level replacement.
+    /// </summary>
+    public static void SaveAllSettings(
+        string mediationEndpoint,
+        string networkID,
+        string networkSecret,
+        string meshSubnet,
+        int heartbeatInterval,
+        int probeInterval,
+        int staleTimeout,
+        int repairCooldown,
+        int deadThreshold,
+        int gracePeriod,
+        int gracePeriodSymmetric,
+        int isolationGracePeriod)
+    {
+        string configPath = GetConfigFilePath();
+        if (configPath == null || !File.Exists(configPath)) return;
+
+        string[] lines = File.ReadAllLines(configPath);
+
+        SetConfigLine(ref lines, MediationEndpoint, $"\"{mediationEndpoint}\"");
+        SetConfigLine(ref lines, NetworkID, $"\"{networkID}\"");
+        SetConfigLine(ref lines, NetworkSecret, $"\"{networkSecret}\"");
+        SetConfigLine(ref lines, MeshSubnet, $"\"{meshSubnet}\"");
+        SetConfigLine(ref lines, HeartbeatInterval, heartbeatInterval.ToString());
+        SetConfigLine(ref lines, ProbeInterval, probeInterval.ToString());
+        SetConfigLine(ref lines, StaleTimeout, staleTimeout.ToString());
+        SetConfigLine(ref lines, RepairCooldown, repairCooldown.ToString());
+        SetConfigLine(ref lines, DeadThreshold, deadThreshold.ToString());
+        SetConfigLine(ref lines, GracePeriodSeconds, gracePeriod.ToString());
+        SetConfigLine(ref lines, GracePeriodSecondsSymmetric, gracePeriodSymmetric.ToString());
+        SetConfigLine(ref lines, IsolationGracePeriod, isolationGracePeriod.ToString());
+
+        File.WriteAllLines(configPath, lines);
+    }
+
+    private static void SetConfigLine(ref string[] lines, string key, string formattedValue)
+    {
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].TrimStart().StartsWith(key + " ") || lines[i].TrimStart().StartsWith(key + "="))
+            {
+                lines[i] = $"{key} = {formattedValue}";
+                return;
+            }
+        }
+        // Not found — append
+        Array.Resize(ref lines, lines.Length + 1);
+        lines[^1] = $"{key} = {formattedValue}";
+    }
+
+    /// <summary>
     /// Helper method that resolves a DNS and returns the correct IPvX ip depending on what's supported.
     /// </summary>
     /// <param name="dns">The dns to resolve and get the ip from.</param>

@@ -1143,6 +1143,20 @@ namespace NATTunnel
         public WireGuardPeer GetPeer(IPAddress privateAddress) => peerManager.GetPeer(privateAddress);
         public WireGuardPeer GetPeer(IPEndPoint endpoint) => peerManager.GetPeer(endpoint);
         public IEnumerable<WireGuardPeer> GetAllPeers() => peerManager.GetAllPeers();
+
+        public void RemoveAllPeers()
+        {
+            peerManager.RemoveAllPeers();
+
+            // Clear relay routes
+            relayRoutes.Clear();
+
+            // Update WireGuard-NT configuration dynamically
+            if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
+            {
+                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+            }
+        }
         public int GetPeerCount() => peerManager.GetPeerCount();
         public string GetConfigPath() => configFilePath;
 
