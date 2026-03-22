@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="NATTunnel"
-        Height="500"
+        Height="600"
         Width="800"
         Background="{StaticResource ContentBrush}"
         WindowStartupLocation="CenterScreen">
@@ -156,6 +156,36 @@
                          FontSize="12"
                          Style="{StaticResource CopyableValue}"
                          Margin="0"/>
+
+                <!-- Separator -->
+                <Border Height="1"
+                        Background="{StaticResource BorderBrush}"
+                        Margin="0,4,0,12"/>
+
+                <!-- Connect/Disconnect Button -->
+                <Button x:Name="ConnectButton"
+                        Content="Disconnect"
+                        Click="ConnectDisconnect_Click"
+                        Height="32"
+                        Background="#3E3E42"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        FontSize="12"
+                        Cursor="Hand"/>
+
+                <!-- Settings Button -->
+                <Button x:Name="SettingsButton"
+                        Content="Settings"
+                        Click="Settings_Click"
+                        Height="32"
+                        Margin="0,8,0,0"
+                        Background="#3E3E42"
+                        Foreground="{StaticResource TextPrimaryBrush}"
+                        BorderBrush="{StaticResource BorderBrush}"
+                        BorderThickness="1"
+                        FontSize="12"
+                        Cursor="Hand"/>
             </StackPanel>
         </Border>
 

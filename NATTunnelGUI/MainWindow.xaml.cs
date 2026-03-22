@@ -12,7 +12,8 @@ public partial class MainWindow : Window
 {
     private readonly DispatcherTimer pollTimer;
     private readonly HttpClient httpClient;
-    private bool wasConnected;
+    private bool isConnected;
+    private bool isConnecting;
 
     public MainWindow()
     {
@@ -42,11 +43,46 @@ public partial class MainWindow : Window
 
             if (state == null) return;
 
-            if (!wasConnected)
+            // Update connection state UI
+            switch (state.ConnectionState)
             {
-                wasConnected = true;
-                StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusGreenBrush");
-                StatusText.Text = "Connected";
+                case "Connected":
+                    StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusGreenBrush");
+                    StatusText.Text = "Connected";
+                    ConnectButton.Content = "Disconnect";
+                    ConnectButton.IsEnabled = true;
+                    isConnected = true;
+                    isConnecting = false;
+                    break;
+                case "Connecting":
+                    StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusYellowBrush");
+                    StatusText.Text = "Connecting...";
+                    ConnectButton.Content = "Cancel";
+                    ConnectButton.IsEnabled = true;
+                    isConnected = false;
+                    isConnecting = true;
+                    break;
+                case "Disconnected":
+                    StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusRedBrush");
+                    StatusText.Text = "Disconnected";
+                    ConnectButton.Content = "Connect";
+                    ConnectButton.IsEnabled = true;
+                    isConnected = false;
+                    isConnecting = false;
+                    break;
+                case "Disconnecting":
+                    StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusYellowBrush");
+                    StatusText.Text = "Disconnecting...";
+                    ConnectButton.IsEnabled = false;
+                    isConnected = false;
+                    isConnecting = false;
+                    break;
+                default:
+                    // Fallback for unknown state
+                    StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusYellowBrush");
+                    StatusText.Text = state.ConnectionState ?? "Unknown";
+                    ConnectButton.IsEnabled = true;
+                    break;
             }
 
             // Update sidebar
@@ -55,6 +91,9 @@ public partial class MainWindow : Window
             NATTypeText.Text = state.NATType ?? "-";
             RoleText.Text = state.IsIntroducer ? "Introducer" : "Peer";
             UptimeText.Text = FormatUptime(state.UptimeSeconds);
+
+            // Update network name (may have changed via settings)
+            NetworkNameText.Text = TunnelOptions.NetworkID ?? "-";
 
             if (!state.IsIntroducer && !string.IsNullOrEmpty(state.IntroducerMeshIP))
             {
@@ -87,22 +126,37 @@ public partial class MainWindow : Window
                 }
             }
             PeerListView.ItemsSource = peerItems;
-
-            // Metrics display is currently disabled in the XAML layout
         }
         catch
         {
-            if (wasConnected)
-            {
-                wasConnected = false;
-                StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusRedBrush");
-                StatusText.Text = "Disconnected";
-            }
-            else
-            {
-                StatusText.Text = "Connecting...";
-            }
+            // HTTP endpoint not responding — engine not running
+            StatusDot.Fill = (System.Windows.Media.Brush)FindResource("StatusRedBrush");
+            StatusText.Text = "Engine not running";
+            ConnectButton.IsEnabled = false;
         }
+    }
+
+    private async void ConnectDisconnect_Click(object sender, RoutedEventArgs e)
+    {
+        ConnectButton.IsEnabled = false;
+        try
+        {
+            // Cancel (during Connecting) and Disconnect both send /disconnect
+            string endpoint = (isConnected || isConnecting) ? "/disconnect" : "/connect";
+            await httpClient.PostAsync($"http://localhost:51889{endpoint}", null);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[GUI] Failed to send command: {ex.Message}");
+        }
+        // Button will be re-enabled by PollStatus on next tick
+    }
+
+    private void Settings_Click(object sender, RoutedEventArgs e)
+    {
+        var settingsWindow = new SettingsWindow();
+        settingsWindow.Owner = this;
+        settingsWindow.ShowDialog();
     }
 
     private static string TruncateGuid(string guid)

@@ -33,6 +33,9 @@ public class MeshState
     [JsonPropertyName("uptimeSeconds")]
     public long UptimeSeconds { get; set; }
 
+    [JsonPropertyName("connectionState")]
+    public string ConnectionState { get; set; }
+
     [JsonPropertyName("metrics")]
     public MeshMetrics Metrics { get; set; }
 
