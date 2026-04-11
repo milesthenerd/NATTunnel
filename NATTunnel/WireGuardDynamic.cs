@@ -14,7 +14,7 @@ public static class WireGuardDynamic
         {
             if (!WireGuardPeer.IsValidPublicKey(publicKey))
             {
-                Console.WriteLine($"Rejected invalid public key");
+                Program.Log($"Rejected invalid public key");
                 return false;
             }
 
@@ -42,20 +42,20 @@ public static class WireGuardDynamic
 
             if (wgProcess.ExitCode != 0)
             {
-                Console.WriteLine($"wg set failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
+                Program.Log($"wg set failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
                 return false;
             }
 
-            Console.WriteLine($"Dynamically added peer to WireGuard interface {interfaceName}");
+            Program.Log($"Dynamically added peer to WireGuard interface {interfaceName}");
             if (!string.IsNullOrEmpty(output))
             {
-                Console.WriteLine($"   Output: {output}");
+                Program.Log($"   Output: {output}");
             }
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error adding peer dynamically: {ex.Message}");
+            Program.Log($"Error adding peer dynamically: {ex.Message}");
             return false;
         }
     }
@@ -69,7 +69,7 @@ public static class WireGuardDynamic
         {
             if (!WireGuardPeer.IsValidPublicKey(publicKey))
             {
-                Console.WriteLine($"Rejected invalid public key");
+                Program.Log($"Rejected invalid public key");
                 return false;
             }
 
@@ -96,16 +96,16 @@ public static class WireGuardDynamic
 
             if (wgProcess.ExitCode != 0)
             {
-                Console.WriteLine($"wg set remove failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
+                Program.Log($"wg set remove failed (Exit code: {wgProcess.ExitCode}): {errorOutput}");
                 return false;
             }
 
-            Console.WriteLine($"Dynamically removed peer from WireGuard interface {interfaceName}");
+            Program.Log($"Dynamically removed peer from WireGuard interface {interfaceName}");
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error removing peer dynamically: {ex.Message}");
+            Program.Log($"Error removing peer dynamically: {ex.Message}");
             return false;
         }
     }

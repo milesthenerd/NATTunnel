@@ -40,12 +40,12 @@ public static class WireGuardConfig
             }
 
             File.WriteAllText(configPath, config.ToString());
-            Console.WriteLine($"Generated WireGuard config at: {configPath}");
+            Program.Log($"Generated WireGuard config at: {configPath}");
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to generate WireGuard config: {ex.Message}");
+            Program.Log($"Failed to generate WireGuard config: {ex.Message}");
             return false;
         }
     }
@@ -107,7 +107,7 @@ public static class WireGuardConfig
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to generate WireGuard keys: {ex.Message}");
+            Program.Log($"Failed to generate WireGuard keys: {ex.Message}");
             throw;
         }
     }
@@ -135,12 +135,12 @@ public static class WireGuardConfig
             }
 
             File.WriteAllText(configPath, config.ToString());
-            Console.WriteLine($"Generated WireGuard interface config at: {configPath}");
+            Program.Log($"Generated WireGuard interface config at: {configPath}");
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to generate WireGuard config: {ex.Message}");
+            Program.Log($"Failed to generate WireGuard config: {ex.Message}");
             return false;
         }
     }
@@ -213,12 +213,12 @@ public static class WireGuardConfig
                 throw new Exception($"Failed to derive public key from private key. wg error: {errorOutput}");
             }
 
-            Console.WriteLine($"Derived public key from config: {configPath}");
+            Program.Log($"Derived public key from config: {configPath}");
             return publicKey;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error deriving public key from config: {ex.Message}");
+            Program.Log($"Error deriving public key from config: {ex.Message}");
             throw;
         }
     }

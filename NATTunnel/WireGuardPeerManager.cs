@@ -339,11 +339,11 @@ public class WireGuardPeerManager
 
                     if (process.ExitCode != 0)
                     {
-                        Console.WriteLine($"Failed to apply WireGuard config: {error}");
+                        Program.Log($"Failed to apply WireGuard config: {error}");
                     }
                     else
                     {
-                        Console.WriteLine($"Applied WireGuard configuration with {peers.Count} peer(s)");
+                        Program.Log($"Applied WireGuard configuration with {peers.Count} peer(s)");
                     }
                 }
             }
@@ -357,7 +357,7 @@ public class WireGuardPeerManager
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error applying WireGuard configuration: {ex.Message}");
+            Program.Log($"Error applying WireGuard configuration: {ex.Message}");
         }
     }
 

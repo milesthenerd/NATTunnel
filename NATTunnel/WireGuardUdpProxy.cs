@@ -243,7 +243,7 @@ public class WireGuardUdpProxy : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Proxy] Error forwarding to WireGuard: {ex.Message}");
+            Program.Log($"[Proxy] Error forwarding to WireGuard: {ex.Message}");
         }
     }
 
@@ -351,7 +351,7 @@ internal class PeerProxyListener : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PeerProxy:{proxyPort}] Error forwarding inbound packet: {ex.Message}");
+            Program.Log($"[PeerProxy:{proxyPort}] Error forwarding inbound packet: {ex.Message}");
         }
     }
 
@@ -389,7 +389,7 @@ internal class PeerProxyListener : IDisposable
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[PeerProxy:{proxyPort}] Error sending packet: {ex.Message}");
+                        Program.Log($"[PeerProxy:{proxyPort}] Error sending packet: {ex.Message}");
                     }
                 }
             }
@@ -397,7 +397,7 @@ internal class PeerProxyListener : IDisposable
         catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PeerProxy:{proxyPort}] Error in listen loop: {ex.Message}");
+            Program.Log($"[PeerProxy:{proxyPort}] Error in listen loop: {ex.Message}");
         }
     }
 

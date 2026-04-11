@@ -92,7 +92,7 @@ public static class Config
         var configLog = Toml.FromModel(model);
         if (model.ContainsKey("networkSecret"))
             configLog = configLog.Replace(((string)model["networkSecret"]), "********");
-        Console.WriteLine(configLog);
+        Program.Log(configLog);
 
         // Ensure config has all new timeout/interval fields with defaults if missing
         EnsureConfigFieldsExist();
@@ -137,7 +137,7 @@ public static class Config
                 return false;
             }
             TunnelOptions.NetworkID = (string)model[NetworkID];
-            Console.WriteLine($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
+            Program.Log($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
         }
         catch (Exception e)
         {
@@ -154,7 +154,7 @@ public static class Config
                 return false;
             }
             TunnelOptions.NetworkSecret = (string)model[NetworkSecret];
-            Console.WriteLine($"[Config] Network secret loaded");
+            Program.Log($"[Config] Network secret loaded");
         }
         catch (Exception e)
         {
@@ -171,13 +171,13 @@ public static class Config
                 if (Guid.TryParse(peerIDString, out Guid parsedPeerID))
                 {
                     TunnelOptions.PeerID = parsedPeerID;
-                    Console.WriteLine($"[Config] Loaded persistent peer ID: {parsedPeerID}");
+                    Program.Log($"[Config] Loaded persistent peer ID: {parsedPeerID}");
                 }
             }
         }
         catch (Exception e)
         {
-            Console.WriteLine($"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
+            Program.Log($"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
         }
 
         // Parse optional timeout and interval settings
@@ -362,10 +362,10 @@ public static class Config
             return true;
 
         if (!doesFileExist)
-            Console.WriteLine("Unable to find config.toml");
-        Console.WriteLine("Creating default mesh networking config...");
+            Program.Log("Unable to find config.toml");
+        Program.Log("Creating default mesh networking config...");
         CreateNewConfig();
-        Console.WriteLine("Config created. Please edit config.toml to set your networkID, then restart.");
+        Program.Log("Config created. Please edit config.toml to set your networkID, then restart.");
         return true;
     }
 
@@ -407,18 +407,18 @@ public static class Config
                 {
                     int intValue = (int)longValue;
                     setValue(intValue);
-                    Console.WriteLine($"[Config] Loaded {key}: {intValue}");
+                    Program.Log($"[Config] Loaded {key}: {intValue}");
                 }
                 else if (value is int intValue2)
                 {
                     setValue(intValue2);
-                    Console.WriteLine($"[Config] Loaded {key}: {intValue2}");
+                    Program.Log($"[Config] Loaded {key}: {intValue2}");
                 }
             }
         }
         catch (Exception e)
         {
-            Console.WriteLine($"[Config] Warning: Failed to parse {key}: {e.Message}");
+            Program.Log($"[Config] Warning: Failed to parse {key}: {e.Message}");
         }
     }
 
@@ -475,7 +475,7 @@ public static class Config
         if (modified)
         {
             File.WriteAllLines(configPath, lines);
-            Console.WriteLine("[Config] Added missing timeout/interval fields to config.toml with defaults");
+            Program.Log("[Config] Added missing timeout/interval fields to config.toml with defaults");
         }
     }
 }
