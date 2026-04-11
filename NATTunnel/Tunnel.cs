@@ -127,7 +127,7 @@ public class Tunnel : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine(ex);
+            Program.Log(ex.ToString());
         }
 
         initialConnectionTimer = new Timer(1000)
@@ -198,7 +198,7 @@ public class Tunnel : IDisposable
                 initialConnectionTimer.Enabled = false;
 
                 // Start cooldown before retry
-                Console.WriteLine($"Connection attempt {retryAttempt + 1} failed. Waiting {retryCooldown}s before retry...");
+                Program.Log($"Connection attempt {retryAttempt + 1} failed. Waiting {retryCooldown}s before retry...");
                 retryAttempt++;
 
                 if (retryAttempt < maxRetryAttempts)
@@ -208,7 +208,7 @@ public class Tunnel : IDisposable
                     {
                         if (!connected && retryAttempt < maxRetryAttempts)
                         {
-                            Console.WriteLine($"Retrying connection (attempt {retryAttempt + 1}/{maxRetryAttempts})...");
+                            Program.Log($"Retrying connection (attempt {retryAttempt + 1}/{maxRetryAttempts})...");
 
                             if (!retryInPlace)
                             {
@@ -228,7 +228,7 @@ public class Tunnel : IDisposable
                 }
                 else
                 {
-                    Console.WriteLine($"Max connection retries ({maxRetryAttempts}) reached. Giving up.");
+                    Program.Log($"Max connection retries ({maxRetryAttempts}) reached. Giving up.");
                     onConnectionFailure?.Invoke();
                 }
             }
@@ -299,7 +299,7 @@ public class Tunnel : IDisposable
             // We're symmetric: create 256 UDP probe clients and send from all of them
             // Extend timeout — symmetric NAT needs more time for random port scanning
             connectionTimeout = symmetricConnectionTimeout;
-            Console.WriteLine($"[Symmetric NAT] Setting up 256 probe clients (InjectConnectionBegin)");
+            Program.Log($"[Symmetric NAT] Setting up 256 probe clients (InjectConnectionBegin)");
 
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = false };
             connectionAttempt.Elapsed += (source, e) =>
@@ -345,7 +345,7 @@ public class Tunnel : IDisposable
 
                         if (receivedEndpoint.Address.Equals(targetPeerIp) && Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
                         {
-                            Console.WriteLine($"[Symmetric NAT] Connection established on probe port {((IPEndPoint)capturedProbe.Client.LocalEndPoint).Port}");
+                            Program.Log($"[Symmetric NAT] Connection established on probe port {((IPEndPoint)capturedProbe.Client.LocalEndPoint).Port}");
 
                             // Mesh mode: DON'T replace the shared udpClient or cancel shared tokens.
                             // Instead, switch this tunnel to use the winning probe for sends,
@@ -394,7 +394,7 @@ public class Tunnel : IDisposable
             // Peer is symmetric: send to random ports to try to hit the peer's allocated port
             // Extend timeout — symmetric NAT needs more time for random port scanning
             connectionTimeout = symmetricConnectionTimeout;
-            Console.WriteLine($"[Tunnel] Peer is symmetric — using random port spray (InjectConnectionBegin)");
+            Program.Log($"[Tunnel] Peer is symmetric — using random port spray (InjectConnectionBegin)");
 
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = true };
             connectionAttempt.Elapsed += (source, e) =>
@@ -540,7 +540,7 @@ public class Tunnel : IDisposable
                 connected = true;
                 initialConnectionTimer.Enabled = false;
                 connectionAttempt.Enabled = false;
-                Console.WriteLine("[Mesh] Connection established - hole punching successful!");
+                Program.Log("[Mesh] Connection established - hole punching successful!");
 
                 // Send WireGuard public key to peer immediately
                 if (wireguardTunnel != null && !wgKeySent)
@@ -566,7 +566,7 @@ public class Tunnel : IDisposable
                     }
                     catch (Exception wgEx)
                     {
-                        Console.WriteLine($"[Mesh] Error sending WireGuard public key: {wgEx.Message}");
+                        Program.Log($"[Mesh] Error sending WireGuard public key: {wgEx.Message}");
                     }
                 }
             }
@@ -591,7 +591,7 @@ public class Tunnel : IDisposable
                     }
                     catch (Exception e)
                     {
-                        Console.WriteLine(e);
+                        Program.Log(e.ToString());
                     }
                 }
                 break;
@@ -654,11 +654,11 @@ public class Tunnel : IDisposable
                                     }
                                     else
                                     {
-                                        Console.WriteLine($"[WG] Cannot determine peer tunnel IP");
+                                        Program.Log($"[WG] Cannot determine peer tunnel IP");
                                         break;
                                     }
 
-                                    Console.WriteLine($"[WG] Adding peer: key={receivedMessage.WireGuardPublicKey.Substring(0, 8)}... ip={peerTunnelIp} endpoint={peerEndpoint}");
+                                    Program.Log($"[WG] Adding peer: key={receivedMessage.WireGuardPublicKey.Substring(0, 8)}... ip={peerTunnelIp} endpoint={peerEndpoint}");
                                     // Add peer with their public key and tunnel IP
                                     // Pass our tunnel socket for proxy routing
                                     var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient);
@@ -689,17 +689,17 @@ public class Tunnel : IDisposable
 
                                             byte[] replyBuffer = Encoding.ASCII.GetBytes(replyMsg.Serialize());
                                             udpClient.Send(replyBuffer, replyBuffer.Length, peerEndpoint);
-                                            Console.WriteLine($"[WG] Sent our public key back to {peerEndpoint}");
+                                            Program.Log($"[WG] Sent our public key back to {peerEndpoint}");
                                         }
                                         catch (Exception replyEx)
                                         {
-                                            Console.WriteLine($"[WG] Error sending our public key reply: {replyEx.Message}");
+                                            Program.Log($"[WG] Error sending our public key reply: {replyEx.Message}");
                                         }
                                     }
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"Error adding peer: {ex.Message}");
+                                    Program.Log($"Error adding peer: {ex.Message}");
                                 }
 
                                 if (peerAddedSuccessfully)
@@ -709,22 +709,22 @@ public class Tunnel : IDisposable
                                     retryAttempt = 0;  // Reset for future connections
                                     initialConnectionTimer.Enabled = false;
                                     connectionAttempt.Enabled = false;
-                                    Console.WriteLine("Connection established successfully!");
+                                    Program.Log("Connection established successfully!");
                                 }
                             }
                             else
                             {
-                                Console.WriteLine($"Cannot add peer: missing tunnel or endpoint information");
+                                Program.Log($"Cannot add peer: missing tunnel or endpoint information");
                             }
                         }
                         else
                         {
-                            Console.WriteLine($"WireGuard public key hash validation FAILED");
+                            Program.Log($"WireGuard public key hash validation FAILED");
                         }
                     }
                     else
                     {
-                        Console.WriteLine($"Peer's WireGuard public key is null or empty");
+                        Program.Log($"Peer's WireGuard public key is null or empty");
                     }
                 }
                 break;
@@ -752,7 +752,7 @@ public class Tunnel : IDisposable
                     }
                     catch (Exception e)
                     {
-                        Console.WriteLine(e);
+                        Program.Log(e.ToString());
                     }
                     if (natType != NATType.Symmetric)
                     {
@@ -857,7 +857,7 @@ public class Tunnel : IDisposable
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Tunnel] Error during disposal: {ex.Message}");
+            Program.Log($"[Tunnel] Error during disposal: {ex.Message}");
         }
     }
 

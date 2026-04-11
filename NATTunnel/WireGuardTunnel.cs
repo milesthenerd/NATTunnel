@@ -67,20 +67,20 @@ namespace NATTunnel
 
             try
             {
-                Console.WriteLine($"Creating new WireGuard tunnel (Interface: {interfaceName})");
+                Program.Log($"Creating new WireGuard tunnel (Interface: {interfaceName})");
                 if (debugMode)
                 {
-                    Console.WriteLine(">>> DEBUG MODE ENABLED - Skipping service installation");
+                    Program.Log(">>> DEBUG MODE ENABLED - Skipping service installation");
                 }
                 if (isRunningAsService)
                 {
-                    Console.WriteLine(">>> SERVICE MODE ENABLED - Skipping service installation (already managed by Windows Service Manager)");
+                    Program.Log(">>> SERVICE MODE ENABLED - Skipping service installation (already managed by Windows Service Manager)");
                 }
 
                 // Set up base config path — named after the interface so multiple instances
                 // on the same machine don't share/overwrite each other's config and keys.
                 configFilePath = EnsureConfigPath(interfaceName);
-                Console.WriteLine($"Base config path: {configFilePath}");
+                Program.Log($"Base config path: {configFilePath}");
 
                 // Set up persistent keys file path (stored separately from config)
                 string keysFilePath = Path.Combine(Path.GetDirectoryName(configFilePath), $"{interfaceName}_keys.txt");
@@ -94,13 +94,13 @@ namespace NATTunnel
                 {
                     try
                     {
-                        Console.WriteLine($"Loading existing WireGuard keys from {keysFilePath}...");
+                        Program.Log($"Loading existing WireGuard keys from {keysFilePath}...");
                         string[] keyLines = File.ReadAllLines(keysFilePath);
                         if (keyLines.Length >= 2)
                         {
                             privateKeyBase64 = keyLines[0].Trim();
                             publicKeyBase64 = keyLines[1].Trim();
-                            Console.WriteLine("Loaded existing WireGuard keys from keys file");
+                            Program.Log("Loaded existing WireGuard keys from keys file");
                         }
                         else
                         {
@@ -109,8 +109,8 @@ namespace NATTunnel
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Could not load keys from keys file: {ex.Message}");
-                        Console.WriteLine("Generating new keys...");
+                        Program.Log($"Could not load keys from keys file: {ex.Message}");
+                        Program.Log("Generating new keys...");
                         var (privKey, pubKey) = WireGuardConfig.GenerateKeyPair();
                         privateKeyBase64 = privKey;
                         publicKeyBase64 = pubKey;
@@ -121,15 +121,15 @@ namespace NATTunnel
                     // Fallback: try to extract from config file
                     try
                     {
-                        Console.WriteLine("Loading existing WireGuard keys from config...");
+                        Program.Log("Loading existing WireGuard keys from config...");
                         privateKeyBase64 = ExtractPrivateKeyFromConfig(configFilePath);
                         publicKeyBase64 = WireGuardConfig.GetPublicKeyFromConfig(configFilePath);
-                        Console.WriteLine("Loaded existing WireGuard keys from config");
+                        Program.Log("Loaded existing WireGuard keys from config");
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Could not load keys from config: {ex.Message}");
-                        Console.WriteLine("Generating new keys...");
+                        Program.Log($"Could not load keys from config: {ex.Message}");
+                        Program.Log("Generating new keys...");
                         var (privKey, pubKey) = WireGuardConfig.GenerateKeyPair();
                         privateKeyBase64 = privKey;
                         publicKeyBase64 = pubKey;
@@ -138,7 +138,7 @@ namespace NATTunnel
                 else
                 {
                     // No existing keys - generate new keypair
-                    Console.WriteLine("Generating new WireGuard keys...");
+                    Program.Log("Generating new WireGuard keys...");
                     var (privKey, pubKey) = WireGuardConfig.GenerateKeyPair();
                     privateKeyBase64 = privKey;
                     publicKeyBase64 = pubKey;
@@ -148,18 +148,18 @@ namespace NATTunnel
                 try
                 {
                     File.WriteAllLines(keysFilePath, new[] { privateKeyBase64, publicKeyBase64 });
-                    Console.WriteLine($"Keys saved to {keysFilePath}");
+                    Program.Log($"Keys saved to {keysFilePath}");
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Warning: Could not save keys file: {ex.Message}");
+                    Program.Log($"Warning: Could not save keys file: {ex.Message}");
                 }
 
                 // Decode base64 keys to binary for WireGuard API
                 this.privateKey = Convert.FromBase64String(privateKeyBase64);
                 this.publicKey = Convert.FromBase64String(publicKeyBase64);
 
-                Console.WriteLine("Generating/updating WireGuard config...");
+                Program.Log("Generating/updating WireGuard config...");
 
                 // Use placeholder IP until mesh mode assigns the real mesh IP
                 string interfaceAddress = "10.5.0.254/24";
@@ -172,11 +172,11 @@ namespace NATTunnel
                     configFilePath,
                     interfaceAddress);
 
-                Console.WriteLine($"WireGuard config: {configFilePath}");
-                Console.WriteLine($"WireGuard will listen on port: 51820 (localhost only)");
+                Program.Log($"WireGuard config: {configFilePath}");
+                Program.Log($"WireGuard will listen on port: 51820 (localhost only)");
 
                 // Initialize peer manager
-                Console.WriteLine("Initializing peer manager...");
+                Program.Log("Initializing peer manager...");
                 var baseAddress = IPAddress.Parse("10.5.0.0");
                 peerManager = new WireGuardPeerManager(configFilePath, baseAddress, 51820);
 
@@ -187,15 +187,15 @@ namespace NATTunnel
                 }
                 else if (isRunningAsService)
                 {
-                    Console.WriteLine(">>> Service mode: Bringing up WireGuard interface...");
+                    Program.Log(">>> Service mode: Bringing up WireGuard interface...");
                     BringUpWireGuardInterface();
                     tunnelStarted = true;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error during tunnel creation: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Program.Log($"Error during tunnel creation: {ex.Message}");
+                Program.Log($"Stack trace: {ex.StackTrace}");
                 throw;
             }
         }
@@ -245,7 +245,7 @@ namespace NATTunnel
                             string privateKey = trimmedLine.Substring(equalsIdx + 1).Trim();
                             if (!string.IsNullOrEmpty(privateKey))
                             {
-                                Console.WriteLine("Extracted private key from config");
+                                Program.Log("Extracted private key from config");
                                 return privateKey;
                             }
                         }
@@ -256,7 +256,7 @@ namespace NATTunnel
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error extracting private key from config: {ex.Message}");
+                Program.Log($"Error extracting private key from config: {ex.Message}");
                 throw;
             }
         }
@@ -265,32 +265,32 @@ namespace NATTunnel
         {
             try
             {
-                Console.WriteLine("Initializing WireGuard tunnel");
-                Console.WriteLine($"Using config path: {configFilePath}");
+                Program.Log("Initializing WireGuard tunnel");
+                Program.Log($"Using config path: {configFilePath}");
 
                 // Check elevation first
-                Console.WriteLine("Checking for administrative privileges...");
+                Program.Log("Checking for administrative privileges...");
                 bool elevated = IsElevated();
-                Console.WriteLine($"Running with administrative privileges: {elevated}");
+                Program.Log($"Running with administrative privileges: {elevated}");
 
                 if (!elevated)
                 {
-                    Console.WriteLine("Attempting to restart with administrative privileges...");
+                    Program.Log("Attempting to restart with administrative privileges...");
                     RestartElevated();
                     return;
                 }
 
                 // Bring up the WireGuard interface directly
-                Console.WriteLine("Bringing up WireGuard interface...");
+                Program.Log("Bringing up WireGuard interface...");
                 BringUpWireGuardInterface();
 
                 tunnelStarted = true;
-                Console.WriteLine("WireGuard tunnel initialized successfully");
+                Program.Log("WireGuard tunnel initialized successfully");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error during tunnel initialization: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Program.Log($"Error during tunnel initialization: {ex.Message}");
+                Program.Log($"Stack trace: {ex.StackTrace}");
                 throw;
             }
         }
@@ -299,26 +299,26 @@ namespace NATTunnel
         {
             try
             {
-                Console.WriteLine($"Bringing up WireGuard-NT interface: {interfaceName}");
+                Program.Log($"Bringing up WireGuard-NT interface: {interfaceName}");
 
                 // Create/Open WireGuard-NT adapter
                 wireguardAdapter = WireGuardAPI.CreateAdapter(interfaceName);
 
                 // Get adapter LUID for IP configuration
                 WireGuardNTAPI.WireGuardGetAdapterLUID(wireguardAdapter, out ulong luid);
-                Console.WriteLine($"Adapter LUID: {luid}");
+                Program.Log($"Adapter LUID: {luid}");
 
                 // Configure WireGuard-NT with interface settings (private key, listen port)
-                Console.WriteLine("Configuring WireGuard-NT interface...");
+                Program.Log("Configuring WireGuard-NT interface...");
                 ConfigureWireGuardNT();
 
                 // Assign placeholder IP until mesh mode assigns the real mesh IP
                 string assignedIp = "10.5.0.254";
-                Console.WriteLine($"Assigning IP address {assignedIp}/24 to interface...");
+                Program.Log($"Assigning IP address {assignedIp}/24 to interface...");
                 WireGuardAPI.AssignIPAddress(wireguardAdapter, interfaceName, assignedIp, 24);
 
                 // Enable the interface using netsh (WireGuard adapters don't have a SetAdapterState API)
-                Console.WriteLine("Enabling WireGuard-NT interface...");
+                Program.Log("Enabling WireGuard-NT interface...");
                 var enablePsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "netsh",
@@ -336,17 +336,17 @@ namespace NATTunnel
                     if (enableProcess.ExitCode != 0)
                     {
                         string error = enableProcess.StandardError.ReadToEnd();
-                        Console.WriteLine($"Warning: Failed to enable interface via netsh: {error}");
-                        Console.WriteLine("   Interface may already be enabled or will auto-enable with configuration");
+                        Program.Log($"Warning: Failed to enable interface via netsh: {error}");
+                        Program.Log("   Interface may already be enabled or will auto-enable with configuration");
                     }
                     else
                     {
-                        Console.WriteLine("WireGuard-NT interface enabled");
+                        Program.Log("WireGuard-NT interface enabled");
                     }
                 }
 
                 // Force the WireGuard adapter to UP state using WireGuard-NT API
-                Console.WriteLine("Setting WireGuard adapter state to UP...");
+                Program.Log("Setting WireGuard adapter state to UP...");
                 bool adapterStateSet = WireGuardNTAPI.WireGuardSetAdapterState(
                     wireguardAdapter,
                     WireGuardNTAPI.WIREGUARD_ADAPTER_STATE.WIREGUARD_ADAPTER_STATE_UP
@@ -354,19 +354,19 @@ namespace NATTunnel
 
                 if (adapterStateSet)
                 {
-                    Console.WriteLine("WireGuard adapter set to UP state");
+                    Program.Log("WireGuard adapter set to UP state");
                 }
                 else
                 {
                     int error = Marshal.GetLastWin32Error();
-                    Console.WriteLine($"Failed to set adapter state to UP (Error: {error})");
+                    Program.Log($"Failed to set adapter state to UP (Error: {error})");
                 }
 
                 // Brief delay to allow interface to come up
                 System.Threading.Thread.Sleep(1000);
 
                 // Verify interface status
-                Console.WriteLine("Checking WireGuard interface status...");
+                Program.Log("Checking WireGuard interface status...");
                 var statusPsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "wg",
@@ -385,33 +385,33 @@ namespace NATTunnel
 
                     if (!string.IsNullOrWhiteSpace(output))
                     {
-                        Console.WriteLine($"WireGuard status:\n{output}");
+                        Program.Log($"WireGuard status:\n{output}");
                     }
                     if (!string.IsNullOrWhiteSpace(error))
                     {
-                        Console.WriteLine($"WireGuard status error: {error}");
+                        Program.Log($"WireGuard status error: {error}");
                     }
                 }
 
                 // Initialize tunnel based on mode
                 if (!skipTunnelCreation)
                 {
-                    Console.WriteLine("Initializing Tunnel...");
+                    Program.Log("Initializing Tunnel...");
                     tunnel = new Tunnel(onConnectionFailure: HandleConnectionFailure);
                     tunnel.SetWireGuardTunnel(this);
 
                     // Start the mediation tunnel to connect to the mediation server
-                    Console.WriteLine("Starting mediation tunnel connection...");
+                    Program.Log("Starting mediation tunnel connection...");
                     tunnel.Start();
 
                     // Start UDP proxy to forward WireGuard traffic bidirectionally
-                    Console.WriteLine("Starting WireGuard UDP proxy...");
+                    Program.Log("Starting WireGuard UDP proxy...");
                     udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
                 }
                 else
                 {
                     // Mesh mode: Don't create a tunnel, mesh mode will create its own peer tunnels
-                    Console.WriteLine("[Mesh] WireGuard initialized without creating Tunnel (mesh mode will manage peer tunnels)");
+                    Program.Log("[Mesh] WireGuard initialized without creating Tunnel (mesh mode will manage peer tunnels)");
                     // UDP proxy will be created later when needed
                     udpProxy = null;
                 }
@@ -456,12 +456,12 @@ namespace NATTunnel
                                 if (proc.ExitCode != 0)
                                 {
                                     var err = proc.StandardError.ReadToEnd();
-                                    Console.WriteLine($"[Endpoint Reset] Failed for peer {peer.PublicKey.Substring(0, 8)}: {err}");
+                                    Program.Log($"[Endpoint Reset] Failed for peer {peer.PublicKey.Substring(0, 8)}: {err}");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                Console.WriteLine($"[Endpoint Reset] Error: {ex.Message}");
+                                Program.Log($"[Endpoint Reset] Error: {ex.Message}");
                             }
                         }
                     }
@@ -492,7 +492,7 @@ namespace NATTunnel
 
                             foreach (var peer in inactivePeers)
                             {
-                                Console.WriteLine($"[Health] Removing inactive peer {peer.PrivateAddress} (last activity: {(now - peer.LastActivity).TotalSeconds:F0}s ago)");
+                                Program.Log($"[Health] Removing inactive peer {peer.PrivateAddress} (last activity: {(now - peer.LastActivity).TotalSeconds:F0}s ago)");
 
                                 // Remove from WireGuard
                                 try
@@ -510,7 +510,7 @@ namespace NATTunnel
                                 }
                                 catch (Exception ex)
                                 {
-                                    Console.WriteLine($"[Health] Error removing peer from WireGuard: {ex.Message}");
+                                    Program.Log($"[Health] Error removing peer from WireGuard: {ex.Message}");
                                 }
 
                                 // Remove from proxy
@@ -528,7 +528,7 @@ namespace NATTunnel
                 Task.Run(async () =>
                 {
                     await Task.Delay(3000); // Wait 3 seconds for everything to settle
-                    Console.WriteLine("\n[Status Check] Verifying WireGuard interface connectivity...");
+                    Program.Log("\n[Status Check] Verifying WireGuard interface connectivity...");
                     var psi = new System.Diagnostics.ProcessStartInfo
                     {
                         FileName = "netsh",
@@ -545,7 +545,7 @@ namespace NATTunnel
                     {
                         if (line.Contains(interfaceName))
                         {
-                            Console.WriteLine($"[Status Check] Interface: {line.Trim()}");
+                            Program.Log($"[Status Check] Interface: {line.Trim()}");
                         }
                     }
 
@@ -561,18 +561,18 @@ namespace NATTunnel
                     using var wgProc = System.Diagnostics.Process.Start(wgPsi);
                     var wgOutput = wgProc.StandardOutput.ReadToEnd();
                     wgProc.WaitForExit();
-                    Console.WriteLine($"[Status Check] WireGuard status:\n{wgOutput}");
+                    Program.Log($"[Status Check] WireGuard status:\n{wgOutput}");
                 });
 
                 tunnelStarted = true;
-                Console.WriteLine("   WireGuard-NT tunnel initialized successfully");
-                Console.WriteLine("   All WireGuard crypto is handled by the kernel driver");
-                Console.WriteLine("   UDP proxy bridges WireGuard (localhost:51820) with NAT-traversed peers");
+                Program.Log("   WireGuard-NT tunnel initialized successfully");
+                Program.Log("   All WireGuard crypto is handled by the kernel driver");
+                Program.Log("   UDP proxy bridges WireGuard (localhost:51820) with NAT-traversed peers");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error bringing up WireGuard interface: {ex.Message}");
-                Console.WriteLine($"Stack trace: {ex.StackTrace}");
+                Program.Log($"Error bringing up WireGuard interface: {ex.Message}");
+                Program.Log($"Stack trace: {ex.StackTrace}");
                 throw;
             }
         }
@@ -584,7 +584,7 @@ namespace NATTunnel
         {
             try
             {
-                Console.WriteLine($"Configuring WireGuard interface using wg.exe...");
+                Program.Log($"Configuring WireGuard interface using wg.exe...");
 
                 // Create a temporary config file with only WireGuard-native fields
                 // wg.exe doesn't understand Address, Name, etc. - those are wg-quick extensions
@@ -637,7 +637,7 @@ namespace NATTunnel
                     }
 
                     File.WriteAllLines(tempConfigPath, wgLines);
-                    Console.WriteLine($"Created temporary WireGuard config: {tempConfigPath}");
+                    Program.Log($"Created temporary WireGuard config: {tempConfigPath}");
 
                     // Use wg.exe to configure the interface
                     var psi = new System.Diagnostics.ProcessStartInfo
@@ -658,17 +658,17 @@ namespace NATTunnel
 
                         if (process.ExitCode != 0)
                         {
-                            Console.WriteLine($"wg.exe error output: {error}");
+                            Program.Log($"wg.exe error output: {error}");
                             throw new Exception($"Failed to configure WireGuard interface (wg.exe exit code: {process.ExitCode})");
                         }
 
                         if (!string.IsNullOrWhiteSpace(output))
                         {
-                            Console.WriteLine($"wg.exe output: {output}");
+                            Program.Log($"wg.exe output: {output}");
                         }
                     }
 
-                    Console.WriteLine("WireGuard interface configured successfully");
+                    Program.Log("WireGuard interface configured successfully");
                 }
                 finally
                 {
@@ -681,7 +681,7 @@ namespace NATTunnel
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error configuring WireGuard-NT: {ex.Message}");
+                Program.Log($"Error configuring WireGuard-NT: {ex.Message}");
                 throw;
             }
         }
@@ -744,7 +744,7 @@ namespace NATTunnel
                         throw new Exception($"Failed to set WireGuard-NT configuration (Error: {error})");
                     }
 
-                    Console.WriteLine("WireGuard-NT interface configured");
+                    Program.Log("WireGuard-NT interface configured");
                 }
                 finally
                 {
@@ -753,7 +753,7 @@ namespace NATTunnel
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error configuring WireGuard-NT: {ex.Message}");
+                Program.Log($"Error configuring WireGuard-NT: {ex.Message}");
                 throw;
             }
         }
@@ -822,7 +822,7 @@ namespace NATTunnel
         public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, bool isPersistent, UdpClient tunnelSocket)
         {
             var peer = peerManager.AddPeer(publicKey, endpoint, isPersistent);
-            Console.WriteLine($"Added peer dynamically: {publicKey.Substring(0, 8)}... -> {peer.PrivateAddress} (proxy port: {peer.ProxyPort}, total peers: {peerManager.GetPeerCount()})");
+            Program.Log($"Added peer dynamically: {publicKey.Substring(0, 8)}... -> {peer.PrivateAddress} (proxy port: {peer.ProxyPort}, total peers: {peerManager.GetPeerCount()})");
 
             // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support
             // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture)
@@ -832,7 +832,7 @@ namespace NATTunnel
             }
             else
             {
-                Console.WriteLine($"udpProxy is null — cannot register peer {peer.PrivateAddress} with proxy");
+                Program.Log($"udpProxy is null — cannot register peer {peer.PrivateAddress} with proxy");
             }
 
             // Update config file for persistence (used on restart)
@@ -851,7 +851,7 @@ namespace NATTunnel
             }
             else
             {
-                Console.WriteLine($"Skipped WireGuard config update: tunnelStarted={tunnelStarted}");
+                Program.Log($"Skipped WireGuard config update: tunnelStarted={tunnelStarted}");
             }
 
             return peer;
@@ -901,7 +901,7 @@ namespace NATTunnel
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error regenerating config: {ex.Message}");
+                Program.Log($"Error regenerating config: {ex.Message}");
             }
         }
 
@@ -913,7 +913,7 @@ namespace NATTunnel
         public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, bool isPersistent, UdpClient tunnelSocket)
         {
             var peer = peerManager.AddPeer(publicKey, endpoint, privateAddress, isPersistent);
-            Console.WriteLine($"Added peer dynamically: {publicKey.Substring(0, 8)}... -> {privateAddress} (proxy port: {peer.ProxyPort}, total peers: {peerManager.GetPeerCount()})");
+            Program.Log($"Added peer dynamically: {publicKey.Substring(0, 8)}... -> {privateAddress} (proxy port: {peer.ProxyPort}, total peers: {peerManager.GetPeerCount()})");
 
             // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support
             // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture)
@@ -923,7 +923,7 @@ namespace NATTunnel
             }
             else
             {
-                Console.WriteLine($"udpProxy is null — cannot register peer {peer.PrivateAddress} with proxy");
+                Program.Log($"udpProxy is null — cannot register peer {peer.PrivateAddress} with proxy");
             }
 
             // Update config file for persistence (used on restart)
@@ -942,7 +942,7 @@ namespace NATTunnel
             }
             else
             {
-                Console.WriteLine($"Skipped WireGuard config update: tunnelStarted={tunnelStarted}");
+                Program.Log($"Skipped WireGuard config update: tunnelStarted={tunnelStarted}");
             }
 
             return peer;
@@ -958,14 +958,14 @@ namespace NATTunnel
             var gatewayPeer = peerManager.GetPeer(gatewayPeerIP);
             if (gatewayPeer == null)
             {
-                Console.WriteLine($"[WireGuard] Cannot add relay route: no peer found for gateway {gatewayPeerIP}");
+                Program.Log($"[WireGuard] Cannot add relay route: no peer found for gateway {gatewayPeerIP}");
                 return false;
             }
 
             // If a relay route already exists for this IP via a different gateway, remove the old one first
             if (relayRoutes.TryGetValue(relayedPeerIP, out var oldGateway) && !oldGateway.Equals(gatewayPeerIP))
             {
-                Console.WriteLine($"[WireGuard] Migrating relay route for {relayedPeerIP}: {oldGateway} -> {gatewayPeerIP}");
+                Program.Log($"[WireGuard] Migrating relay route for {relayedPeerIP}: {oldGateway} -> {gatewayPeerIP}");
                 var oldGatewayPeer = peerManager.GetPeer(oldGateway);
                 if (oldGatewayPeer != null)
                 {
@@ -977,7 +977,7 @@ namespace NATTunnel
 
             gatewayPeer.AddAllowedIP(relayedPeerIP);
             relayRoutes[relayedPeerIP] = gatewayPeerIP;
-            Console.WriteLine($"[WireGuard] Added relay route: {relayedPeerIP}/32 via {gatewayPeerIP} (peer {gatewayPeer.PublicKey.Substring(0, 8)}...)");
+            Program.Log($"[WireGuard] Added relay route: {relayedPeerIP}/32 via {gatewayPeerIP} (peer {gatewayPeer.PublicKey.Substring(0, 8)}...)");
 
             // Apply the updated AllowedIPs to the running interface
             if (tunnelStarted)
@@ -1025,7 +1025,7 @@ namespace NATTunnel
             if (gatewayPeer != null)
             {
                 gatewayPeer.ResetAllowedIPs();
-                Console.WriteLine($"[WireGuard] Removed {removed.Count} relay route(s) via {gatewayPeerIP}, reset AllowedIPs to {gatewayPeer.AllowedIPs}");
+                Program.Log($"[WireGuard] Removed {removed.Count} relay route(s) via {gatewayPeerIP}, reset AllowedIPs to {gatewayPeer.AllowedIPs}");
 
                 // Apply to running interface
                 if (tunnelStarted)
@@ -1058,7 +1058,7 @@ namespace NATTunnel
             if (gatewayPeer != null)
             {
                 gatewayPeer.ResetAllowedIPs();
-                Console.WriteLine($"[WireGuard] Removed relay route for {relayedPeerIP} (was via {gatewayPeerIP})");
+                Program.Log($"[WireGuard] Removed relay route for {relayedPeerIP} (was via {gatewayPeerIP})");
 
                 if (tunnelStarted)
                 {
@@ -1087,7 +1087,7 @@ namespace NATTunnel
             var peer = peerManager.GetPeer(connectionId);
             if (peer != null)
             {
-                Console.WriteLine($"Removed peer: {peer.PublicKey.Substring(0, 8)}...");
+                Program.Log($"Removed peer: {peer.PublicKey.Substring(0, 8)}...");
             }
             peerManager.RemovePeer(connectionId);
 
@@ -1121,20 +1121,20 @@ namespace NATTunnel
                     process.WaitForExit();
                     if (process.ExitCode == 0)
                     {
-                        Console.WriteLine($"[WireGuard] IP forwarding enabled on {interfaceName}");
+                        Program.Log($"[WireGuard] IP forwarding enabled on {interfaceName}");
                         return true;
                     }
                     else
                     {
                         string error = process.StandardError.ReadToEnd();
-                        Console.WriteLine($"[WireGuard] Failed to enable forwarding on {interfaceName}: {error}");
+                        Program.Log($"[WireGuard] Failed to enable forwarding on {interfaceName}: {error}");
                         return false;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[WireGuard] Error enabling forwarding: {ex.Message}");
+                Program.Log($"[WireGuard] Error enabling forwarding: {ex.Message}");
                 return false;
             }
         }
@@ -1167,14 +1167,14 @@ namespace NATTunnel
         {
             try
             {
-                Console.WriteLine($"Client updating tunnel configuration with IP: {assignedIpAddress}/{prefixLength}");
+                Program.Log($"Client updating tunnel configuration with IP: {assignedIpAddress}/{prefixLength}");
 
                 // Store the assigned IP and prefix length for config generation
                 clientAssignedIP = assignedIpAddress;
                 clientPrefixLength = prefixLength;
 
                 // CRITICAL: First, list and remove ALL existing IP addresses from the interface
-                Console.WriteLine($"Checking existing IP addresses on interface {interfaceName}...");
+                Program.Log($"Checking existing IP addresses on interface {interfaceName}...");
                 try
                 {
                     // First, show what IPs exist
@@ -1193,16 +1193,16 @@ namespace NATTunnel
                         {
                             var existingIPs = listProc.StandardOutput.ReadToEnd();
                             listProc.WaitForExit();
-                            Console.WriteLine($"Existing IPs on {interfaceName}: {existingIPs.Trim()}");
+                            Program.Log($"Existing IPs on {interfaceName}: {existingIPs.Trim()}");
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Could not list IPs: {ex.Message}");
+                    Program.Log($"Could not list IPs: {ex.Message}");
                 }
 
-                Console.WriteLine($"Removing all existing IP addresses from interface {interfaceName}...");
+                Program.Log($"Removing all existing IP addresses from interface {interfaceName}...");
                 try
                 {
                     // Remove all IPs using PowerShell cmdlet
@@ -1223,9 +1223,9 @@ namespace NATTunnel
                             var output = deleteProc.StandardOutput.ReadToEnd();
                             var error = deleteProc.StandardError.ReadToEnd();
                             deleteProc.WaitForExit();
-                            Console.WriteLine($"PowerShell IP removal completed (exit code: {deleteProc.ExitCode})");
-                            if (!string.IsNullOrWhiteSpace(output)) Console.WriteLine($"Output: {output}");
-                            if (!string.IsNullOrWhiteSpace(error)) Console.WriteLine($"Error: {error}");
+                            Program.Log($"PowerShell IP removal completed (exit code: {deleteProc.ExitCode})");
+                            if (!string.IsNullOrWhiteSpace(output)) Program.Log($"Output: {output}");
+                            if (!string.IsNullOrWhiteSpace(error)) Program.Log($"Error: {error}");
                         }
                     }
 
@@ -1233,25 +1233,25 @@ namespace NATTunnel
                 }
                 catch (Exception cleanupEx)
                 {
-                    Console.WriteLine($"Warning: Could not cleanup old IPs via PowerShell: {cleanupEx.Message}");
+                    Program.Log($"Warning: Could not cleanup old IPs via PowerShell: {cleanupEx.Message}");
                 }
 
                 // Update the interface IP via netsh (don't regenerate keys!)
-                Console.WriteLine($"Updating interface IP via netsh...");
+                Program.Log($"Updating interface IP via netsh...");
                 WireGuardAPI.AssignIPAddress(wireguardAdapter, interfaceName, assignedIpAddress, prefixLength);
 
                 // Update the config file to reflect the new IP (keep existing keys and peers)
                 RegenerateConfigWithPeers();
 
                 // Force WireGuard-NT to reload config
-                Console.WriteLine($"Reloading WireGuard-NT configuration...");
+                Program.Log($"Reloading WireGuard-NT configuration...");
                 WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
 
-                Console.WriteLine($"Client tunnel updated with IP {assignedIpAddress}/{prefixLength}");
+                Program.Log($"Client tunnel updated with IP {assignedIpAddress}/{prefixLength}");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error updating tunnel: {ex.Message}");
+                Program.Log($"Error updating tunnel: {ex.Message}");
                 throw;
             }
         }
@@ -1267,7 +1267,7 @@ namespace NATTunnel
                         // Stop UDP proxy first
                         if (udpProxy != null)
                         {
-                            Console.WriteLine("Stopping UDP proxy...");
+                            Program.Log("Stopping UDP proxy...");
                             udpProxy.Dispose();
                             udpProxy = null;
                         }
@@ -1275,7 +1275,7 @@ namespace NATTunnel
                         // Stop packet processing loop (if active)
                         if (packetLoopCancellation != null)
                         {
-                            Console.WriteLine("Cancelling packet loop...");
+                            Program.Log("Cancelling packet loop...");
                             packetLoopCancellation.Cancel();
                             packetLoopCancellation.Dispose();
                             packetLoopCancellation = null;
@@ -1287,16 +1287,16 @@ namespace NATTunnel
                             // Uninstall the service
                             WireGuardService.UninstallService(interfaceName);
                             tunnelStarted = false;
-                            Console.WriteLine("WireGuard service uninstalled");
+                            Program.Log("WireGuard service uninstalled");
                         }
 
                         // DON'T delete config file - keep it for reconnection
                         // The config will be reused or regenerated on next startup
-                        Console.WriteLine("Config file preserved for reconnection");
+                        Program.Log("Config file preserved for reconnection");
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Warning: Error during cleanup: {ex.Message}");
+                        Program.Log($"Warning: Error during cleanup: {ex.Message}");
                     }
                 }
 
@@ -1310,7 +1310,7 @@ namespace NATTunnel
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"Warning: Error closing WireGuard adapter: {ex.Message}");
+                        Program.Log($"Warning: Error closing WireGuard adapter: {ex.Message}");
                     }
                 }
 
@@ -1323,7 +1323,7 @@ namespace NATTunnel
         /// </summary>
         private void HandleConnectionFailure()
         {
-            Console.WriteLine("[WireGuardTunnel] Connection failure detected, recreating tunnel instance...");
+            Program.Log("[WireGuardTunnel] Connection failure detected, recreating tunnel instance...");
 
             // Dispose old tunnel
             tunnel = null; // Let GC handle cleanup
@@ -1342,7 +1342,7 @@ namespace NATTunnel
                 udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
             }
 
-            Console.WriteLine("[WireGuardTunnel] Tunnel instance recreated successfully");
+            Program.Log("[WireGuardTunnel] Tunnel instance recreated successfully");
         }
 
         public void Dispose()

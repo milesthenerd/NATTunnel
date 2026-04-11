@@ -87,7 +87,7 @@ public partial class MainWindow : Window
 
             // Update sidebar
             MeshIPText.Text = state.OwnMeshIP ?? "-";
-            PeerIDText.Text = TruncateGuid(state.OwnPeerID);
+            PeerIDText.Text = state.OwnPeerID ?? "-";
             NATTypeText.Text = state.NATType ?? "-";
             RoleText.Text = state.IsIntroducer ? "Introducer" : "Peer";
             UptimeText.Text = FormatUptime(state.UptimeSeconds);
@@ -117,6 +117,7 @@ public partial class MainWindow : Window
                     peerItems.Add(new PeerDisplayItem
                     {
                         MeshIP = peer.MeshIP ?? "-",
+                        PeerID = peer.PeerID ?? "-",
                         PeerIDShort = TruncateGuid(peer.PeerID),
                         NATType = peer.NATType ?? "-",
                         Endpoint = peer.Endpoint ?? "-",
@@ -159,6 +160,20 @@ public partial class MainWindow : Window
         settingsWindow.ShowDialog();
     }
 
+    private async void Stop_Click(object sender, RoutedEventArgs e)
+    {
+        StopButton.IsEnabled = false;
+        ConnectButton.IsEnabled = false;
+        SettingsButton.IsEnabled = false;
+        StatusText.Text = "Stopping...";
+        try
+        {
+            await httpClient.PostAsync("http://localhost:51889/shutdown", null);
+        }
+        catch { }
+        Close();
+    }
+
     private static string TruncateGuid(string guid)
     {
         if (string.IsNullOrEmpty(guid)) return "-";
@@ -175,6 +190,9 @@ public partial class MainWindow : Window
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
         pollTimer.Stop();
+        // Signal engine to shut down before the window closes.
+        // App.OnExit will wait up to 3s for graceful cleanup.
+        try { httpClient.PostAsync("http://localhost:51889/shutdown", null).Wait(500); } catch { }
         httpClient.Dispose();
         base.OnClosing(e);
     }
@@ -186,6 +204,7 @@ public partial class MainWindow : Window
 public class PeerDisplayItem
 {
     public string MeshIP { get; set; }
+    public string PeerID { get; set; }
     public string PeerIDShort { get; set; }
     public string NATType { get; set; }
     public string Endpoint { get; set; }

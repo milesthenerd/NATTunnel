@@ -240,19 +240,19 @@ public static class WireGuardAPI
     {
         try
         {
-            Console.WriteLine($"Creating WireGuard-NT adapter: {interfaceName}");
+            Program.Log($"Creating WireGuard-NT adapter: {interfaceName}");
 
             // Try to open existing WireGuard-NT adapter first
             IntPtr adapter = WireGuardNTAPI.WireGuardOpenAdapter(interfaceName);
 
             if (adapter != IntPtr.Zero)
             {
-                Console.WriteLine($"Opened existing WireGuard-NT adapter at: {adapter}");
+                Program.Log($"Opened existing WireGuard-NT adapter at: {adapter}");
                 return adapter;
             }
 
             int error = Marshal.GetLastWin32Error();
-            Console.WriteLine($"WireGuard-NT adapter not found (Error: {error}), creating new adapter...");
+            Program.Log($"WireGuard-NT adapter not found (Error: {error}), creating new adapter...");
 
             // Create a new WireGuard-NT adapter
             // Generate a deterministic GUID based on the interface name
@@ -266,20 +266,20 @@ public static class WireGuardAPI
                     $"Make sure wireguard.dll is installed alongside the application.");
             }
 
-            Console.WriteLine($"Created WireGuard-NT adapter at: {adapter}");
+            Program.Log($"Created WireGuard-NT adapter at: {adapter}");
 
             // Check driver version
             uint version = WireGuardNTAPI.WireGuardGetRunningDriverVersion();
             if (version > 0)
             {
-                Console.WriteLine($"WireGuard-NT driver version: {version}");
+                Program.Log($"WireGuard-NT driver version: {version}");
             }
 
             return adapter;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error in CreateAdapter: {ex.Message}");
+            Program.Log($"Error in CreateAdapter: {ex.Message}");
             throw;
         }
     }
@@ -293,7 +293,7 @@ public static class WireGuardAPI
     {
         try
         {
-            Console.WriteLine($"Configuring Wintun adapter with listen port: {listenPort}");
+            Program.Log($"Configuring Wintun adapter with listen port: {listenPort}");
 
             // Try to configure using WireGuard API
             // Note: This may fail with Wintun adapters as they're managed differently
@@ -315,18 +315,18 @@ public static class WireGuardAPI
             // Try to configure via WireGuard API (may not work with Wintun)
             if (WireGuardSetConfiguration(adapter, ref device))
             {
-                Console.WriteLine("Adapter configured via WireGuard API successfully");
+                Program.Log("Adapter configured via WireGuard API successfully");
             }
             else
             {
                 int error = Marshal.GetLastWin32Error();
-                Console.WriteLine($"WireGuard configuration failed (Error: {error}). This is expected for Wintun adapters.");
-                Console.WriteLine("Configuration will be handled via WireGuard config file instead.");
+                Program.Log($"WireGuard configuration failed (Error: {error}). This is expected for Wintun adapters.");
+                Program.Log("Configuration will be handled via WireGuard config file instead.");
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Configuration error (non-fatal): {ex.Message}");
+            Program.Log($"Configuration error (non-fatal): {ex.Message}");
             // Don't throw - configuration can be handled other ways
         }
     }
@@ -388,7 +388,7 @@ public static class WireGuardAPI
             var networkAddr = GetNetworkAddress(ipAddress, prefixLength);
             var subnetMask = GetSubnetMask(prefixLength);
 
-            Console.WriteLine($"Adding route: {networkAddr} mask {subnetMask} via interface {interfaceName}...");
+            Program.Log($"Adding route: {networkAddr} mask {subnetMask} via interface {interfaceName}...");
 
             // Try to get the interface index for the route command
             string interfaceSpec = $"IF \"{interfaceName}\"";
@@ -414,7 +414,7 @@ public static class WireGuardAPI
                     if (!string.IsNullOrEmpty(indexOutput) && int.TryParse(indexOutput, out int ifIndex))
                     {
                         interfaceSpec = $"IF {ifIndex}";
-                        Console.WriteLine($"Using interface index: {ifIndex}");
+                        Program.Log($"Using interface index: {ifIndex}");
                     }
                 }
             }
@@ -439,19 +439,19 @@ public static class WireGuardAPI
                 proc.WaitForExit(5000);
                 if (proc.ExitCode == 0)
                 {
-                    Console.WriteLine($"Successfully added route");
+                    Program.Log($"Successfully added route");
                     // Give system time to process route and transition address state
                     System.Threading.Thread.Sleep(3000);
                 }
                 else
                 {
-                    Console.WriteLine($"Route addition returned code: {proc.ExitCode}");
+                    Program.Log($"Route addition returned code: {proc.ExitCode}");
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Failed to add route: {ex.Message}");
+            Program.Log($"Failed to add route: {ex.Message}");
         }
     }
 
@@ -462,7 +462,7 @@ public static class WireGuardAPI
     {
         try
         {
-            Console.WriteLine("Attempting to extract interface LUID...");
+            Program.Log("Attempting to extract interface LUID...");
 
             ulong interfaceLuid = 0;
 
@@ -472,11 +472,11 @@ public static class WireGuardAPI
                 WireGuardNTAPI.WireGuardGetAdapterLUID(adapter, out interfaceLuid);
                 if (interfaceLuid != 0)
                 {
-                    Console.WriteLine($"Got LUID from WireGuard adapter: {interfaceLuid}");
+                    Program.Log($"Got LUID from WireGuard adapter: {interfaceLuid}");
                 }
                 else
                 {
-                    Console.WriteLine("WireGuardGetAdapterLUID returned 0, trying NetworkInterface enumeration...");
+                    Program.Log("WireGuardGetAdapterLUID returned 0, trying NetworkInterface enumeration...");
 
                     // Fallback: Try to find the interface by name through NetworkInterface
                     var ni = NetworkInterface.GetAllNetworkInterfaces()
@@ -497,7 +497,7 @@ public static class WireGuardAPI
                             if (luidObj is ulong luidValue && luidValue != 0)
                             {
                                 interfaceLuid = luidValue;
-                                Console.WriteLine($"Extracted LUID via reflection: {interfaceLuid}");
+                                Program.Log($"Extracted LUID via reflection: {interfaceLuid}");
                             }
                         }
                     }
@@ -505,27 +505,27 @@ public static class WireGuardAPI
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to get LUID from WireGuard adapter: {ex.Message}");
+                Program.Log($"Failed to get LUID from WireGuard adapter: {ex.Message}");
             }
 
             if (interfaceLuid == 0)
             {
-                Console.WriteLine("Could not obtain interface LUID");
+                Program.Log("Could not obtain interface LUID");
                 return false;
             }
 
             // Now add the IP address using IPHLPAPI
-            Console.WriteLine("Adding IP address via CreateUnicastIpAddressEntry...");
+            Program.Log("Adding IP address via CreateUnicastIpAddressEntry...");
 
             // First, try to delete any existing IP addresses on this interface
-            Console.WriteLine("Cleaning up any existing IP addresses on the interface...");
+            Program.Log("Cleaning up any existing IP addresses on the interface...");
             try
             {
                 DeleteExistingIPAddresses(interfaceLuid);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Warning: Failed to clean up existing IPs: {ex.Message}");
+                Program.Log($"Warning: Failed to clean up existing IPs: {ex.Message}");
                 // Continue anyway - the new IP assignment might overwrite
             }
 
@@ -552,18 +552,18 @@ public static class WireGuardAPI
 
             if (result == 0)
             {
-                Console.WriteLine("Successfully created IP address entry via IPHLPAPI");
+                Program.Log("Successfully created IP address entry via IPHLPAPI");
                 return true;
             }
             else
             {
-                Console.WriteLine($"CreateUnicastIpAddressEntry failed with error: {result}");
+                Program.Log($"CreateUnicastIpAddressEntry failed with error: {result}");
                 return false;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"IPHLPAPI IP assignment exception: {ex.Message}");
+            Program.Log($"IPHLPAPI IP assignment exception: {ex.Message}");
             return false;
         }
     }
@@ -580,7 +580,7 @@ public static class WireGuardAPI
 
             if (result != 0)
             {
-                Console.WriteLine($"GetUnicastIpAddressTable failed with error: {result}");
+                Program.Log($"GetUnicastIpAddressTable failed with error: {result}");
                 return;
             }
 
@@ -605,11 +605,11 @@ public static class WireGuardAPI
                         if (deleteResult == 0)
                         {
                             var ipAddr = $"{row.Address_Ipv4[0]}.{row.Address_Ipv4[1]}.{row.Address_Ipv4[2]}.{row.Address_Ipv4[3]}";
-                            Console.WriteLine($"Deleted existing IP: {ipAddr}");
+                            Program.Log($"Deleted existing IP: {ipAddr}");
                         }
                         else
                         {
-                            Console.WriteLine($"Failed to delete IP, error: {deleteResult}");
+                            Program.Log($"Failed to delete IP, error: {deleteResult}");
                         }
                     }
                 }
@@ -624,7 +624,7 @@ public static class WireGuardAPI
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Exception while deleting existing IPs: {ex.Message}");
+            Program.Log($"Exception while deleting existing IPs: {ex.Message}");
         }
     }
 
@@ -642,35 +642,35 @@ public static class WireGuardAPI
     {
         try
         {
-            Console.WriteLine($"Assigning IP address {ipAddress}/{prefixLength} to interface {interfaceName}");
+            Program.Log($"Assigning IP address {ipAddress}/{prefixLength} to interface {interfaceName}");
 
             // Wait a moment for the interface to be fully registered in the system
             System.Threading.Thread.Sleep(3000);
 
             // For Wintun TUN interfaces, try IPHLPAPI first (most reliable for TUN devices)
-            Console.WriteLine("Attempting IPHLPAPI-based IP assignment (primary method for Wintun TUN)...");
+            Program.Log("Attempting IPHLPAPI-based IP assignment (primary method for Wintun TUN)...");
 
             if (AssignIPViaIPHLPAPI(adapter, interfaceName, ipAddress, prefixLength))
             {
-                Console.WriteLine($"Successfully assigned IP {ipAddress}/{prefixLength} via IPHLPAPI");
+                Program.Log($"Successfully assigned IP {ipAddress}/{prefixLength} via IPHLPAPI");
                 System.Threading.Thread.Sleep(2000);  // Give system time to stabilize
 
                 // Now add a route to ensure the interface is active
                 var ipAddr = ipAddress.Split('/')[0];
-                Console.WriteLine($"Adding route for subnet {GetNetworkAddress(ipAddr, prefixLength)}/{prefixLength}...");
+                Program.Log($"Adding route for subnet {GetNetworkAddress(ipAddr, prefixLength)}/{prefixLength}...");
                 AddSubnetRoute(interfaceName, ipAddr, prefixLength);
 
                 return;
             }
             else
             {
-                Console.WriteLine("IPHLPAPI IP assignment failed, trying fallback methods...");
+                Program.Log("IPHLPAPI IP assignment failed, trying fallback methods...");
             }
 
             // Fallback: Try PowerShell
             try
             {
-                Console.WriteLine($"Configuring IP via PowerShell (fallback)...");
+                Program.Log($"Configuring IP via PowerShell (fallback)...");
 
                 var ipAddr = ipAddress.Split('/')[0];
                 var psi = new System.Diagnostics.ProcessStartInfo
@@ -689,40 +689,40 @@ public static class WireGuardAPI
                 using (var proc = System.Diagnostics.Process.Start(psi))
                 {
                     proc.WaitForExit(10000);
-                    Console.WriteLine($"PowerShell exit code: {proc.ExitCode}");
+                    Program.Log($"PowerShell exit code: {proc.ExitCode}");
 
                     if (proc.ExitCode == 0)
                     {
-                        Console.WriteLine($"Successfully assigned IP {ipAddress}/{prefixLength} via PowerShell");
+                        Program.Log($"Successfully assigned IP {ipAddress}/{prefixLength} via PowerShell");
                         System.Threading.Thread.Sleep(2000);  // Give system time to stabilize
 
                         // Now add a route to ensure the interface is active
-                        Console.WriteLine($"Adding route for subnet {GetNetworkAddress(ipAddress.Split('/')[0], prefixLength)}/{prefixLength}...");
+                        Program.Log($"Adding route for subnet {GetNetworkAddress(ipAddress.Split('/')[0], prefixLength)}/{prefixLength}...");
                         AddSubnetRoute(interfaceName, ipAddress.Split('/')[0], prefixLength);
 
                         return;
                     }
                     else
                     {
-                        Console.WriteLine($"PowerShell IP assignment failed with exit code {proc.ExitCode}");
+                        Program.Log($"PowerShell IP assignment failed with exit code {proc.ExitCode}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"PowerShell approach failed: {ex.Message}");
+                Program.Log($"PowerShell approach failed: {ex.Message}");
             }
 
             // Fallback: Try netsh if PowerShell fails
             try
             {
-                Console.WriteLine($"Configuring IP via netsh (fallback)...");
+                Program.Log($"Configuring IP via netsh (fallback)...");
 
                 var ipAddr = ipAddress.Split('/')[0];
                 var subnetMask = GetSubnetMask(prefixLength);
 
                 // First, remove all existing addresses from the interface
-                Console.WriteLine($"Removing existing addresses from interface {interfaceName}...");
+                Program.Log($"Removing existing addresses from interface {interfaceName}...");
                 var deleteAllPsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "netsh",
@@ -735,7 +735,7 @@ public static class WireGuardAPI
                 using (var deleteProc = System.Diagnostics.Process.Start(deleteAllPsi))
                 {
                     deleteProc.WaitForExit(5000);
-                    Console.WriteLine($"netsh delete exit code: {deleteProc.ExitCode}");
+                    Program.Log($"netsh delete exit code: {deleteProc.ExitCode}");
                 }
 
                 System.Threading.Thread.Sleep(500);  // Brief wait after deletion
@@ -753,40 +753,40 @@ public static class WireGuardAPI
                 using (var proc = System.Diagnostics.Process.Start(psi))
                 {
                     proc.WaitForExit(5000);
-                    Console.WriteLine($"netsh exit code: {proc.ExitCode}");
+                    Program.Log($"netsh exit code: {proc.ExitCode}");
 
                     if (proc.ExitCode == 0 || proc.ExitCode == 5010)  // 5010 = address already exists
                     {
-                        Console.WriteLine($"Successfully assigned IP {ipAddress}/{prefixLength} via netsh");
+                        Program.Log($"Successfully assigned IP {ipAddress}/{prefixLength} via netsh");
                         System.Threading.Thread.Sleep(2000);  // Give system time to stabilize
 
                         // Now add a route to ensure the interface is active
-                        Console.WriteLine($"Adding route for subnet {GetNetworkAddress(ipAddr, prefixLength)}/{prefixLength}...");
+                        Program.Log($"Adding route for subnet {GetNetworkAddress(ipAddr, prefixLength)}/{prefixLength}...");
                         AddSubnetRoute(interfaceName, ipAddr, prefixLength);
 
                         return;
                     }
                     else
                     {
-                        Console.WriteLine($"netsh IP assignment returned code: {proc.ExitCode}");
+                        Program.Log($"netsh IP assignment returned code: {proc.ExitCode}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"netsh approach failed: {ex.Message}");
+                Program.Log($"netsh approach failed: {ex.Message}");
             }
 
             // Fallback to netsh if PowerShell fails
             try
             {
-                Console.WriteLine($"Configuring IP via netsh (fallback)...");
+                Program.Log($"Configuring IP via netsh (fallback)...");
 
                 var ipAddr = ipAddress.Split('/')[0];
                 var subnetMask = GetSubnetMask(prefixLength);
 
                 // First, remove all existing addresses from the interface
-                Console.WriteLine($"Removing existing addresses from interface {interfaceName}...");
+                Program.Log($"Removing existing addresses from interface {interfaceName}...");
                 var deleteAllPsi = new System.Diagnostics.ProcessStartInfo
                 {
                     FileName = "netsh",
@@ -801,7 +801,7 @@ public static class WireGuardAPI
                 using (var deleteProc = System.Diagnostics.Process.Start(deleteAllPsi))
                 {
                     deleteProc.WaitForExit(5000);
-                    Console.WriteLine($"netsh delete exit code: {deleteProc.ExitCode}");
+                    Program.Log($"netsh delete exit code: {deleteProc.ExitCode}");
                 }
 
                 System.Threading.Thread.Sleep(500);  // Brief wait after deletion
@@ -820,58 +820,58 @@ public static class WireGuardAPI
                 using (var proc = System.Diagnostics.Process.Start(psi))
                 {
                     proc.WaitForExit(5000);
-                    Console.WriteLine($"netsh exit code: {proc.ExitCode}");
+                    Program.Log($"netsh exit code: {proc.ExitCode}");
 
                     if (proc.ExitCode == 0 || proc.ExitCode == 5010)  // 5010 = address already exists
                     {
-                        Console.WriteLine($"Successfully assigned IP {ipAddress}/{prefixLength} via netsh");
+                        Program.Log($"Successfully assigned IP {ipAddress}/{prefixLength} via netsh");
                         System.Threading.Thread.Sleep(2000);
 
                         // Add route for the subnet
-                        Console.WriteLine($"Adding route for subnet {GetNetworkAddress(ipAddr, prefixLength)}/{prefixLength}...");
+                        Program.Log($"Adding route for subnet {GetNetworkAddress(ipAddr, prefixLength)}/{prefixLength}...");
                         AddSubnetRoute(interfaceName, ipAddr, prefixLength);
 
                         return;
                     }
                     else
                     {
-                        Console.WriteLine($"netsh IP assignment returned code: {proc.ExitCode}");
+                        Program.Log($"netsh IP assignment returned code: {proc.ExitCode}");
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"netsh approach failed: {ex.Message}");
+                Program.Log($"netsh approach failed: {ex.Message}");
             }
 
             // Fallback to IPHLPAPI method
-            Console.WriteLine("Attempting IPHLPAPI-based IP assignment as fallback...");
+            Program.Log("Attempting IPHLPAPI-based IP assignment as fallback...");
 
             ulong interfaceLuid = 0;
 
             // First, try to get LUID directly from the WireGuard adapter handle
             try
             {
-                Console.WriteLine("Attempting to get LUID from WireGuard adapter...");
+                Program.Log("Attempting to get LUID from WireGuard adapter...");
                 WireGuardNTAPI.WireGuardGetAdapterLUID(adapter, out interfaceLuid);
                 if (interfaceLuid != 0)
                 {
-                    Console.WriteLine($"Successfully got LUID from adapter: {interfaceLuid}");
+                    Program.Log($"Successfully got LUID from adapter: {interfaceLuid}");
                 }
                 else
                 {
-                    Console.WriteLine("WireGuardGetAdapterLUID returned 0, will try other methods");
+                    Program.Log("WireGuardGetAdapterLUID returned 0, will try other methods");
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"WireGuardGetAdapterLUID failed: {ex.Message}, will use other methods");
+                Program.Log($"WireGuardGetAdapterLUID failed: {ex.Message}, will use other methods");
             }
 
             // If we didn't get LUID from adapter, try using .NET's NetworkInterface to extract it via reflection
             if (interfaceLuid == 0)
             {
-                Console.WriteLine("Attempting to extract LUID from NetworkInterface object...");
+                Program.Log("Attempting to extract LUID from NetworkInterface object...");
                 int maxRetries = 5;
                 int retryCount = 0;
 
@@ -880,14 +880,14 @@ public static class WireGuardAPI
                     try
                     {
                         var allInterfaces = NetworkInterface.GetAllNetworkInterfaces();
-                        Console.WriteLine($"Found {allInterfaces.Length} network interfaces");
+                        Program.Log($"Found {allInterfaces.Length} network interfaces");
 
                         foreach (var ni in allInterfaces)
                         {
                             // Look for our interface - check both name and description
                             if (ni.Name.Contains(interfaceName) || ni.Description.Contains(interfaceName))
                             {
-                                Console.WriteLine($"Found matching interface: {ni.Name}");
+                                Program.Log($"Found matching interface: {ni.Name}");
 
                                 // Try to extract LUID using multiple methods
                                 bool luidFound = false;
@@ -895,7 +895,7 @@ public static class WireGuardAPI
                                 // Method 1: Try to get the interface GUID and convert via ConvertInterfaceGuidToLuid
                                 try
                                 {
-                                    Console.WriteLine($"  Attempting to get interface GUID...");
+                                    Program.Log($"  Attempting to get interface GUID...");
                                     var guidProp = ni.GetType().GetProperty("Id",
                                         System.Reflection.BindingFlags.Instance |
                                         System.Reflection.BindingFlags.Public);
@@ -905,23 +905,23 @@ public static class WireGuardAPI
                                         var guidObj = guidProp.GetValue(ni);
                                         if (guidObj is Guid interfaceGuid)
                                         {
-                                            Console.WriteLine($"  Found interface GUID: {interfaceGuid}");
+                                            Program.Log($"  Found interface GUID: {interfaceGuid}");
                                             uint result = ConvertInterfaceGuidToLuid(ref interfaceGuid, out interfaceLuid);
                                             if (result == 0 && interfaceLuid != 0)
                                             {
-                                                Console.WriteLine($"  Successfully converted GUID to LUID: {interfaceLuid}");
+                                                Program.Log($"  Successfully converted GUID to LUID: {interfaceLuid}");
                                                 luidFound = true;
                                             }
                                             else
                                             {
-                                                Console.WriteLine($"  ConvertInterfaceGuidToLuid failed (Error: {result})");
+                                                Program.Log($"  ConvertInterfaceGuidToLuid failed (Error: {result})");
                                             }
                                         }
                                     }
                                 }
                                 catch (Exception guidEx)
                                 {
-                                    Console.WriteLine($"  GUID extraction failed: {guidEx.Message}");
+                                    Program.Log($"  GUID extraction failed: {guidEx.Message}");
                                 }
 
                                 if (luidFound && interfaceLuid != 0)
@@ -942,21 +942,21 @@ public static class WireGuardAPI
 
                                         if (field != null)
                                         {
-                                            Console.WriteLine($"  Trying property: {propName}");
+                                            Program.Log($"  Trying property: {propName}");
                                             var luidObj = field.GetValue(ni);
                                             if (luidObj != null)
                                             {
                                                 if (luidObj is ulong luidValue && luidValue != 0)
                                                 {
                                                     interfaceLuid = luidValue;
-                                                    Console.WriteLine($"  Successfully extracted LUID via property '{propName}': {interfaceLuid}");
+                                                    Program.Log($"  Successfully extracted LUID via property '{propName}': {interfaceLuid}");
                                                     luidFound = true;
                                                     break;
                                                 }
                                                 else if (luidObj is long luidLong && luidLong != 0)
                                                 {
                                                     interfaceLuid = (ulong)luidLong;
-                                                    Console.WriteLine($"  Successfully extracted LUID via property '{propName}' (as long): {interfaceLuid}");
+                                                    Program.Log($"  Successfully extracted LUID via property '{propName}' (as long): {interfaceLuid}");
                                                     luidFound = true;
                                                     break;
                                                 }
@@ -966,24 +966,24 @@ public static class WireGuardAPI
                                 }
                                 catch (Exception reflEx)
                                 {
-                                    Console.WriteLine($"  Reflection attempt failed: {reflEx.Message}");
+                                    Program.Log($"  Reflection attempt failed: {reflEx.Message}");
                                 }
 
                                 if (luidFound && interfaceLuid != 0)
                                     break;
 
                                 // Method 3: Fallback to name-based conversion
-                                Console.WriteLine($"  Attempting ConvertInterfaceNameToLuidW for: {ni.Name}");
+                                Program.Log($"  Attempting ConvertInterfaceNameToLuidW for: {ni.Name}");
                                 uint nameResult = ConvertInterfaceNameToLuidW(ni.Name, out interfaceLuid);
                                 if (nameResult == 0 && interfaceLuid != 0)
                                 {
-                                    Console.WriteLine($"  Successfully got LUID from name: {interfaceLuid}");
+                                    Program.Log($"  Successfully got LUID from name: {interfaceLuid}");
                                     luidFound = true;
                                     break;
                                 }
                                 else
                                 {
-                                    Console.WriteLine($"  ConvertInterfaceNameToLuidW failed (Error: {nameResult})");
+                                    Program.Log($"  ConvertInterfaceNameToLuidW failed (Error: {nameResult})");
                                 }
                             }
                         }
@@ -994,14 +994,14 @@ public static class WireGuardAPI
                         retryCount++;
                         if (retryCount < maxRetries)
                         {
-                            Console.WriteLine($"LUID not obtained yet (attempt {retryCount}/{maxRetries}), retrying in 2s...");
+                            Program.Log($"LUID not obtained yet (attempt {retryCount}/{maxRetries}), retrying in 2s...");
                             System.Threading.Thread.Sleep(2000);
                         }
                     }
                     catch (Exception ex)
                     {
                         retryCount++;
-                        Console.WriteLine($"Error during interface extraction (attempt {retryCount}/{maxRetries}): {ex.Message}");
+                        Program.Log($"Error during interface extraction (attempt {retryCount}/{maxRetries}): {ex.Message}");
                         if (retryCount < maxRetries)
                             System.Threading.Thread.Sleep(2000);
                     }
@@ -1036,7 +1036,7 @@ public static class WireGuardAPI
                 // Error 5023 (MIB_E_INVALID_DATA) is expected if address already exists, which is OK
                 if (createResult == 5023)
                 {
-                    Console.WriteLine("IP address already assigned to interface");
+                    Program.Log("IP address already assigned to interface");
                 }
                 else
                 {
@@ -1044,11 +1044,11 @@ public static class WireGuardAPI
                 }
             }
 
-            Console.WriteLine($"IP address {ipAddress}/{prefixLength} assigned successfully");
+            Program.Log($"IP address {ipAddress}/{prefixLength} assigned successfully");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error assigning IP address: {ex.Message}");
+            Program.Log($"Error assigning IP address: {ex.Message}");
             throw;
         }
     }
@@ -1060,7 +1060,7 @@ public static class WireGuardAPI
     {
         if (adapter != IntPtr.Zero)
         {
-            Console.WriteLine("Closing WireGuard adapter");
+            Program.Log("Closing WireGuard adapter");
             WireGuardCloseAdapter(adapter);
         }
     }

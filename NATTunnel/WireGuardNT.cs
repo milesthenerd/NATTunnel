@@ -36,7 +36,7 @@ public static class WireGuardNT
             byte[] publicKeyBytes = Convert.FromBase64String(publicKey);
             if (publicKeyBytes.Length != 32)
             {
-                Console.WriteLine($"Invalid public key length: {publicKeyBytes.Length} (expected 32)");
+                Program.Log($"Invalid public key length: {publicKeyBytes.Length} (expected 32)");
                 return false;
             }
 
@@ -44,12 +44,12 @@ public static class WireGuardNT
             // WireGuard-NT can accept config via file or structured data
             // For now, we'll use the structured approach
 
-            Console.WriteLine($"Peer configured for WireGuard-NT");
+            Program.Log($"Peer configured for WireGuard-NT");
             return true;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error adding peer to WireGuard-NT: {ex.Message}");
+            Program.Log($"Error adding peer to WireGuard-NT: {ex.Message}");
             return false;
         }
     }
@@ -64,7 +64,7 @@ public static class WireGuardNT
         {
             if (!WireGuardPeer.IsValidPublicKey(peer.PublicKey))
             {
-                Console.WriteLine($"Rejected invalid public key");
+                Program.Log($"Rejected invalid public key");
                 return false;
             }
 
@@ -90,21 +90,21 @@ public static class WireGuardNT
 
                 if (process.ExitCode == 0)
                 {
-                    Console.WriteLine($"Peer {peer.PublicKey.Substring(0, 8)}... added to WireGuard via wg set (no session teardown)");
+                    Program.Log($"Peer {peer.PublicKey.Substring(0, 8)}... added to WireGuard via wg set (no session teardown)");
                     return true;
                 }
                 else
                 {
-                    Console.WriteLine($"wg set failed for peer {peer.PublicKey.Substring(0, 8)}... (exit code {process.ExitCode})");
+                    Program.Log($"wg set failed for peer {peer.PublicKey.Substring(0, 8)}... (exit code {process.ExitCode})");
                     if (!string.IsNullOrEmpty(error))
-                        Console.WriteLine($"  stderr: {error}");
+                        Program.Log($"  stderr: {error}");
                     return false;
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error adding peer via wg set: {ex.Message}");
+            Program.Log($"Error adding peer via wg set: {ex.Message}");
             return false;
         }
     }
@@ -119,7 +119,7 @@ public static class WireGuardNT
         {
             if (!System.IO.File.Exists(configPath))
             {
-                Console.WriteLine($"Config file not found: {configPath}");
+                Program.Log($"Config file not found: {configPath}");
                 return false;
             }
 
@@ -193,7 +193,7 @@ public static class WireGuardNT
 
                     if (process.ExitCode == 0)
                     {
-                        Console.WriteLine($"WireGuard-NT configuration updated successfully via wg.exe");
+                        Program.Log($"WireGuard-NT configuration updated successfully via wg.exe");
                         return true;
                     }
                     else
@@ -201,15 +201,15 @@ public static class WireGuardNT
                         // Check if the error is because the interface doesn't exist yet
                         if (error.Contains("No such file or directory") || error.Contains("does not exist"))
                         {
-                            Console.WriteLine($"? wg.exe setconf skipped - interface not found (may still be initializing)");
+                            Program.Log($"? wg.exe setconf skipped - interface not found (may still be initializing)");
                             return true;  // Return true since this is expected during initialization
                         }
 
-                        Console.WriteLine($"wg.exe setconf failed (exit code {process.ExitCode})");
+                        Program.Log($"wg.exe setconf failed (exit code {process.ExitCode})");
                         if (!string.IsNullOrEmpty(output))
-                            Console.WriteLine($"  stdout: {output}");
+                            Program.Log($"  stdout: {output}");
                         if (!string.IsNullOrEmpty(error))
-                            Console.WriteLine($"  stderr: {error}");
+                            Program.Log($"  stderr: {error}");
                         return false;
                     }
                 }
@@ -226,7 +226,7 @@ public static class WireGuardNT
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error updating WireGuard-NT configuration: {ex.Message}");
+            Program.Log($"Error updating WireGuard-NT configuration: {ex.Message}");
             return false;
         }
     }
@@ -304,18 +304,18 @@ public static class WireGuardNT
 
             if (string.IsNullOrEmpty(privateKeyB64))
             {
-                Console.WriteLine("No PrivateKey found in config");
+                Program.Log("No PrivateKey found in config");
                 return null;
             }
 
             // Build the structured configuration in memory
             // return BuildStructuredConfig(privateKeyB64, listenPort, peers);
-            Console.WriteLine($"[TODO] BuildStructuredConfig needs to be rewritten for fixed buffers");
+            Program.Log($"[TODO] BuildStructuredConfig needs to be rewritten for fixed buffers");
             return null;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error parsing config file: {ex.Message}");
+            Program.Log($"Error parsing config file: {ex.Message}");
             return null;
         }
     }
@@ -337,8 +337,8 @@ public static class WireGuardNT
     {
         // This is complex - for now, just log and return null
         // Full implementation would marshal all structures into contiguous memory
-        Console.WriteLine($"[TODO] Build structured config with {peers.Count} peers");
-        Console.WriteLine($"       This requires marshaling INTERFACE + PEER + ALLOWED_IP structures");
+        Program.Log($"[TODO] Build structured config with {peers.Count} peers");
+        Program.Log($"       This requires marshaling INTERFACE + PEER + ALLOWED_IP structures");
         
         // For now, return a simple interface-only configuration
         var iface = new WireGuardNTAPI.WIREGUARD_INTERFACE
@@ -381,7 +381,7 @@ public static class WireGuardNT
             if (configPtr == IntPtr.Zero || len == 0)
             {
                 int error = Marshal.GetLastWin32Error();
-                Console.WriteLine($"Failed to get WireGuard-NT configuration (Error: {error})");
+                Program.Log($"Failed to get WireGuard-NT configuration (Error: {error})");
                 return null;
             }
 
@@ -389,12 +389,12 @@ public static class WireGuardNT
             Marshal.Copy(configPtr, configBytes, 0, (int)len);
             string config = Encoding.UTF8.GetString(configBytes);
 
-            Console.WriteLine($"Retrieved WireGuard-NT configuration ({len} bytes)");
+            Program.Log($"Retrieved WireGuard-NT configuration ({len} bytes)");
             return config;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error getting WireGuard-NT configuration: {ex.Message}");
+            Program.Log($"Error getting WireGuard-NT configuration: {ex.Message}");
             return null;
         }
         finally
