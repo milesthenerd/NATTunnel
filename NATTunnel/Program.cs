@@ -396,6 +396,9 @@ public static class Program
             // Declared here (before outer loop) so background tasks (UDP dispatcher,
             // HTTP endpoint) keep valid closure references across disconnect/reconnect.
             // Cleared on disconnect rather than re-declared.
+            // Lock for collections accessed from both the main loop and tunnel callbacks
+            // (onConnectionComplete/onConnectionFailure fire on background threads).
+            var meshLock = new object();
             var activePeerTunnels = new Dictionary<string, Tunnel>();
             var pendingConnectionRequests = new Dictionary<string, DateTime>();
             var activeConnectionTunnels = new Dictionary<int, Tunnel>();
@@ -766,11 +769,14 @@ public static class Program
                     onConnectionFailure: () =>
                     {
                         Console.WriteLine($"[Mesh] Introducer-relayed tunnel for {capturedPeerID} failed — cleaning up for future retry");
-                        lock (activeConnectionTunnels) { activeConnectionTunnels.Remove(capturedPeerID.GetHashCode()); }
-                        pendingConnectionRequests.Remove(capturedPeerID);
-                        activePeerTunnels.Remove(capturedPeerID);
-                        if (!string.IsNullOrEmpty(capturedMeshIP))
-                            activePeerTunnels.Remove(capturedMeshIP);
+                        lock (meshLock)
+                        {
+                            activeConnectionTunnels.Remove(capturedPeerID.GetHashCode());
+                            pendingConnectionRequests.Remove(capturedPeerID);
+                            activePeerTunnels.Remove(capturedPeerID);
+                            if (!string.IsNullOrEmpty(capturedMeshIP))
+                                activePeerTunnels.Remove(capturedMeshIP);
+                        }
                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                         System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
                     },
@@ -783,38 +789,37 @@ public static class Program
                     {
                         Console.WriteLine($"[Mesh] Introducer-relayed tunnel for {capturedPeerID} WireGuard established");
                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
-                        pendingConnectionRequests.Remove(capturedPeerID);
                         System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
-                        if (!string.IsNullOrEmpty(capturedMeshIP))
+                        lock (meshLock)
                         {
-                            completedTunnelMeshIPs.Add(capturedMeshIP);
-
-                            // Flush deferred MeshConnectionBegin messages for this peer
-                            if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
+                            pendingConnectionRequests.Remove(capturedPeerID);
+                            if (!string.IsNullOrEmpty(capturedMeshIP))
                             {
-                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {capturedMeshIP}");
-                                foreach (var deferredMsg in deferred)
+                                completedTunnelMeshIPs.Add(capturedMeshIP);
+
+                                if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
                                 {
-                                    // Route to correct target: if IntroducerMeshIP is set, this message
-                                    // is meant for a different peer (e.g., notifying an existing peer about the new one)
-                                    string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
-                                        ? deferredMsg.IntroducerMeshIP : capturedMeshIP;
-                                    try
+                                    Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {capturedMeshIP}");
+                                    foreach (var deferredMsg in deferred)
                                     {
-                                        // Clear the routing tag before sending so the receiver doesn't misinterpret it
-                                        if (targetIP != capturedMeshIP)
-                                            deferredMsg.IntroducerMeshIP = null;
-                                        byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
-                                        MeshSend(deferredBytes, deferredBytes.Length,
-                                            new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
-                                        Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                        string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                            ? deferredMsg.IntroducerMeshIP : capturedMeshIP;
+                                        try
+                                        {
+                                            if (targetIP != capturedMeshIP)
+                                                deferredMsg.IntroducerMeshIP = null;
+                                            byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
+                                            MeshSend(deferredBytes, deferredBytes.Length,
+                                                new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
+                                            Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
+                                        }
                                     }
-                                    catch (Exception ex)
-                                    {
-                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
-                                    }
+                                    deferredIntroductions.Remove(capturedMeshIP);
                                 }
-                                deferredIntroductions.Remove(capturedMeshIP);
                             }
                         }
                     }
@@ -823,7 +828,7 @@ public static class Program
                 peerTunnel.SetWireGuardTunnel(wireguardTunnel);
 
                 // Track the tunnel
-                lock (activeConnectionTunnels) { activeConnectionTunnels[capturedPeerID.GetHashCode()] = peerTunnel; }
+                lock (meshLock) { activeConnectionTunnels[capturedPeerID.GetHashCode()] = peerTunnel; }
                 activePeerTunnels[remotePeerID] = peerTunnel;
                 if (!string.IsNullOrEmpty(remoteMeshIP))
                 {
@@ -914,6 +919,7 @@ public static class Program
             // Grace period: once all initial connections are established, wait before
             // disconnecting to give disconnected peers time to TransientReconnect.
             DateTime? disconnectAfter = null;
+            DateTime lastNotReadyLog = DateTime.MinValue;
             bool hasPeers = joinResponse.Peers != null && joinResponse.Peers.Length > 0;
 
             // Periodic peer discovery: if we're connected to mediation but have no WireGuard
@@ -988,7 +994,7 @@ public static class Program
                 foreach (var key in meshIPKeys)
                 {
                     peerMeshIPs.Remove(key);
-                    lock (activeConnectionTunnels) { activeConnectionTunnels.Remove(key); }
+                    lock (meshLock) { activeConnectionTunnels.Remove(key); }
                 }
 
                 // Clean up relayedPairs containing this mesh IP
@@ -1539,7 +1545,7 @@ public static class Program
                         {
                             // JSON control packets: snapshot tunnels and dispatch for filtering
                             Tunnel[] tunnels;
-                            lock (activeConnectionTunnels)
+                            lock (meshLock)
                             {
                                 tunnels = new Tunnel[activeConnectionTunnels.Count];
                                 activeConnectionTunnels.Values.CopyTo(tunnels, 0);
@@ -1701,8 +1707,9 @@ public static class Program
                     bool readyToDisconnect = noPendingWork && hasEstablishedTunnels && hasIntroducerPath;
 
                     if (!readyToDisconnect && disconnectAfter == null &&
-                        DateTime.UtcNow.Second % 10 == 0) // Log every ~10s to avoid spam
+                        (DateTime.UtcNow - lastNotReadyLog).TotalSeconds >= 10)
                     {
+                        lastNotReadyLog = DateTime.UtcNow;
                         Console.WriteLine($"[Mesh] Not ready to disconnect: noPendingWork={noPendingWork}(pending={pendingConnectionRequests.Count},tunnels={pendingTunnelCount}), established={hasEstablishedTunnels}(count={activePeerTunnels.Count}), introducerPath={hasIntroducerPath}(introducerIP={introducerMeshIP ?? "null"},completed={completedTunnelMeshIPs.Count},introducerPeerID={joinResponse.IntroducerPeerID ?? "null"})");
                     }
 
@@ -2273,7 +2280,7 @@ public static class Program
                                 foreach (var oldConnID in oldConnIDs)
                                 {
                                     Tunnel oldTunnel = null;
-                                    lock (activeConnectionTunnels)
+                                    lock (meshLock)
                                     {
                                         if (activeConnectionTunnels.TryGetValue(oldConnID, out oldTunnel))
                                             activeConnectionTunnels.Remove(oldConnID);
@@ -2309,11 +2316,14 @@ public static class Program
                                     onConnectionFailure: () =>
                                     {
                                         Console.WriteLine($"[Mesh] Tunnel {capturedConnectionID} failed permanently after all retries — cleaning up for future retry");
-                                        lock (activeConnectionTunnels) { activeConnectionTunnels.Remove(capturedConnectionID); }
-                                        if (!string.IsNullOrEmpty(capturedPeerIDForCleanup))
-                                            activePeerTunnels.Remove(capturedPeerIDForCleanup);
-                                        if (!string.IsNullOrEmpty(capturedMeshIPForCleanup))
-                                            activePeerTunnels.Remove(capturedMeshIPForCleanup);
+                                        lock (meshLock)
+                                        {
+                                            activeConnectionTunnels.Remove(capturedConnectionID);
+                                            if (!string.IsNullOrEmpty(capturedPeerIDForCleanup))
+                                                activePeerTunnels.Remove(capturedPeerIDForCleanup);
+                                            if (!string.IsNullOrEmpty(capturedMeshIPForCleanup))
+                                                activePeerTunnels.Remove(capturedMeshIPForCleanup);
+                                        }
                                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                         System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
                                     },
@@ -2327,33 +2337,34 @@ public static class Program
                                         Console.WriteLine($"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
                                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                         System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
-
-                                        // Check if there are deferred MeshConnectionBegin messages for this peer
-                                        if (peerMeshIPs.TryGetValue(capturedConnectionID, out string completedMeshIP) && !string.IsNullOrEmpty(completedMeshIP))
+                                        lock (meshLock)
                                         {
-                                            completedTunnelMeshIPs.Add(completedMeshIP);
-                                            if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
+                                            if (peerMeshIPs.TryGetValue(capturedConnectionID, out string completedMeshIP) && !string.IsNullOrEmpty(completedMeshIP))
                                             {
-                                                Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
-                                                foreach (var deferredMsg in deferred)
+                                                completedTunnelMeshIPs.Add(completedMeshIP);
+                                                if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
                                                 {
-                                                    string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
-                                                        ? deferredMsg.IntroducerMeshIP : completedMeshIP;
-                                                    try
+                                                    Console.WriteLine($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
+                                                    foreach (var deferredMsg in deferred)
                                                     {
-                                                        if (targetIP != completedMeshIP)
-                                                            deferredMsg.IntroducerMeshIP = null;
-                                                        byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
-                                                        MeshSend(deferredBytes, deferredBytes.Length,
-                                                            new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
-                                                        Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                                        string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                                            ? deferredMsg.IntroducerMeshIP : completedMeshIP;
+                                                        try
+                                                        {
+                                                            if (targetIP != completedMeshIP)
+                                                                deferredMsg.IntroducerMeshIP = null;
+                                                            byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
+                                                            MeshSend(deferredBytes, deferredBytes.Length,
+                                                                new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
+                                                            Console.WriteLine($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                                        }
+                                                        catch (Exception ex)
+                                                        {
+                                                            Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
+                                                        }
                                                     }
-                                                    catch (Exception ex)
-                                                    {
-                                                        Console.WriteLine($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
-                                                    }
+                                                    deferredIntroductions.Remove(completedMeshIP);
                                                 }
-                                                deferredIntroductions.Remove(completedMeshIP);
                                             }
                                         }
                                     }
@@ -2363,7 +2374,7 @@ public static class Program
                                 peerTunnel.SetWireGuardTunnel(wireguardTunnel);
 
                                 // Track this tunnel by ConnectionID
-                                lock (activeConnectionTunnels) { activeConnectionTunnels[msg.ConnectionID] = peerTunnel; }
+                                lock (meshLock) { activeConnectionTunnels[msg.ConnectionID] = peerTunnel; }
 
                                 // Map the peer's mesh IP to this tunnel so we can check connection status
                                 if (!string.IsNullOrEmpty(msg.PrivateAddressString))
@@ -2444,7 +2455,7 @@ public static class Program
                             // so we need to check all active tunnels
                             // Actually, the message might not have ConnectionID, so notify all tunnels
                             Tunnel[] tunnelSnapshot;
-                            lock (activeConnectionTunnels)
+                            lock (meshLock)
                             {
                                 tunnelSnapshot = new Tunnel[activeConnectionTunnels.Count];
                                 activeConnectionTunnels.Values.CopyTo(tunnelSnapshot, 0);
@@ -3102,7 +3113,7 @@ public static class Program
                                         foreach (var oldConnID in oldConnIDs)
                                         {
                                             Tunnel oldTunnel = null;
-                                            lock (activeConnectionTunnels)
+                                            lock (meshLock)
                                             {
                                                 if (activeConnectionTunnels.TryGetValue(oldConnID, out oldTunnel))
                                                     activeConnectionTunnels.Remove(oldConnID);
@@ -3131,9 +3142,12 @@ public static class Program
                                         var reconnectTunnel = new Tunnel(
                                             onConnectionFailure: () =>
                                             {
-                                                lock (activeConnectionTunnels) { activeConnectionTunnels.Remove(capturedConnID); }
-                                                if (!string.IsNullOrEmpty(capturedPeerIDStr)) activePeerTunnels.Remove(capturedPeerIDStr);
-                                                if (!string.IsNullOrEmpty(capturedMeshIPStr)) activePeerTunnels.Remove(capturedMeshIPStr);
+                                                lock (meshLock)
+                                                {
+                                                    activeConnectionTunnels.Remove(capturedConnID);
+                                                    if (!string.IsNullOrEmpty(capturedPeerIDStr)) activePeerTunnels.Remove(capturedPeerIDStr);
+                                                    if (!string.IsNullOrEmpty(capturedMeshIPStr)) activePeerTunnels.Remove(capturedMeshIPStr);
+                                                }
                                                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                                 System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
                                             },
@@ -3147,12 +3161,15 @@ public static class Program
                                                 Console.WriteLine($"[Mesh] Reconnect tunnel {capturedConnID} WireGuard established");
                                                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                                 System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
-                                                if (peerMeshIPs.TryGetValue(capturedConnID, out string cMeshIP) && !string.IsNullOrEmpty(cMeshIP))
-                                                    completedTunnelMeshIPs.Add(cMeshIP);
+                                                lock (meshLock)
+                                                {
+                                                    if (peerMeshIPs.TryGetValue(capturedConnID, out string cMeshIP) && !string.IsNullOrEmpty(cMeshIP))
+                                                        completedTunnelMeshIPs.Add(cMeshIP);
+                                                }
                                             }
                                         );
                                         reconnectTunnel.SetWireGuardTunnel(wireguardTunnel);
-                                        lock (activeConnectionTunnels) { activeConnectionTunnels[capturedConnID] = reconnectTunnel; }
+                                        lock (meshLock) { activeConnectionTunnels[capturedConnID] = reconnectTunnel; }
                                         if (!string.IsNullOrEmpty(capturedPeerIDStr))
                                         {
                                             pendingConnectionRequests.Remove(capturedPeerIDStr);
