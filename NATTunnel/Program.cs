@@ -157,20 +157,6 @@ public static class Program
             var endpoint = TunnelOptions.MediationEndpoint;
             Stream stream = null;
 
-            // NetworkStream has DataAvailable; SslStream does not.
-            // For SslStream we always attempt a non-blocking read (ReadTimeout=1ms catches the timeout).
-            bool StreamHasData(Stream s)
-            {
-                if (s is NetworkStream ns) return ns.DataAvailable;
-                if (s is SslStream ssl)
-                {
-                    int prev = ssl.ReadTimeout;
-                    try { ssl.ReadTimeout = 1; int b = ssl.ReadByte(); return b != -1; }
-                    catch { return false; }
-                    finally { ssl.ReadTimeout = prev; }
-                }
-                return false;
-            }
             MediationMessage ReadOneTcpMessage()
             {
                 while (true)
@@ -567,8 +553,10 @@ public static class Program
 
             ConnectionState = MeshConnectionState.Connected;
 
-            // Clear read timeout now that handshake is complete
-            stream.ReadTimeout = System.Threading.Timeout.Infinite;
+            // Set a short poll timeout for the main loop so it doesn't block on stream.Read()
+            // while still doing heartbeats, tunnel management, etc.
+            // SslStream doesn't support DataAvailable, so we use timeout-based polling instead.
+            stream.ReadTimeout = 100;
 
             // Reset per-connect-cycle state (these survive across reconnects but need fresh values)
             introducerMeshIP = null;
@@ -1169,12 +1157,16 @@ public static class Program
 
                         long latency = peerLatencyMs.TryGetValue(peerMeshIP, out var lat) ? lat : -1;
 
-                        // Determine connection status
+                        // Determine connection status.
+                        // A peer is "completed" if our callback recorded it, OR if WireGuard
+                        // already has it as a reachable peer (callback may have been lost).
                         string status;
-                        bool isCompleted = completedSet.Contains(peerMeshIP);
-                        bool isPending = (!string.IsNullOrEmpty(peerId) && pendingPeerIDs.Contains(peerId))
+                        bool isCompleted = completedSet.Contains(peerMeshIP)
+                            || (reachableMeshIPs.Contains(peerMeshIP) && activePeerIDs.Contains(peerMeshIP));
+                        bool isPending = !isCompleted && (
+                            (!string.IsNullOrEmpty(peerId) && pendingPeerIDs.Contains(peerId))
                             || activePeerIDs.Contains(peerMeshIP)
-                            || (!string.IsNullOrEmpty(peerId) && activePeerIDs.Contains(peerId));
+                            || (!string.IsNullOrEmpty(peerId) && activePeerIDs.Contains(peerId)));
 
                         if (isCompleted)
                             status = isRelayed ? "Relayed" : "Connected";
@@ -1757,7 +1749,10 @@ public static class Program
                     // succeeded. If all connections failed and we have zero WireGuard peers, we're
                     // isolated — stay connected so the server can assign new connections.
                     if (pendingTunnelCount < 0) pendingTunnelCount = 0; // Guard against double-decrement race
-                    bool noPendingWork = pendingConnectionRequests.Count == 0 && pendingTunnelCount == 0;
+                    // pendingConnectionRequests = waiting for MeshConnectionBegin from server (network dependency)
+                    // pendingTunnelCount = WireGuard setup in progress locally — don't block mediation disconnect
+                    // if a tunnel callback got lost; if the peer is in activePeerTunnels it's connected enough.
+                    bool noPendingWork = pendingConnectionRequests.Count == 0;
                     bool hasEstablishedTunnels = activePeerTunnels.Count > 0;
 
                     // Before disconnecting, verify we have a WireGuard tunnel specifically
@@ -2260,7 +2255,7 @@ public static class Program
                     lastPingTime = DateTime.UtcNow;
                 }
 
-                if (StreamHasData(stream))
+                try
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead == 0)
@@ -2270,6 +2265,7 @@ public static class Program
                     }
                     tcpBuffer += Encoding.ASCII.GetString(buffer, 0, bytesRead);
                 }
+                catch (IOException) { } // read timeout — no data available this iteration
 
                 // Process any complete JSON messages in the TCP buffer
                 // (may contain leftover from early reads or newly received data)
@@ -3120,14 +3116,13 @@ public static class Program
                     try
                     {
                         var reconnectedStreamLocal = reconnectedStream;
-                        if (StreamHasData(reconnectedStreamLocal))
+                        try
                         {
                             int bytesRead = reconnectedStreamLocal.Read(buffer, 0, buffer.Length);
                             if (bytesRead > 0)
-                            {
                                 reconnectedTcpBuffer += Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                            }
                         }
+                        catch (IOException) { } // read timeout — no data available this iteration
                         // Process any complete JSON messages accumulated in the buffer
                         if (reconnectedTcpBuffer.Length > 0)
                         {
@@ -3625,6 +3620,7 @@ public static class Program
                                 reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
                                 reconnectedStream.Flush();
 
+                                reconnectedStream.ReadTimeout = 100; // poll timeout for main loop
                                 lastReconnectDiscovery = DateTime.UtcNow;
                                 Log("[Mesh] Reconnected to mediation server — sent discovery request");
                             }

@@ -107,14 +107,13 @@ public static class TunnelOptions
     /// Whether to use TLS when connecting to the mediation server.
     /// Must match the server configuration. Default: false.
     /// </summary>
-    public static bool TlsEnabled = false;
+    public static bool TlsEnabled = true;
 
     /// <summary>
     /// Whether to accept self-signed TLS certificates from the mediation server.
-    /// Only enable this if you control the server and are using a self-signed cert.
-    /// Default: false.
+    /// Default: true (the default server setup uses an auto-generated self-signed cert).
     /// </summary>
-    public static bool TlsAllowSelfSigned = false;
+    public static bool TlsAllowSelfSigned = true;
 
     /// <summary>
     /// Indicated whether IPv6 is supported.
