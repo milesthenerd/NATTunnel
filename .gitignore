@@ -5,3 +5,5 @@ bin
 .jshintrc
 roadmap.md
 mediation_server/network-secrets.json
+mediation_server/cert.pem
+mediation_server/key.pem

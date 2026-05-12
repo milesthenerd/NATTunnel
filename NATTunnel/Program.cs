@@ -2,7 +2,9 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Linq;
 using System.Text.Json;
@@ -153,7 +155,22 @@ public static class Program
             string earlyTcpRemainder = "";
             byte[] buffer = new byte[8192];
             var endpoint = TunnelOptions.MediationEndpoint;
-            NetworkStream stream = null;
+            Stream stream = null;
+
+            // NetworkStream has DataAvailable; SslStream does not.
+            // For SslStream we always attempt a non-blocking read (ReadTimeout=1ms catches the timeout).
+            bool StreamHasData(Stream s)
+            {
+                if (s is NetworkStream ns) return ns.DataAvailable;
+                if (s is SslStream ssl)
+                {
+                    int prev = ssl.ReadTimeout;
+                    try { ssl.ReadTimeout = 1; int b = ssl.ReadByte(); return b != -1; }
+                    catch { return false; }
+                    finally { ssl.ReadTimeout = prev; }
+                }
+                return false;
+            }
             MediationMessage ReadOneTcpMessage()
             {
                 while (true)
@@ -444,7 +461,20 @@ public static class Program
                             throw new System.Net.Sockets.SocketException(10060); // WSAETIMEDOUT
                         }
                         tcpClient.EndConnect(connectResult);
-                        stream = tcpClient.GetStream();
+                        if (TunnelOptions.TlsEnabled)
+                        {
+                            var sslStream = new SslStream(tcpClient.GetStream(), false,
+                                TunnelOptions.TlsAllowSelfSigned
+                                    ? (RemoteCertificateValidationCallback)((sender, cert, chain, errors) => true)
+                                    : null);
+                            sslStream.AuthenticateAsClient(endpoint.Address.ToString());
+                            stream = sslStream;
+                            Log($"[Mesh] TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                        }
+                        else
+                        {
+                            stream = tcpClient.GetStream();
+                        }
                         stream.ReadTimeout = 15000;
                         earlyTcpRemainder = "";
 
@@ -636,7 +666,7 @@ public static class Program
             }
 
             // Helper method to process discovered peers and send connection requests
-            void ProcessDiscoveredPeers(object[] peers, NetworkStream targetStream = null)
+            void ProcessDiscoveredPeers(object[] peers, Stream targetStream = null)
             {
                 if (peers == null || peers.Length == 0)
                     return;
@@ -1222,7 +1252,7 @@ public static class Program
                 List<string> targetList,
                 Dictionary<string, HashSet<string>> currentHeartbeatAcks,
                 System.Net.Sockets.TcpClient mediationClient,
-                System.Net.Sockets.NetworkStream mediationStream)
+                Stream mediationStream)
             {
                 int repairCount = 0;
                 for (int i = 0; i < targetList.Count; i++)
@@ -2230,7 +2260,7 @@ public static class Program
                     lastPingTime = DateTime.UtcNow;
                 }
 
-                if (stream.DataAvailable)
+                if (StreamHasData(stream))
                 {
                     int bytesRead = stream.Read(buffer, 0, buffer.Length);
                     if (bytesRead == 0)
@@ -2827,7 +2857,7 @@ public static class Program
             DateTime? isolationDetectedAt = null;
             int IsolationGracePeriodSeconds = TunnelOptions.IsolationGracePeriodSeconds; // Wait before reconnecting to avoid thrashing
             TcpClient reconnectedTcpClient = null;
-            NetworkStream reconnectedStream = null;
+            Stream reconnectedStream = null;
             string reconnectedTcpBuffer = ""; // Accumulates partial TCP data across reads
             DateTime? lastReconnectDiscovery = null;
             int reconnectDiscoverySeconds = TunnelOptions.HeartbeatIntervalSeconds;
@@ -3090,7 +3120,7 @@ public static class Program
                     try
                     {
                         var reconnectedStreamLocal = reconnectedStream;
-                        if (reconnectedStreamLocal.DataAvailable)
+                        if (StreamHasData(reconnectedStreamLocal))
                         {
                             int bytesRead = reconnectedStreamLocal.Read(buffer, 0, buffer.Length);
                             if (bytesRead > 0)

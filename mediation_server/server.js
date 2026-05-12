@@ -1,5 +1,8 @@
 const udp = require('dgram');
 const tcp = require('net');
+const tls = require('tls');
+const fs = require('fs');
+const { execSync } = require('child_process');
 const { Config, MessageTypes } = require('./constants');
 const ConnectionManager = require('./connection-manager');
 const MessageHandler = require('./message-handler');
@@ -35,10 +38,43 @@ class NATServer {
         this.startTimeoutCheck();
     }
 
+    ensureTLSCert() {
+        if (fs.existsSync(Config.TLS_CERT_PATH) && fs.existsSync(Config.TLS_KEY_PATH)) {
+            return true; // Already exists
+        }
+        console.log('[TLS] No certificate found — generating self-signed cert...');
+        try {
+            execSync(
+                `openssl req -x509 -newkey rsa:2048 -keyout "${Config.TLS_KEY_PATH}" -out "${Config.TLS_CERT_PATH}" -days 3650 -nodes -subj "/CN=mediation"`,
+                { stdio: 'pipe' }
+            );
+            console.log(`[TLS] Self-signed cert generated: ${Config.TLS_CERT_PATH}`);
+            return true;
+        } catch (err) {
+            console.warn(`[TLS] openssl not available — falling back to plaintext TCP. (${err.message})`);
+            return false;
+        }
+    }
+
     initializeTCPServer() {
-        this.tcpServer = tcp.createServer((socket) => {
-            this.handleNewTCPConnection(socket);
-        });
+        const hasCert = this.ensureTLSCert() &&
+            fs.existsSync(Config.TLS_CERT_PATH) && fs.existsSync(Config.TLS_KEY_PATH);
+
+        if (hasCert) {
+            const tlsOptions = {
+                cert: fs.readFileSync(Config.TLS_CERT_PATH),
+                key: fs.readFileSync(Config.TLS_KEY_PATH),
+            };
+            this.tcpServer = tls.createServer(tlsOptions, (socket) => {
+                this.handleNewTCPConnection(socket);
+            });
+            console.log(`[TLS] TLS enabled using cert: ${Config.TLS_CERT_PATH}`);
+        } else {
+            this.tcpServer = tcp.createServer((socket) => {
+                this.handleNewTCPConnection(socket);
+            });
+            console.log('[TLS] No cert configured — using plaintext TCP');
+        }
 
         this.tcpServer.on('listening', () => this.logServerInfo('TCP', this.tcpServer));
         this.tcpServer.on('error', (err) => console.error('TCP Server Error:', err));

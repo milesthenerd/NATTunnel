@@ -1,3 +1,5 @@
+const path = require('path');
+
 // NAT type enumeration
 const NATTypes = {
     DirectMapping: 0,
@@ -60,7 +62,13 @@ const Config = {
     NAT_TEST_PORT_TWO: 6512,
     DEFAULT_TIMEOUT: 60, // seconds (increased to 60 to prevent mesh peers from timing out between discovery polls)
     BIND_ADDRESS: "0.0.0.0",
-    MESH_CONTROL_PORT: 51888    // UDP port used for peer-to-peer mesh introduction messages over WireGuard
+    MESH_CONTROL_PORT: 51888,   // UDP port used for peer-to-peer mesh introduction messages over WireGuard
+
+    // TLS configuration.
+    // Override with env vars TLS_CERT_PATH / TLS_KEY_PATH to use your own certificate.
+    // If the default paths don't exist, the server auto-generates a self-signed cert on startup.
+    TLS_CERT_PATH: process.env.TLS_CERT_PATH || path.join(__dirname, 'cert.pem'),
+    TLS_KEY_PATH:  process.env.TLS_KEY_PATH  || path.join(__dirname, 'key.pem'),
 };
 
 module.exports = {

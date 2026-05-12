@@ -75,6 +75,8 @@ public static class Config
     /// </summary>
     private const string IsolationGracePeriod = "isolationGracePeriod";
     private const string MeshSubnet = "meshSubnet";
+    private const string TlsEnabled = "tlsEnabled";
+    private const string TlsAllowSelfSigned = "tlsAllowSelfSigned";
 
     #endregion
 
@@ -192,6 +194,12 @@ public static class Config
 
         if (model.ContainsKey(MeshSubnet))
             TunnelOptions.MeshSubnet = (string)model[MeshSubnet];
+
+        if (model.ContainsKey(TlsEnabled) && model[TlsEnabled] is bool tlsEnabled)
+            TunnelOptions.TlsEnabled = tlsEnabled;
+
+        if (model.ContainsKey(TlsAllowSelfSigned) && model[TlsAllowSelfSigned] is bool tlsAllowSelfSigned)
+            TunnelOptions.TlsAllowSelfSigned = tlsAllowSelfSigned;
 
         return true;
     }

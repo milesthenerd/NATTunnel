@@ -104,6 +104,19 @@ public static class TunnelOptions
     public static int IsolationGracePeriodSeconds = 60;
 
     /// <summary>
+    /// Whether to use TLS when connecting to the mediation server.
+    /// Must match the server configuration. Default: false.
+    /// </summary>
+    public static bool TlsEnabled = false;
+
+    /// <summary>
+    /// Whether to accept self-signed TLS certificates from the mediation server.
+    /// Only enable this if you control the server and are using a self-signed cert.
+    /// Default: false.
+    /// </summary>
+    public static bool TlsAllowSelfSigned = false;
+
+    /// <summary>
     /// Indicated whether IPv6 is supported.
     /// </summary>
     public static bool IsIPv6Supported { get; }
