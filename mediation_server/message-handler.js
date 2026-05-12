@@ -375,14 +375,23 @@ class MessageHandler {
             const targetEndpoint = `${targetUDPInfo.ip}:${targetUDPInfo.port}`;
 
             // Detect same-NAT peers: if both share the same public IP, use LAN endpoints
-            // so they connect directly over the local network (NAT hairpinning is unreliable)
-            let effectiveClientEndpoint = clientEndpoint;
-            let effectiveTargetEndpoint = targetEndpoint;
-            if (clientUDPInfo.ip === targetUDPInfo.ip && clientSocketInfo.localIP && targetSocket.localIP) {
-                effectiveClientEndpoint = `${clientSocketInfo.localIP}:${clientSocketInfo.localPort}`;
-                effectiveTargetEndpoint = `${targetSocket.localIP}:${targetSocket.localPort}`;
-                console.log(`[MessageHandler] Same-NAT detected! Using LAN endpoints: ${effectiveClientEndpoint} <-> ${effectiveTargetEndpoint}`);
+            // so they connect directly over the local network (NAT hairpinning is unreliable).
+            // Only substitute the LAN endpoint for a peer when the *other* peer is also on the
+            // same NAT — an external peer must never receive a LAN endpoint it can't reach.
+            const sameNAT = clientUDPInfo.ip === targetUDPInfo.ip;
+            const clientLANEndpoint = (sameNAT && clientSocketInfo.localIP)
+                ? `${clientSocketInfo.localIP}:${clientSocketInfo.localPort}` : null;
+            const targetLANEndpoint = (sameNAT && targetSocket.localIP)
+                ? `${targetSocket.localIP}:${targetSocket.localPort}` : null;
+
+            if (sameNAT && clientLANEndpoint && targetLANEndpoint) {
+                console.log(`[MessageHandler] Same-NAT detected! Using LAN endpoints: ${clientLANEndpoint} <-> ${targetLANEndpoint}`);
             }
+
+            // Each peer gets: if the remote peer is on the same NAT and has a LAN IP, use it;
+            // otherwise use the remote peer's external endpoint.
+            const endpointForClient = targetLANEndpoint || targetEndpoint;
+            const endpointForTarget = clientLANEndpoint || clientEndpoint;
 
             // Get NAT types
             const clientNatType = message.NATType !== undefined ? message.NATType : -1;
@@ -391,7 +400,7 @@ class MessageHandler {
             // Send ConnectionBegin to initiating peer
             const clientMessage = {
                 ID: MessageTypes.ConnectionBegin,
-                EndpointString: effectiveTargetEndpoint,
+                EndpointString: endpointForClient,
                 NATType: targetNatType,
                 OwnNATType: clientNatType,  // Initiating peer's own NAT type
                 ConnectionID: connectionId,
@@ -405,7 +414,7 @@ class MessageHandler {
             // Send ConnectionBegin to target peer
             const serverMessage = {
                 ID: MessageTypes.ConnectionBegin,
-                EndpointString: effectiveClientEndpoint,
+                EndpointString: endpointForTarget,
                 NATType: clientNatType,
                 OwnNATType: targetNatType,  // Target peer's own NAT type
                 ConnectionID: connectionId,
