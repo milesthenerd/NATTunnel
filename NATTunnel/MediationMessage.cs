@@ -34,6 +34,12 @@ public class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string EndpointString { get; set; }
     /// <summary>
+    /// Always the external endpoint, even when EndpointString is LAN-substituted for same-NAT peers.
+    /// Used by introducers to forward a peer's external address to peers on other networks.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string ExternalEndpointString { get; set; }
+    /// <summary>
     ///First port for nat type detection returned by the server
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]

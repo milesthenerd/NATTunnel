@@ -99,9 +99,9 @@ public static class TunnelOptions
 
     /// <summary>
     /// Grace period to wait after isolation is detected before reconnecting to mediation server (in seconds).
-    /// Default: 60 seconds
+    /// Default: 30 seconds
     /// </summary>
-    public static int IsolationGracePeriodSeconds = 60;
+    public static int IsolationGracePeriodSeconds = 30;
 
     /// <summary>
     /// Whether to use TLS when connecting to the mediation server.

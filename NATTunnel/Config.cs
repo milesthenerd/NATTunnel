@@ -93,7 +93,11 @@ public static class Config
         // Log config without secrets
         var configLog = Toml.FromModel(model);
         if (model.ContainsKey("networkSecret"))
-            configLog = configLog.Replace(((string)model["networkSecret"]), "********");
+        {
+            string secretValue = (string)model["networkSecret"];
+            if (!string.IsNullOrEmpty(secretValue))
+                configLog = configLog.Replace(secretValue, "********");
+        }
         Program.Log(configLog);
 
         // Ensure config has all new timeout/interval fields with defaults if missing
@@ -130,15 +134,18 @@ public static class Config
             return false;
         }
 
-        // Parse required networkID
+        // Parse networkID — auto-generate and persist if missing/empty so a fresh
+        // config doesn't block startup.
         try
         {
-            if (!model.ContainsKey(NetworkID) || string.IsNullOrEmpty((string)model[NetworkID]))
+            string networkID = model.ContainsKey(NetworkID) ? (string)model[NetworkID] : null;
+            if (string.IsNullOrEmpty(networkID))
             {
-                Console.Error.WriteLine($"{NetworkID} is required in config.toml!");
-                return false;
+                networkID = GenerateNetworkID();
+                SetConfigValue(NetworkID, $"\"{networkID}\"");
+                Program.Log($"[Config] No {NetworkID} found — generated and saved: {networkID}");
             }
-            TunnelOptions.NetworkID = (string)model[NetworkID];
+            TunnelOptions.NetworkID = networkID;
             Program.Log($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
         }
         catch (Exception e)
@@ -147,15 +154,17 @@ public static class Config
             return false;
         }
 
-        // Parse required networkSecret (shared secret for mesh authentication)
+        // Parse networkSecret — auto-generate and persist if missing/empty.
         try
         {
-            if (!model.ContainsKey(NetworkSecret) || string.IsNullOrEmpty((string)model[NetworkSecret]))
+            string networkSecret = model.ContainsKey(NetworkSecret) ? (string)model[NetworkSecret] : null;
+            if (string.IsNullOrEmpty(networkSecret))
             {
-                Console.Error.WriteLine($"{NetworkSecret} is required in config.toml!");
-                return false;
+                networkSecret = GenerateNetworkSecret();
+                SetConfigValue(NetworkSecret, $"\"{networkSecret}\"");
+                Program.Log($"[Config] No {NetworkSecret} found — generated and saved a random secret");
             }
-            TunnelOptions.NetworkSecret = (string)model[NetworkSecret];
+            TunnelOptions.NetworkSecret = networkSecret;
             Program.Log($"[Config] Network secret loaded");
         }
         catch (Exception e)
@@ -286,6 +295,41 @@ public static class Config
         // Not found — append
         Array.Resize(ref lines, lines.Length + 1);
         lines[^1] = $"{key} = {formattedValue}";
+    }
+
+    /// <summary>
+    /// Sets a single config key in the on-disk config.toml, replacing the existing line
+    /// if present or appending it otherwise.
+    /// </summary>
+    private static void SetConfigValue(string key, string formattedValue)
+    {
+        string configPath = GetConfigFilePath();
+        if (configPath == null || !File.Exists(configPath)) return;
+
+        string[] lines = File.ReadAllLines(configPath);
+        SetConfigLine(ref lines, key, formattedValue);
+        File.WriteAllLines(configPath, lines);
+    }
+
+    /// <summary>
+    /// Generates a short, human-readable random network ID.
+    /// </summary>
+    private static string GenerateNetworkID()
+    {
+        // 8 hex chars from a cryptographically strong RNG — enough to be unique without being unwieldy.
+        byte[] bytes = new byte[4];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+        return "net-" + Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Generates a strong random network secret (base64-encoded 32 bytes).
+    /// </summary>
+    private static string GenerateNetworkSecret()
+    {
+        byte[] bytes = new byte[32];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+        return Convert.ToBase64String(bytes);
     }
 
     /// <summary>
