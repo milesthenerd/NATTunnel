@@ -2016,9 +2016,11 @@ public static class Program
                             MeshSend(probeBytes, probeBytes.Length,
                                 new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
                         }
-                        catch (Exception ex)
+                        catch (Exception)
                         {
-                            Log($"[Mesh] Failed to send introducer probe: {ex.Message}");
+                            // Probe send failure typically means the route to the dead introducer
+                            // has been pulled. The missed-probe counter will reach threshold and
+                            // we'll trigger takeover — no need to log per-attempt noise.
                         }
                     }
 
@@ -2336,9 +2338,17 @@ public static class Program
                             if (!string.IsNullOrEmpty(msg.PrivateAddressString))
                             {
                                 peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
-                                // Cache peer info so GetMeshState can display it
+                                // Cache peer info so GetMeshState can display it.
+                                // Always cache the EXTERNAL endpoint: if we ever become the introducer
+                                // (or forward a MeshConnectionBegin), we must hand peers an address
+                                // that works from outside this LAN. EndpointString may be LAN-substituted.
                                 if (!string.IsNullOrEmpty(msg.PeerID))
-                                    peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType);
+                                {
+                                    string cacheEndpoint = !string.IsNullOrEmpty(msg.ExternalEndpointString)
+                                        ? msg.ExternalEndpointString
+                                        : msg.EndpointString;
+                                    peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType);
+                                }
 
                                 // Clean up any existing tunnel to the same mesh IP before creating a new one.
                                 // Without this, old tunnels completing late overwrite the WireGuard peer's
@@ -2708,11 +2718,14 @@ public static class Program
                                         Log($"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
                                     }
 
-                                    // Build both MeshConnectionBegin messages
+                                    // Build both MeshConnectionBegin messages.
+                                    // ExternalEndpointString always carries the external endpoint so the
+                                    // receiver caches something safe to forward to peers outside this LAN.
                                     var connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                                     {
                                         PeerID = msg.PeerID,              // New peer's ID
                                         EndpointString = newPeerEndpointForExisting,  // New peer's endpoint (LAN if same-NAT)
+                                        ExternalEndpointString = msg.EndpointString,  // Always external
                                         NATType = msg.NATType,              // New peer's NAT type
                                         PrivateAddressString = msg.PrivateAddressString   // New peer's mesh IP
                                     };
@@ -2724,6 +2737,7 @@ public static class Program
                                         {
                                             PeerID = existingPeerID,           // Existing peer's ID
                                             EndpointString = existingPeerEndpointForNew,  // Existing peer's endpoint (LAN if same-NAT)
+                                            ExternalEndpointString = existingPeerEndpoint, // Always external
                                             NATType = (NATType)existingPeerNatType, // Existing peer's NAT type
                                             PrivateAddressString = existingPeerMeshIP         // Existing peer's mesh IP
                                         };
@@ -3166,7 +3180,14 @@ public static class Program
                                     {
                                         peerMeshIPs[parsedMsg.ConnectionID] = parsedMsg.PrivateAddressString;
                                         if (!string.IsNullOrEmpty(parsedMsg.PeerID))
-                                            peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType);
+                                        {
+                                            // Cache the EXTERNAL endpoint when available — EndpointString
+                                            // may be a LAN endpoint for same-NAT pairs.
+                                            string cacheEndpoint = !string.IsNullOrEmpty(parsedMsg.ExternalEndpointString)
+                                                ? parsedMsg.ExternalEndpointString
+                                                : parsedMsg.EndpointString;
+                                            peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType);
+                                        }
                                     }
 
                                     // Clean up any existing tunnel to the same mesh IP before creating a new one.
@@ -3397,6 +3418,7 @@ public static class Program
                                             {
                                                 PeerID = parsedMsg.PeerID,
                                                 EndpointString = parsedMsg.EndpointString,
+                                                ExternalEndpointString = parsedMsg.EndpointString,
                                                 NATType = parsedMsg.NATType,
                                                 PrivateAddressString = parsedMsg.PrivateAddressString
                                             };
@@ -3419,6 +3441,7 @@ public static class Program
                                                 {
                                                     PeerID = exPeerID,
                                                     EndpointString = exEndpoint,
+                                                    ExternalEndpointString = exEndpoint,
                                                     NATType = (NATType)exNatType,
                                                     PrivateAddressString = exMeshIP
                                                 };
@@ -3553,7 +3576,20 @@ public static class Program
                                 reconnectedTcpClient = new TcpClient();
                                 reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
                                 reconnectedTcpClient.Connect(mediationEP);
-                                reconnectedStream = reconnectedTcpClient.GetStream();
+                                if (TunnelOptions.TlsEnabled)
+                                {
+                                    var sslStream = new SslStream(reconnectedTcpClient.GetStream(), false,
+                                        TunnelOptions.TlsAllowSelfSigned
+                                            ? (RemoteCertificateValidationCallback)((sender, cert, chain, errors) => true)
+                                            : null);
+                                    sslStream.AuthenticateAsClient(mediationEP.Address.ToString());
+                                    reconnectedStream = sslStream;
+                                    Log($"[Mesh] Reconnect TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                                }
+                                else
+                                {
+                                    reconnectedStream = reconnectedTcpClient.GetStream();
+                                }
 
                                 // Clear stale peer state — endpoints may have changed during isolation
                                 pendingConnectionRequests.Clear();
@@ -3712,7 +3748,20 @@ public static class Program
                             reconnectedTcpClient = new TcpClient();
                             reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
                             reconnectedTcpClient.Connect(mediationEP);
-                            reconnectedStream = reconnectedTcpClient.GetStream();
+                            if (TunnelOptions.TlsEnabled)
+                            {
+                                var sslStream = new SslStream(reconnectedTcpClient.GetStream(), false,
+                                    TunnelOptions.TlsAllowSelfSigned
+                                        ? (RemoteCertificateValidationCallback)((sender, cert, chain, errors) => true)
+                                        : null);
+                                sslStream.AuthenticateAsClient(mediationEP.Address.ToString());
+                                reconnectedStream = sslStream;
+                                Log($"[Mesh] Takeover TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                            }
+                            else
+                            {
+                                reconnectedStream = reconnectedTcpClient.GetStream();
+                            }
 
                             // Clear stale peer state
                             pendingConnectionRequests.Clear();
@@ -3801,9 +3850,11 @@ public static class Program
                             MeshSend(probeBytes, probeBytes.Length,
                                 new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
                         }
-                        catch (Exception ex)
+                        catch (Exception)
                         {
-                            Log($"[Mesh] Failed to send introducer probe: {ex.Message}");
+                            // Probe send failure typically means the route to the dead introducer
+                            // has been pulled. The missed-probe counter will reach threshold and
+                            // we'll trigger takeover — no need to log per-attempt noise.
                         }
                     }
 

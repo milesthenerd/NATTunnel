@@ -397,10 +397,14 @@ class MessageHandler {
             const clientNatType = message.NATType !== undefined ? message.NATType : -1;
             const targetNatType = targetSocket.natType !== undefined ? targetSocket.natType : -1;
 
-            // Send ConnectionBegin to initiating peer
+            // Send ConnectionBegin to initiating peer.
+            // ExternalEndpointString always carries the external endpoint so the receiver
+            // can cache something safe to forward to non-same-NAT peers later (e.g. when
+            // acting as introducer). EndpointString may be a LAN endpoint when same-NAT.
             const clientMessage = {
                 ID: MessageTypes.ConnectionBegin,
                 EndpointString: endpointForClient,
+                ExternalEndpointString: targetEndpoint,
                 NATType: targetNatType,
                 OwnNATType: clientNatType,  // Initiating peer's own NAT type
                 ConnectionID: connectionId,
@@ -415,6 +419,7 @@ class MessageHandler {
             const serverMessage = {
                 ID: MessageTypes.ConnectionBegin,
                 EndpointString: endpointForTarget,
+                ExternalEndpointString: clientEndpoint,
                 NATType: clientNatType,
                 OwnNATType: targetNatType,  // Target peer's own NAT type
                 ConnectionID: connectionId,
