@@ -1,0 +1,16 @@
+[Unit]
+Description=NATTunnel mesh VPN daemon
+Documentation=https://github.com/milesthenerd/NATTunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/nattunneld
+Restart=on-failure
+RestartSec=5s
+# Root needed for CAP_NET_ADMIN (interface create + IP assignment) and /proc/sys/net/ipv4/ip_forward.
+User=root
+
+[Install]
+WantedBy=multi-user.target

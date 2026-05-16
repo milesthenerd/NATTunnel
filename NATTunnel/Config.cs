@@ -134,8 +134,7 @@ public static class Config
             return false;
         }
 
-        // Parse networkID — auto-generate and persist if missing/empty so a fresh
-        // config doesn't block startup.
+        // Auto-generate networkID if missing so a fresh config doesn't block startup.
         try
         {
             string networkID = model.ContainsKey(NetworkID) ? (string)model[NetworkID] : null;
@@ -154,7 +153,7 @@ public static class Config
             return false;
         }
 
-        // Parse networkSecret — auto-generate and persist if missing/empty.
+        // Auto-generate networkSecret if missing.
         try
         {
             string networkSecret = model.ContainsKey(NetworkSecret) ? (string)model[NetworkSecret] : null;
@@ -297,10 +296,6 @@ public static class Config
         lines[^1] = $"{key} = {formattedValue}";
     }
 
-    /// <summary>
-    /// Sets a single config key in the on-disk config.toml, replacing the existing line
-    /// if present or appending it otherwise.
-    /// </summary>
     private static void SetConfigValue(string key, string formattedValue)
     {
         string configPath = GetConfigFilePath();
@@ -311,20 +306,13 @@ public static class Config
         File.WriteAllLines(configPath, lines);
     }
 
-    /// <summary>
-    /// Generates a short, human-readable random network ID.
-    /// </summary>
     private static string GenerateNetworkID()
     {
-        // 8 hex chars from a cryptographically strong RNG — enough to be unique without being unwieldy.
         byte[] bytes = new byte[4];
         System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
         return "net-" + Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
-    /// <summary>
-    /// Generates a strong random network secret (base64-encoded 32 bytes).
-    /// </summary>
     private static string GenerateNetworkSecret()
     {
         byte[] bytes = new byte[32];
@@ -427,19 +415,37 @@ public static class Config
     /// <returns>The file path to where the config.txt is located for a known OS, <see langword="null"/> for an unknown OS.</returns>
     public static string GetConfigFilePath()
     {
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsLinux())
+        if (OperatingSystem.IsWindows())
         {
-            string natTunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData) + "/NATTunnel";
-            Directory.CreateDirectory(natTunnelDir);
-            return natTunnelDir + "/config.toml";
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "NATTunnel");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "config.toml");
         }
 
-        // Special case for macos, because the applicationData folder is currently bugged on macos+.net
+        if (OperatingSystem.IsLinux())
+        {
+            // Root → /etc/nattunnel (system-wide, the systemd unit's home).
+            // Non-root → ~/.config/nattunnel (XDG convention).
+            string dir = Environment.UserName == "root"
+                ? "/etc/nattunnel"
+                : Path.Combine(
+                    Environment.GetEnvironmentVariable("XDG_CONFIG_HOME")
+                        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config"),
+                    "nattunnel");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "config.toml");
+        }
+
         if (OperatingSystem.IsMacOS())
         {
-            string natTunnelDir = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + "/Library/Application Support/NATTunnel";
-            Directory.CreateDirectory(natTunnelDir);
-            return natTunnelDir + "/config.toml";
+            // ApplicationData is buggy on macOS + .NET, so resolve UserProfile directly.
+            string dir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                "Library", "Application Support", "NATTunnel");
+            Directory.CreateDirectory(dir);
+            return Path.Combine(dir, "config.toml");
         }
 
         return null;

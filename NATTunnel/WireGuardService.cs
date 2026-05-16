@@ -1,11 +1,13 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.ServiceProcess;
 using System.Security.Principal;
 using Microsoft.Win32;
 
 namespace NATTunnel;
 
+[SupportedOSPlatform("windows")]
 public class WireGuardService
 {
     // Windows Service API

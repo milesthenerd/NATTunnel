@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        # Make sure the symlink in /usr/bin points at the bundled binary.
+        ln -sf /usr/lib/nattunnel/nattunneld /usr/bin/nattunneld
+
+        # Pick up the new unit; don't enable or start automatically — let the
+        # admin run `systemctl enable --now nattunnel` after editing the config.
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ;;
+esac
+
+exit 0

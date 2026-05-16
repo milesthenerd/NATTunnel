@@ -15,6 +15,7 @@ namespace NATTunnel
         private readonly string configFilePath;
         private readonly string interfaceName;
         private readonly WireGuardPeerManager peerManager;
+        private readonly IWireGuardBackend backend = WireGuardBackend.Instance;
         private bool disposedValue;
         private bool tunnelStarted;
         private readonly bool debugMode;
@@ -299,70 +300,21 @@ namespace NATTunnel
         {
             try
             {
-                Program.Log($"Bringing up WireGuard-NT interface: {interfaceName}");
+                Program.Log($"Bringing up WireGuard interface: {interfaceName}");
 
-                // Create/Open WireGuard-NT adapter
-                wireguardAdapter = WireGuardAPI.CreateAdapter(interfaceName);
+                backend.CreateInterface(interfaceName);
 
-                // Get adapter LUID for IP configuration
-                WireGuardNTAPI.WireGuardGetAdapterLUID(wireguardAdapter, out ulong luid);
-                Program.Log($"Adapter LUID: {luid}");
+                Program.Log("Configuring WireGuard interface...");
+                backend.ConfigureInterface(interfaceName, configFilePath);
 
-                // Configure WireGuard-NT with interface settings (private key, listen port)
-                Program.Log("Configuring WireGuard-NT interface...");
-                ConfigureWireGuardNT();
-
-                // Assign placeholder IP until mesh mode assigns the real mesh IP
+                // Placeholder IP; mesh mode will reassign with the real mesh IP shortly.
                 string assignedIp = "10.5.0.254";
                 Program.Log($"Assigning IP address {assignedIp}/24 to interface...");
-                WireGuardAPI.AssignIPAddress(wireguardAdapter, interfaceName, assignedIp, 24);
+                backend.AssignIP(interfaceName, assignedIp, 24);
 
-                // Enable the interface using netsh (WireGuard adapters don't have a SetAdapterState API)
-                Program.Log("Enabling WireGuard-NT interface...");
-                var enablePsi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "netsh",
-                    Arguments = $"interface set interface \"{interfaceName}\" admin=enabled",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true,
-                    Verb = "runas"
-                };
+                Program.Log("Bringing WireGuard interface up...");
+                backend.SetInterfaceUp(interfaceName);
 
-                using (var enableProcess = System.Diagnostics.Process.Start(enablePsi))
-                {
-                    enableProcess.WaitForExit();
-                    if (enableProcess.ExitCode != 0)
-                    {
-                        string error = enableProcess.StandardError.ReadToEnd();
-                        Program.Log($"Warning: Failed to enable interface via netsh: {error}");
-                        Program.Log("   Interface may already be enabled or will auto-enable with configuration");
-                    }
-                    else
-                    {
-                        Program.Log("WireGuard-NT interface enabled");
-                    }
-                }
-
-                // Force the WireGuard adapter to UP state using WireGuard-NT API
-                Program.Log("Setting WireGuard adapter state to UP...");
-                bool adapterStateSet = WireGuardNTAPI.WireGuardSetAdapterState(
-                    wireguardAdapter,
-                    WireGuardNTAPI.WIREGUARD_ADAPTER_STATE.WIREGUARD_ADAPTER_STATE_UP
-                );
-
-                if (adapterStateSet)
-                {
-                    Program.Log("WireGuard adapter set to UP state");
-                }
-                else
-                {
-                    int error = Marshal.GetLastWin32Error();
-                    Program.Log($"Failed to set adapter state to UP (Error: {error})");
-                }
-
-                // Brief delay to allow interface to come up
                 System.Threading.Thread.Sleep(1000);
 
                 // Verify interface status
@@ -524,28 +476,31 @@ namespace NATTunnel
                 }
                 */
 
-                // Check interface connectivity status
+                // Check interface connectivity status (Windows-only diagnostic)
                 Task.Run(async () =>
                 {
                     await Task.Delay(3000); // Wait 3 seconds for everything to settle
                     Program.Log("\n[Status Check] Verifying WireGuard interface connectivity...");
-                    var psi = new System.Diagnostics.ProcessStartInfo
+                    if (OperatingSystem.IsWindows())
                     {
-                        FileName = "netsh",
-                        Arguments = $"interface ipv4 show interfaces",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    };
-                    using var proc = System.Diagnostics.Process.Start(psi);
-                    var output = proc.StandardOutput.ReadToEnd();
-                    proc.WaitForExit();
-                    var lines = output.Split('\n');
-                    foreach (var line in lines)
-                    {
-                        if (line.Contains(interfaceName))
+                        var psi = new System.Diagnostics.ProcessStartInfo
                         {
-                            Program.Log($"[Status Check] Interface: {line.Trim()}");
+                            FileName = "netsh",
+                            Arguments = $"interface ipv4 show interfaces",
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            CreateNoWindow = true
+                        };
+                        using var proc = System.Diagnostics.Process.Start(psi);
+                        var output = proc.StandardOutput.ReadToEnd();
+                        proc.WaitForExit();
+                        var lines = output.Split('\n');
+                        foreach (var line in lines)
+                        {
+                            if (line.Contains(interfaceName))
+                            {
+                                Program.Log($"[Status Check] Interface: {line.Trim()}");
+                            }
                         }
                     }
 
@@ -576,188 +531,6 @@ namespace NATTunnel
                 throw;
             }
         }
-
-        /// <summary>
-        /// Configures WireGuard-NT interface with private key and listen port using wg.exe
-        /// </summary>
-        private void ConfigureWireGuardNT()
-        {
-            try
-            {
-                Program.Log($"Configuring WireGuard interface using wg.exe...");
-
-                // Create a temporary config file with only WireGuard-native fields
-                // wg.exe doesn't understand Address, Name, etc. - those are wg-quick extensions
-                string tempConfigPath = Path.Combine(Path.GetTempPath(), $"wg_{interfaceName}_{Guid.NewGuid()}.conf");
-
-                try
-                {
-                    // Read the original config and extract only PrivateKey, ListenPort, and [Peer] sections
-                    var lines = File.ReadAllLines(configFilePath);
-                    var wgLines = new List<string>();
-                    bool inInterface = false;
-                    bool inPeer = false;
-
-                    wgLines.Add("[Interface]");
-                    foreach (var line in lines)
-                    {
-                        var trimmed = line.Trim();
-
-                        if (trimmed.StartsWith("[Interface]"))
-                        {
-                            inInterface = true;
-                            inPeer = false;
-                            continue;
-                        }
-                        else if (trimmed.StartsWith("[Peer]"))
-                        {
-                            inInterface = false;
-                            inPeer = true;
-                            wgLines.Add("");
-                            wgLines.Add("[Peer]");
-                            continue;
-                        }
-
-                        if (inInterface)
-                        {
-                            // Only include PrivateKey and ListenPort
-                            if (trimmed.StartsWith("PrivateKey") || trimmed.StartsWith("ListenPort"))
-                            {
-                                wgLines.Add(trimmed);
-                            }
-                        }
-                        else if (inPeer)
-                        {
-                            // Include all peer fields
-                            if (!string.IsNullOrWhiteSpace(trimmed))
-                            {
-                                wgLines.Add(trimmed);
-                            }
-                        }
-                    }
-
-                    File.WriteAllLines(tempConfigPath, wgLines);
-                    Program.Log($"Created temporary WireGuard config: {tempConfigPath}");
-
-                    // Use wg.exe to configure the interface
-                    var psi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = "wg.exe",
-                        Arguments = $"setconf {interfaceName} \"{tempConfigPath}\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var process = System.Diagnostics.Process.Start(psi))
-                    {
-                        process.WaitForExit();
-                        string output = process.StandardOutput.ReadToEnd();
-                        string error = process.StandardError.ReadToEnd();
-
-                        if (process.ExitCode != 0)
-                        {
-                            Program.Log($"wg.exe error output: {error}");
-                            throw new Exception($"Failed to configure WireGuard interface (wg.exe exit code: {process.ExitCode})");
-                        }
-
-                        if (!string.IsNullOrWhiteSpace(output))
-                        {
-                            Program.Log($"wg.exe output: {output}");
-                        }
-                    }
-
-                    Program.Log("WireGuard interface configured successfully");
-                }
-                finally
-                {
-                    // Clean up temporary config file
-                    if (File.Exists(tempConfigPath))
-                    {
-                        File.Delete(tempConfigPath);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Program.Log($"Error configuring WireGuard-NT: {ex.Message}");
-                throw;
-            }
-        }
-
-        /// <summary>
-        /// OLD: Configures WireGuard-NT interface with private key using low-level API (doesn't work - Error 87)
-        /// </summary>
-        /*
-        private void ConfigureWireGuardNT_OLD()
-        {
-            try
-            {
-                // Ensure private key is exactly 32 bytes
-                if (privateKey == null || privateKey.Length != 32)
-                {
-                    throw new Exception($"Private key must be exactly 32 bytes (got {privateKey?.Length ?? 0})");
-                }
-
-                // Build configuration structure - use ONLY HAS_PRIVATE_KEY flag like the official example
-                // Official example: .Flags = WIREGUARD_INTERFACE_HAS_PRIVATE_KEY, .PeersCount = 1
-                // NO LISTEN_PORT or PUBLIC_KEY flags!
-                int size = 74; // Just the interface structure with no peers
-                IntPtr configPtr = Marshal.AllocHGlobal(size);
-                try
-                {
-                    uint flags = WireGuardNTAPI.WIREGUARD_INTERFACE_HAS_PRIVATE_KEY; // ONLY private key flag
-                    ushort listenPort = 0; // NOT SET - let driver choose
-                    uint peersCount = 0;
-                    
-                    // Write structure manually to ensure exact layout
-                    int offset = 0;
-                    
-                    // Flags (4 bytes)
-                    Marshal.WriteInt32(configPtr, offset, (int)flags);
-                    offset += 4;
-                    
-                    // ListenPort (2 bytes)
-                    Marshal.WriteInt16(configPtr, offset, (short)listenPort);
-                    offset += 2;
-                    
-                    // PrivateKey (32 bytes)
-                    Marshal.Copy(privateKey, 0, IntPtr.Add(configPtr, offset), 32);
-                    offset += 32;
-                    
-                    // PublicKey (32 bytes) - NOT SET, leave as zeros (driver derives it)
-                    byte[] zeroKey = new byte[32];
-                    Marshal.Copy(zeroKey, 0, IntPtr.Add(configPtr, offset), 32);
-                    offset += 32;
-                    
-                    // PeersCount (4 bytes)
-                    Marshal.WriteInt32(configPtr, offset, (int)peersCount);
-                    offset += 4;
-
-                    // Apply configuration
-                    bool success = WireGuardNTAPI.WireGuardSetConfiguration(wireguardAdapter, configPtr, (uint)size);
-                    
-                    if (!success)
-                    {
-                        int error = Marshal.GetLastWin32Error();
-                        throw new Exception($"Failed to set WireGuard-NT configuration (Error: {error})");
-                    }
-
-                    Program.Log("WireGuard-NT interface configured");
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(configPtr);
-                }
-            }
-            catch (Exception ex)
-            {
-                Program.Log($"Error configuring WireGuard-NT: {ex.Message}");
-                throw;
-            }
-        }
-        */
 
         private bool IsElevated()
         {
@@ -842,11 +615,11 @@ namespace NATTunnel
             // Falls back to full setconf if wg set fails.
             if (tunnelStarted)
             {
-                if (!WireGuardNT.AddPeerToInterface(interfaceName, peer))
+                if (!backend.AddOrUpdatePeer(interfaceName, peer))
                 {
                     // Fallback: full config reload
                     if (wireguardAdapter != IntPtr.Zero)
-                        WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                        backend.ApplyFullConfig(interfaceName, configFilePath);
                 }
             }
             else
@@ -933,11 +706,11 @@ namespace NATTunnel
             // Falls back to full setconf if wg set fails.
             if (tunnelStarted)
             {
-                if (!WireGuardNT.AddPeerToInterface(interfaceName, peer))
+                if (!backend.AddOrUpdatePeer(interfaceName, peer))
                 {
                     // Fallback: full config reload
                     if (wireguardAdapter != IntPtr.Zero)
-                        WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                        backend.ApplyFullConfig(interfaceName, configFilePath);
                 }
             }
             else
@@ -971,7 +744,7 @@ namespace NATTunnel
                 {
                     oldGatewayPeer.ResetAllowedIPs();
                     if (tunnelStarted)
-                        WireGuardNT.AddPeerToInterface(interfaceName, oldGatewayPeer);
+                        backend.AddOrUpdatePeer(interfaceName, oldGatewayPeer);
                 }
             }
 
@@ -982,11 +755,11 @@ namespace NATTunnel
             // Apply the updated AllowedIPs to the running interface
             if (tunnelStarted)
             {
-                if (!WireGuardNT.AddPeerToInterface(interfaceName, gatewayPeer))
+                if (!backend.AddOrUpdatePeer(interfaceName, gatewayPeer))
                 {
                     // Fallback: full config reload
                     if (wireguardAdapter != IntPtr.Zero)
-                        WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                        backend.ApplyFullConfig(interfaceName, configFilePath);
                 }
             }
 
@@ -1030,10 +803,10 @@ namespace NATTunnel
                 // Apply to running interface
                 if (tunnelStarted)
                 {
-                    if (!WireGuardNT.AddPeerToInterface(interfaceName, gatewayPeer))
+                    if (!backend.AddOrUpdatePeer(interfaceName, gatewayPeer))
                     {
                         if (wireguardAdapter != IntPtr.Zero)
-                            WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                            backend.ApplyFullConfig(interfaceName, configFilePath);
                     }
                 }
                 RegenerateConfigWithPeers();
@@ -1062,10 +835,10 @@ namespace NATTunnel
 
                 if (tunnelStarted)
                 {
-                    if (!WireGuardNT.AddPeerToInterface(interfaceName, gatewayPeer))
+                    if (!backend.AddOrUpdatePeer(interfaceName, gatewayPeer))
                     {
                         if (wireguardAdapter != IntPtr.Zero)
-                            WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                            backend.ApplyFullConfig(interfaceName, configFilePath);
                     }
                 }
                 RegenerateConfigWithPeers();
@@ -1094,7 +867,7 @@ namespace NATTunnel
             // Update WireGuard-NT configuration dynamically
             if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
             {
-                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                backend.ApplyFullConfig(interfaceName, configFilePath);
             }
         }
 
@@ -1102,42 +875,7 @@ namespace NATTunnel
         /// Enable IP forwarding on the WireGuard interface so it can relay traffic between peers.
         /// Required for symmetric-to-symmetric NAT relay through the introducer.
         /// </summary>
-        public bool EnableForwarding()
-        {
-            try
-            {
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "netsh",
-                    Arguments = $"interface ipv4 set interface \"{interfaceName}\" forwarding=enabled",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-
-                using (var process = System.Diagnostics.Process.Start(psi))
-                {
-                    process.WaitForExit();
-                    if (process.ExitCode == 0)
-                    {
-                        Program.Log($"[WireGuard] IP forwarding enabled on {interfaceName}");
-                        return true;
-                    }
-                    else
-                    {
-                        string error = process.StandardError.ReadToEnd();
-                        Program.Log($"[WireGuard] Failed to enable forwarding on {interfaceName}: {error}");
-                        return false;
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Program.Log($"[WireGuard] Error enabling forwarding: {ex.Message}");
-                return false;
-            }
-        }
+        public bool EnableForwarding() => backend.EnableForwarding(interfaceName);
 
         public WireGuardPeer GetPeer(int connectionId) => peerManager.GetPeer(connectionId);
         public WireGuardPeer GetPeer(IPAddress privateAddress) => peerManager.GetPeer(privateAddress);
@@ -1154,7 +892,7 @@ namespace NATTunnel
             // Update WireGuard-NT configuration dynamically
             if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
             {
-                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                backend.ApplyFullConfig(interfaceName, configFilePath);
             }
         }
         public int GetPeerCount() => peerManager.GetPeerCount();
@@ -1173,79 +911,81 @@ namespace NATTunnel
                 clientAssignedIP = assignedIpAddress;
                 clientPrefixLength = prefixLength;
 
-                // CRITICAL: First, list and remove ALL existing IP addresses from the interface
-                Program.Log($"Checking existing IP addresses on interface {interfaceName}...");
-                try
+                // Extra IP cleanup via PowerShell on Windows — WireGuard-NT reassignment has
+                // historically missed edge cases. Linux's `ip address flush` already handles this.
+                if (OperatingSystem.IsWindows())
                 {
-                    // First, show what IPs exist
-                    var listPsi = new System.Diagnostics.ProcessStartInfo
+                    Program.Log($"Checking existing IP addresses on interface {interfaceName}...");
+                    try
                     {
-                        FileName = "powershell.exe",
-                        Arguments = $"-NoProfile -Command \"Get-NetIPAddress -InterfaceAlias '{interfaceName}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var listProc = System.Diagnostics.Process.Start(listPsi))
-                    {
-                        if (listProc != null)
+                        var listPsi = new System.Diagnostics.ProcessStartInfo
                         {
-                            var existingIPs = listProc.StandardOutput.ReadToEnd();
-                            listProc.WaitForExit();
-                            Program.Log($"Existing IPs on {interfaceName}: {existingIPs.Trim()}");
+                            FileName = "powershell.exe",
+                            Arguments = $"-NoProfile -Command \"Get-NetIPAddress -InterfaceAlias '{interfaceName}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty IPAddress\"",
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            CreateNoWindow = true
+                        };
+
+                        using (var listProc = System.Diagnostics.Process.Start(listPsi))
+                        {
+                            if (listProc != null)
+                            {
+                                var existingIPs = listProc.StandardOutput.ReadToEnd();
+                                listProc.WaitForExit();
+                                Program.Log($"Existing IPs on {interfaceName}: {existingIPs.Trim()}");
+                            }
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    Program.Log($"Could not list IPs: {ex.Message}");
-                }
-
-                Program.Log($"Removing all existing IP addresses from interface {interfaceName}...");
-                try
-                {
-                    // Remove all IPs using PowerShell cmdlet
-                    var deletePsPsi = new System.Diagnostics.ProcessStartInfo
+                    catch (Exception ex)
                     {
-                        FileName = "powershell.exe",
-                        Arguments = $"-NoProfile -Command \"Get-NetIPAddress -InterfaceAlias '{interfaceName}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue\"",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        CreateNoWindow = true
-                    };
-
-                    using (var deleteProc = System.Diagnostics.Process.Start(deletePsPsi))
-                    {
-                        if (deleteProc != null)
-                        {
-                            var output = deleteProc.StandardOutput.ReadToEnd();
-                            var error = deleteProc.StandardError.ReadToEnd();
-                            deleteProc.WaitForExit();
-                            Program.Log($"PowerShell IP removal completed (exit code: {deleteProc.ExitCode})");
-                            if (!string.IsNullOrWhiteSpace(output)) Program.Log($"Output: {output}");
-                            if (!string.IsNullOrWhiteSpace(error)) Program.Log($"Error: {error}");
-                        }
+                        Program.Log($"Could not list IPs: {ex.Message}");
                     }
 
-                    System.Threading.Thread.Sleep(1000);  // Wait for system to process removal
-                }
-                catch (Exception cleanupEx)
-                {
-                    Program.Log($"Warning: Could not cleanup old IPs via PowerShell: {cleanupEx.Message}");
+                    Program.Log($"Removing all existing IP addresses from interface {interfaceName}...");
+                    try
+                    {
+                        var deletePsPsi = new System.Diagnostics.ProcessStartInfo
+                        {
+                            FileName = "powershell.exe",
+                            Arguments = $"-NoProfile -Command \"Get-NetIPAddress -InterfaceAlias '{interfaceName}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue\"",
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            CreateNoWindow = true
+                        };
+
+                        using (var deleteProc = System.Diagnostics.Process.Start(deletePsPsi))
+                        {
+                            if (deleteProc != null)
+                            {
+                                var output = deleteProc.StandardOutput.ReadToEnd();
+                                var error = deleteProc.StandardError.ReadToEnd();
+                                deleteProc.WaitForExit();
+                                Program.Log($"PowerShell IP removal completed (exit code: {deleteProc.ExitCode})");
+                                if (!string.IsNullOrWhiteSpace(output)) Program.Log($"Output: {output}");
+                                if (!string.IsNullOrWhiteSpace(error)) Program.Log($"Error: {error}");
+                            }
+                        }
+
+                        System.Threading.Thread.Sleep(1000);  // Wait for system to process removal
+                    }
+                    catch (Exception cleanupEx)
+                    {
+                        Program.Log($"Warning: Could not cleanup old IPs via PowerShell: {cleanupEx.Message}");
+                    }
                 }
 
-                // Update the interface IP via netsh (don't regenerate keys!)
-                Program.Log($"Updating interface IP via netsh...");
-                WireGuardAPI.AssignIPAddress(wireguardAdapter, interfaceName, assignedIpAddress, prefixLength);
+                // Update the interface IP through the backend (don't regenerate keys!)
+                Program.Log($"Updating interface IP...");
+                backend.AssignIP(interfaceName, assignedIpAddress, prefixLength);
 
                 // Update the config file to reflect the new IP (keep existing keys and peers)
                 RegenerateConfigWithPeers();
 
                 // Force WireGuard-NT to reload config
                 Program.Log($"Reloading WireGuard-NT configuration...");
-                WireGuardNT.UpdateConfiguration(wireguardAdapter, configFilePath, interfaceName);
+                backend.ApplyFullConfig(interfaceName, configFilePath);
 
                 Program.Log($"Client tunnel updated with IP {assignedIpAddress}/{prefixLength}");
             }
@@ -1281,13 +1021,15 @@ namespace NATTunnel
                             packetLoopCancellation = null;
                         }
 
-                        // Stop WireGuard service but keep config for reconnection
+                        // Linux's systemd unit handles lifecycle itself — only Windows needs SCM cleanup.
                         if (tunnelStarted)
                         {
-                            // Uninstall the service
-                            WireGuardService.UninstallService(interfaceName);
+                            if (OperatingSystem.IsWindows())
+                            {
+                                WireGuardService.UninstallService(interfaceName);
+                                Program.Log("WireGuard service uninstalled");
+                            }
                             tunnelStarted = false;
-                            Program.Log("WireGuard service uninstalled");
                         }
 
                         // DON'T delete config file - keep it for reconnection
@@ -1300,18 +1042,14 @@ namespace NATTunnel
                     }
                 }
 
-                // Close WireGuard adapter if it's open
-                if (wireguardAdapter != IntPtr.Zero)
+                try
                 {
-                    try
-                    {
-                        WireGuardAPI.CloseAdapter(wireguardAdapter);
-                        wireguardAdapter = IntPtr.Zero;
-                    }
-                    catch (Exception ex)
-                    {
-                        Program.Log($"Warning: Error closing WireGuard adapter: {ex.Message}");
-                    }
+                    backend.DestroyInterface(interfaceName);
+                    wireguardAdapter = IntPtr.Zero;
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"Warning: Error closing WireGuard interface: {ex.Message}");
                 }
 
                 disposedValue = true;
