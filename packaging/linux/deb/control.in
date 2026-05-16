@@ -1,0 +1,12 @@
+Package: nattunnel
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: wireguard-tools, iproute2
+Maintainer: milesthenerd
+Homepage: https://github.com/milesthenerd/NATTunnel
+Description: Mesh VPN daemon with NAT hole-punching
+ NATTunnel creates WireGuard tunnels between peers behind NAT, using a
+ mediation server to coordinate UDP hole-punching. Peers form a fully
+ decentralized mesh where every peer can reach every other peer.

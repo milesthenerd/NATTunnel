@@ -1,15 +1,17 @@
 using System;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Net;
 using System.Net.NetworkInformation;
 
 namespace NATTunnel;
 
 /// <summary>
-/// P/Invoke bindings for wintun.dll and wireguard.dll
+/// P/Invoke bindings for wintun.dll and wireguard.dll. Windows-only.
 /// Based on Wintun reference: https://git.zx2c4.com/wintun/about/
 /// </summary>
+[SupportedOSPlatform("windows")]
 public static class WireGuardAPI
 {
     // Constants

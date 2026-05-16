@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Net;
 using System.Text;
 using System.Linq;
@@ -7,9 +8,10 @@ using System.Linq;
 namespace NATTunnel;
 
 /// <summary>
-/// Wrapper for WireGuard-NT (wireguard.dll) dynamic peer management
-/// This uses the official WireGuard kernel driver which handles all crypto automatically
+/// Wrapper for WireGuard-NT (wireguard.dll) dynamic peer management. Windows-only.
+/// This uses the official WireGuard kernel driver which handles all crypto automatically.
 /// </summary>
+[SupportedOSPlatform("windows")]
 public static class WireGuardNT
 {
     [DllImport("wireguard.dll", EntryPoint = "WireGuardSetConfiguration", CallingConvention = CallingConvention.StdCall, SetLastError = true)]

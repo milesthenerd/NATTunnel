@@ -34,6 +34,13 @@ public static class Program
         Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] {message}");
     }
 
+    /// <summary>Short deterministic interface name "nt-XXXXXXXX"; fits Linux's 15-byte IFNAMSIZ limit.</summary>
+    public static string BuildInterfaceName(string networkID)
+    {
+        byte[] hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(networkID ?? ""));
+        return "nt-" + Convert.ToHexString(hash, 0, 4).ToLowerInvariant();
+    }
+
     public static void Main(string[] args)
     {
         // Normal startup
@@ -118,7 +125,7 @@ public static class Program
 
             // Initialize WireGuard tunnel BEFORE mediation handshake — this is expensive
             // and must NOT be recreated on mediation reconnect (causes memory leak).
-            string interfaceName = $"NATTunnel-{TunnelOptions.NetworkID}";
+            string interfaceName = BuildInterfaceName(TunnelOptions.NetworkID);
             bool debugMode = Environment.GetEnvironmentVariable("WIREGUARD_DEBUG") == "1";
             wireguardTunnel = new WireGuardTunnel(interfaceName, debugMode, isRunningAsService: false, skipTunnelCreation: true);
             wireguardTunnel.SetClientIPAndRestart(meshIP, 16);

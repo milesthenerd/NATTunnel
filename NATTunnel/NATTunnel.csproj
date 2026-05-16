@@ -4,6 +4,7 @@
     <PackageReference Include="tomlyn" Version="0.16.2" />
   </ItemGroup>
 
+  <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish. -->
   <ItemGroup>
     <Content Include="..\lib\win-x64\wireguard.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -17,6 +18,8 @@
     <RollForward>LatestMajor</RollForward>
     <LangVersion>11</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- Windows-only call sites are gated at runtime by OperatingSystem.IsWindows(). -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 
 </Project>

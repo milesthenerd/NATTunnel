@@ -1,0 +1,46 @@
+Name:           nattunnel
+Version:        @VERSION@
+Release:        1%{?dist}
+Summary:        Mesh VPN daemon with NAT hole-punching
+License:        CC0
+URL:            https://github.com/milesthenerd/NATTunnel
+BuildArch:      x86_64
+
+Requires:       wireguard-tools
+Requires:       iproute
+
+# .NET runtime is bundled (self-contained publish), so we don't depend on system dotnet.
+# Disable automatic dependency extraction — it tries to pin glibc versions from the bundled
+# native shims and ends up wrong.
+AutoReqProv:    no
+
+%description
+NATTunnel creates WireGuard tunnels between peers behind NAT, using a
+mediation server to coordinate UDP hole-punching. Peers form a fully
+decentralized mesh where every peer can reach every other peer.
+
+%install
+# Files are staged into %{buildroot} by build.sh before rpmbuild runs.
+
+%files
+%attr(0755, root, root) /usr/bin/nattunneld
+/usr/lib/nattunnel
+%attr(0644, root, root) /lib/systemd/system/nattunnel.service
+
+%post
+systemctl daemon-reload >/dev/null 2>&1 || :
+
+%preun
+if [ $1 -eq 0 ]; then
+    systemctl --no-reload disable --now nattunnel.service >/dev/null 2>&1 || :
+fi
+
+%postun
+systemctl daemon-reload >/dev/null 2>&1 || :
+if [ $1 -eq 0 ]; then
+    rm -rf /etc/nattunnel
+fi
+
+%changelog
+* Thu May 15 2026 NATTunnel maintainers (milesthenerd) - @VERSION@-1
+- Initial RPM package.

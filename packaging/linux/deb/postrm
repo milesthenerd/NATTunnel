@@ -1,0 +1,17 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove)
+        rm -f /usr/bin/nattunneld
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ;;
+    purge)
+        rm -f /usr/bin/nattunneld
+        # On purge, also drop the config directory.
+        rm -rf /etc/nattunnel
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        ;;
+esac
+
+exit 0

@@ -1,14 +1,16 @@
 using System;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Net;
 using System.Net.Sockets;
 
 namespace NATTunnel;
 
 /// <summary>
-/// P/Invoke bindings for WireGuard-NT (wireguard.dll)
+/// P/Invoke bindings for WireGuard-NT (wireguard.dll). Windows-only.
 /// Based on: https://git.zx2c4.com/wireguard-nt/about/
 /// </summary>
+[SupportedOSPlatform("windows")]
 public static class WireGuardNTAPI
 {
     // Constants
