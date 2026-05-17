@@ -104,6 +104,12 @@ public static class TunnelOptions
     public static int IsolationGracePeriodSeconds = 30;
 
     /// <summary>
+    /// Whether the daemon immediately attempts to join the mesh on startup. When false, it idles
+    /// in Disconnected until something POSTs /connect. Default: false (idle until requested).
+    /// </summary>
+    public static bool AutoConnect = false;
+
+    /// <summary>
     /// Whether to use TLS when connecting to the mediation server.
     /// Must match the server configuration. Default: false.
     /// </summary>

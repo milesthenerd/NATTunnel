@@ -1,6 +1,6 @@
 # Linux Packaging
 
-Build scripts for `.deb` (Debian/Ubuntu) and `.rpm` (Fedora/RHEL) packages of `nattunneld`.
+Build scripts for `.deb` (Debian/Ubuntu) and `.rpm` (Fedora/RHEL) packages bundling both the daemon (`nattunneld`) and the desktop GUI (`nattunnel-gui`).
 
 ## Layout
 
@@ -15,10 +15,11 @@ Build scripts for `.deb` (Debian/Ubuntu) and `.rpm` (Fedora/RHEL) packages of `n
 On a build machine (Linux, with .NET 10 SDK):
 
 ```bash
-dotnet publish NATTunnelCLI -r linux-x64 --self-contained -c Release
+dotnet publish NATTunnelCLI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
+dotnet publish NATTunnelGUI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
 ```
 
-This produces the self-contained binary at `NATTunnelCLI/bin/Release/net10.0/linux-x64/publish/`. Both package builds consume that directory.
+The packagers consume both publish dirs and bundle them under `/usr/lib/nattunnel/` and `/usr/lib/nattunnel-gui/`. Framework-dependent publish keeps the package small, the `dotnet-runtime-10.0` package supplies the runtime.
 
 ## Build `.deb`
 
@@ -55,27 +56,18 @@ VERSION=1.1.0 bash packaging/linux/deb/build.sh
 VERSION=1.1.0 bash packaging/linux/rpm/build.sh
 ```
 
-Match this to the `<Version>` in [`NATTunnelCLI.csproj`](../../NATTunnelCLI/NATTunnelCLI.csproj).
+Match this to the `<Version>` in [`Directory.Build.props`](../../Directory.Build.props).
 
 ## Filesystem layout (installed by either package)
 
 ```
-/usr/bin/nattunneld               -> /usr/lib/nattunnel/nattunneld   (symlink)
-/usr/lib/nattunnel/                                                  (self-contained runtime)
-/lib/systemd/system/nattunnel.service                                (systemd unit)
-/etc/nattunnel/config.toml                                           (created on first run)
-```
-
-## Service lifecycle
-
-After install, the service is **not started or enabled automatically**. Admin must edit `/etc/nattunnel/config.toml` (or let the daemon generate one on first run) before starting:
-
-```bash
-sudo systemctl start nattunnel                  # generates config on first run
-sudo systemctl stop nattunnel                   # so you can edit it
-sudo $EDITOR /etc/nattunnel/config.toml         # set networkID, mediation endpoint, etc.
-sudo systemctl enable --now nattunnel           # enable + start
-sudo journalctl -u nattunnel -f                 # follow logs
+/usr/bin/nattunneld              -> /usr/lib/nattunnel/nattunneld       (symlink)
+/usr/bin/nattunnel-gui           -> /usr/lib/nattunnel-gui/nattunnel-gui (symlink)
+/usr/lib/nattunnel/                                                     (daemon runtime)
+/usr/lib/nattunnel-gui/                                                 (GUI runtime)
+/usr/share/applications/nattunnel.desktop                               (app menu entry)
+/lib/systemd/system/nattunnel.service                                   (systemd unit)
+/etc/nattunnel/config.toml                                              (created on first run)
 ```
 
 ## Removal

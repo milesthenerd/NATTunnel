@@ -3,12 +3,12 @@ set -e
 
 case "$1" in
     configure)
-        # Make sure the symlink in /usr/bin points at the bundled binary.
         ln -sf /usr/lib/nattunnel/nattunneld /usr/bin/nattunneld
+        ln -sf /usr/lib/nattunnel-gui/nattunnel-gui /usr/bin/nattunnel-gui
 
-        # Pick up the new unit; don't enable or start automatically — let the
-        # admin run `systemctl enable --now nattunnel` after editing the config.
+        # Service idles in Disconnected on boot (autoConnect=false). GUI triggers /connect.
         systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl enable --now nattunnel.service >/dev/null 2>&1 || true
         ;;
 esac
 

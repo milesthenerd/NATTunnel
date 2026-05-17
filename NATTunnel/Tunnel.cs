@@ -658,6 +658,16 @@ public class Tunnel : IDisposable
                                         break;
                                     }
 
+                                    // Refuse to add a peer whose key matches our own — wg.exe silently
+                                    // no-ops in that case, leaving the interface peerless and every send broken.
+                                    string ourWgKey = WireGuardConfig.GetPublicKeyFromConfig(wireguardTunnel.GetConfigPath());
+                                    if (receivedMessage.WireGuardPublicKey == ourWgKey)
+                                    {
+                                        Program.Log($"[WG] Refusing to add peer with our own public key ({ourWgKey[..8]}...). " +
+                                                    "Likely cause: both peers share the same keys file. Delete the *_keys.txt on one peer to regenerate.");
+                                        break;
+                                    }
+
                                     Program.Log($"[WG] Adding peer: key={receivedMessage.WireGuardPublicKey.Substring(0, 8)}... ip={peerTunnelIp} endpoint={peerEndpoint}");
                                     // Add peer with their public key and tunnel IP
                                     // Pass our tunnel socket for proxy routing

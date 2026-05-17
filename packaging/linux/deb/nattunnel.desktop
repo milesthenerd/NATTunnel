@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=NATTunnel
+Comment=Mesh VPN with NAT hole-punching
+Exec=/usr/bin/nattunnel-gui
+Icon=network-vpn
+Terminal=false
+Categories=Network;
+Keywords=vpn;wireguard;mesh;nat;
+StartupNotify=true

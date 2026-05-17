@@ -2,16 +2,29 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
-    <UseWPF>true</UseWPF>
-    <RollForward>LatestMajor</RollForward>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.0</Version>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <AssemblyName>nattunnel-gui</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ApplicationManifest Condition="$([MSBuild]::IsOSPlatform('Windows'))">app.manifest</ApplicationManifest>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Controls.DataGrid" Version="11.3.13" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.13" />
+    <!-- Avalonia 11.3.x pulls 0.21.2 which has GHSA-xrw6-gwf8-vvr9; bump to 0.21.3 (same API). -->
+    <PackageReference Include="Tmds.DBus.Protocol" Version="0.21.3" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\NATTunnel\NATTunnel.csproj" />
   </ItemGroup>
+
+  <!-- Linux uses the kernel module + 'wg'. -->
+  <Target Name="RemoveWireguardDllOnNonWindowsPublish" AfterTargets="Publish"
+          Condition="$(RuntimeIdentifier.StartsWith('linux')) Or $(RuntimeIdentifier.StartsWith('osx'))">
+    <Delete Files="$(PublishDir)wireguard.dll" />
+  </Target>
 
 </Project>

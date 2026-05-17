@@ -75,6 +75,7 @@ public static class Config
     /// </summary>
     private const string IsolationGracePeriod = "isolationGracePeriod";
     private const string MeshSubnet = "meshSubnet";
+    private const string AutoConnect = "autoConnect";
     private const string TlsEnabled = "tlsEnabled";
     private const string TlsAllowSelfSigned = "tlsAllowSelfSigned";
 
@@ -202,6 +203,9 @@ public static class Config
 
         if (model.ContainsKey(MeshSubnet))
             TunnelOptions.MeshSubnet = (string)model[MeshSubnet];
+
+        if (model.ContainsKey(AutoConnect) && model[AutoConnect] is bool autoConnect)
+            TunnelOptions.AutoConnect = autoConnect;
 
         if (model.ContainsKey(TlsEnabled) && model[TlsEnabled] is bool tlsEnabled)
             TunnelOptions.TlsEnabled = tlsEnabled;

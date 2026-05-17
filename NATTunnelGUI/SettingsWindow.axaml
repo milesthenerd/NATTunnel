@@ -1,0 +1,168 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="NATTunnelGUI.SettingsWindow"
+        Title="Settings"
+        Height="560"
+        Width="420"
+        Background="{StaticResource ContentBrush}"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False">
+
+    <Window.Styles>
+        <Style Selector="TextBlock.label">
+            <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="Margin" Value="0,8,0,3" />
+        </Style>
+        <Style Selector="TextBox.input">
+            <Setter Property="Background" Value="#1E1E1E" />
+            <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushStatic}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="6,4" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontFamily" Value="Consolas,Menlo,monospace" />
+        </Style>
+    </Window.Styles>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+                <TextBlock Text="NETWORK"
+                           Foreground="{StaticResource AccentBlueBrush}"
+                           FontSize="12"
+                           FontWeight="Bold"
+                           Margin="0,0,0,2" />
+                <TextBlock Text="Changes require reconnect"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontStyle="Italic"
+                           Margin="0,0,0,4" />
+
+                <TextBlock Text="Mediation Server" Classes="label" />
+                <TextBox x:Name="MediationEndpointBox" Classes="input" />
+
+                <TextBlock Text="Network ID" Classes="label" />
+                <TextBox x:Name="NetworkIDBox" Classes="input" />
+
+                <TextBlock Text="Network Secret" Classes="label" />
+                <TextBox x:Name="NetworkSecretBox" Classes="input" PasswordChar="•" />
+
+                <TextBlock Text="Mesh Subnet Prefix" Classes="label" />
+                <TextBox x:Name="MeshSubnetBox" Classes="input" />
+
+                <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,14,0,8" />
+
+                <TextBlock Text="TIMING"
+                           Foreground="{StaticResource AccentBlueBrush}"
+                           FontSize="12"
+                           FontWeight="Bold"
+                           Margin="0,0,0,2" />
+                <TextBlock Text="Applied immediately (no reconnect needed)"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontStyle="Italic"
+                           Margin="0,0,0,4" />
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="70" />
+                        <ColumnDefinition Width="30" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="Heartbeat Interval" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="HeartbeatBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="0" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="1" Text="Probe Interval" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="ProbeBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="1" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="2" Text="Stale Timeout" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="StaleTimeoutBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="2" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="3" Text="Repair Cooldown" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="RepairCooldownBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="3" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="4" Text="Dead Threshold Ack Count" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="DeadThresholdBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="4" Grid.Column="2" Text="" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="5" Text="Grace Period" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="GracePeriodBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="5" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="6" Text="Grace Period (Sym.)" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="6" Grid.Column="1" x:Name="GracePeriodSymBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="6" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="7" Text="Isolation Grace Period" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="7" Grid.Column="1" x:Name="IsolationGraceBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="7" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+                </Grid>
+
+                <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,14,0,8" />
+
+                <TextBlock Text="PEER ID (auto-generated)"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           Margin="0,0,0,3" />
+                <TextBox x:Name="PeerIDBox"
+                         IsReadOnly="True"
+                         Background="#1A1A1A"
+                         Foreground="{StaticResource TextSecondaryBrush}"
+                         BorderBrush="{StaticResource BorderBrushStatic}"
+                         BorderThickness="1"
+                         Padding="6,4"
+                         FontSize="11"
+                         FontFamily="Consolas,Menlo,monospace" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="1"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,12,0,0">
+            <Button Content="Cancel"
+                    Click="Cancel_Click"
+                    Width="80"
+                    Height="30"
+                    HorizontalContentAlignment="Center"
+                    Background="#3E3E42"
+                    Foreground="{StaticResource TextPrimaryBrush}"
+                    BorderBrush="{StaticResource BorderBrushStatic}"
+                    BorderThickness="1"
+                    FontSize="12"
+                    Cursor="Hand" />
+            <Button Content="Save"
+                    Click="Save_Click"
+                    Width="80"
+                    Height="30"
+                    Margin="8,0,0,0"
+                    HorizontalContentAlignment="Center"
+                    Background="{StaticResource AccentBlueBrush}"
+                    Foreground="White"
+                    BorderThickness="0"
+                    FontSize="12"
+                    Cursor="Hand" />
+        </StackPanel>
+    </Grid>
+</Window>

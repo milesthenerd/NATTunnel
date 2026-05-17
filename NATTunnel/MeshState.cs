@@ -9,6 +9,9 @@ namespace NATTunnel;
 /// </summary>
 public class MeshState
 {
+    [JsonPropertyName("networkID")]
+    public string NetworkID { get; set; }
+
     [JsonPropertyName("ownMeshIP")]
     public string OwnMeshIP { get; set; }
 

@@ -14,9 +14,6 @@
 
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <RollForward>LatestMajor</RollForward>
-    <LangVersion>11</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Windows-only call sites are gated at runtime by OperatingSystem.IsWindows(). -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
