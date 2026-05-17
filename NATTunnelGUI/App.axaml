@@ -1,10 +1,15 @@
-<Application x:Class="NATTunnelGUI.App"
-             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+<Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
+             x:Class="NATTunnelGUI.App"
+             RequestedThemeVariant="Dark">
+
+    <Application.Styles>
+        <FluentTheme />
+        <StyleInclude Source="avares://Avalonia.Controls.DataGrid/Themes/Fluent.xaml" />
+    </Application.Styles>
+
     <Application.Resources>
         <ResourceDictionary>
-            <!-- Colors -->
             <Color x:Key="SidebarColor">#1E1E1E</Color>
             <Color x:Key="ContentColor">#252526</Color>
             <Color x:Key="BorderColor">#3E3E42</Color>
@@ -19,7 +24,7 @@
 
             <SolidColorBrush x:Key="SidebarBrush" Color="{StaticResource SidebarColor}" />
             <SolidColorBrush x:Key="ContentBrush" Color="{StaticResource ContentColor}" />
-            <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}" />
+            <SolidColorBrush x:Key="BorderBrushStatic" Color="{StaticResource BorderColor}" />
             <SolidColorBrush x:Key="TextPrimaryBrush" Color="{StaticResource TextPrimaryColor}" />
             <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource TextSecondaryColor}" />
             <SolidColorBrush x:Key="AccentBlueBrush" Color="{StaticResource AccentBlueColor}" />

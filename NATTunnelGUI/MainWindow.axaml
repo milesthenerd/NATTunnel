@@ -1,0 +1,295 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:NATTunnelGUI"
+        x:Class="NATTunnelGUI.MainWindow"
+        Title="NATTunnel"
+        Height="700"
+        Width="800"
+        MinHeight="550"
+        Background="{StaticResource ContentBrush}"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.Styles>
+        <Style Selector="TextBox.copyable">
+            <Setter Property="IsReadOnly" Value="True" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Margin" Value="0,0,0,6" />
+            <Setter Property="IsTabStop" Value="False" />
+        </Style>
+        <!-- DataGrid cells default to zero right padding, so glyphs get clipped at the column edge. -->
+        <Style Selector="DataGridCell">
+            <Setter Property="Padding" Value="4,0,12,0" />
+        </Style>
+        <!-- Avalonia's DataGridTextColumn defaults to character-ellipsis trimming, which
+             chops the last char on values that almost fit. Disable trimming entirely. -->
+        <Style Selector="DataGridCell TextBlock">
+            <Setter Property="TextTrimming" Value="None" />
+        </Style>
+        <Style Selector="DataGridColumnHeader TextBlock">
+            <Setter Property="TextTrimming" Value="None" />
+        </Style>
+    </Window.Styles>
+
+    <DockPanel>
+
+        <!-- Left Sidebar (always full window height, never split) -->
+        <Border DockPanel.Dock="Left" Width="200" Background="{StaticResource SidebarBrush}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel Margin="12">
+                    <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                        <Ellipse x:Name="StatusDot"
+                                 Width="10"
+                                 Height="10"
+                                 Fill="{StaticResource StatusRedBrush}"
+                                 VerticalAlignment="Center" />
+                        <TextBlock x:Name="StatusText"
+                                   Text="Connecting..."
+                                   Foreground="{StaticResource TextSecondaryBrush}"
+                                   Margin="8,0,0,0"
+                                   FontSize="12"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+
+                    <TextBlock Text="NETWORK"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2" />
+                    <TextBox x:Name="NetworkNameText"
+                             Text="-"
+                             Foreground="{StaticResource AccentBlueBrush}"
+                             FontSize="14"
+                             FontWeight="SemiBold"
+                             Classes="copyable" />
+
+                    <TextBlock Text="MESH IP"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2" />
+                    <TextBox x:Name="MeshIPText"
+                             Text="-"
+                             Foreground="{StaticResource AccentTealBrush}"
+                             FontSize="13"
+                             FontFamily="Consolas,Menlo,monospace"
+                             Classes="copyable" />
+
+                    <TextBlock Text="PEER ID"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2" />
+                    <TextBox x:Name="PeerIDText"
+                             Text="-"
+                             Foreground="{StaticResource TextPrimaryBrush}"
+                             FontSize="9"
+                             FontFamily="Consolas,Menlo,monospace"
+                             TextWrapping="Wrap"
+                             Classes="copyable" />
+
+                    <TextBlock Text="NAT TYPE"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2" />
+                    <TextBox x:Name="NATTypeText"
+                             Text="-"
+                             Foreground="{StaticResource TextPrimaryBrush}"
+                             FontSize="12"
+                             Classes="copyable" />
+
+                    <TextBlock Text="ROLE"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2" />
+                    <TextBox x:Name="RoleText"
+                             Text="-"
+                             Foreground="{StaticResource TextPrimaryBrush}"
+                             FontSize="12"
+                             Classes="copyable" />
+
+                    <TextBlock x:Name="IntroducerLabel"
+                               Text="INTRODUCER"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2"
+                               IsVisible="False" />
+                    <TextBox x:Name="IntroducerText"
+                             Text="-"
+                             Foreground="{StaticResource AccentTealBrush}"
+                             FontSize="11"
+                             FontFamily="Consolas,Menlo,monospace"
+                             Classes="copyable"
+                             IsVisible="False" />
+
+                    <TextBlock Text="UPTIME"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2" />
+                    <TextBox x:Name="UptimeText"
+                             Text="-"
+                             Foreground="{StaticResource TextPrimaryBrush}"
+                             FontSize="12"
+                             Classes="copyable"
+                             Margin="0" />
+
+                    <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,4,0,12" />
+
+                    <Button x:Name="ConnectButton"
+                            Content="Disconnect"
+                            Click="ConnectDisconnect_Click"
+                            Height="32"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#3E3E42"
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            BorderBrush="{StaticResource BorderBrushStatic}"
+                            BorderThickness="1"
+                            FontSize="12"
+                            Cursor="Hand" />
+
+                    <Button x:Name="SettingsButton"
+                            Content="Settings"
+                            Click="Settings_Click"
+                            Height="32"
+                            Margin="0,8,0,0"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#3E3E42"
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            BorderBrush="{StaticResource BorderBrushStatic}"
+                            BorderThickness="1"
+                            FontSize="12"
+                            Cursor="Hand" />
+
+                    <Button x:Name="StopButton"
+                            Content="Stop"
+                            Click="Stop_Click"
+                            Height="32"
+                            Margin="0,8,0,0"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#5A1A1A"
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            BorderBrush="#7A2A2A"
+                            BorderThickness="1"
+                            FontSize="12"
+                            Cursor="Hand" />
+                </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <Border DockPanel.Dock="Left" Width="1" Background="{StaticResource BorderBrushStatic}" />
+
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="2*" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" MinHeight="80" />
+            </Grid.RowDefinitions>
+
+            <DockPanel Grid.Row="0">
+                <Border DockPanel.Dock="Top" Padding="12,8">
+                    <TextBlock x:Name="PeerCountHeader"
+                               Text="Peers (0)"
+                               Foreground="{StaticResource AccentBlueBrush}"
+                               FontSize="14"
+                               FontWeight="SemiBold" />
+                </Border>
+
+                <DataGrid x:Name="PeerListView"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          GridLinesVisibility="None"
+                          HeadersVisibility="Column"
+                          Background="Transparent"
+                          Foreground="{StaticResource TextPrimaryBrush}"
+                          FontSize="12"
+                          FontFamily="Consolas,Menlo,monospace"
+                          BorderThickness="0">
+                    <DataGrid.Columns>
+                        <DataGridTemplateColumn Header="Mesh IP" Width="125">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding MeshIP}" TextTrimming="None"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Width="110">
+                            <DataGridTemplateColumn.Header>
+                                <TextBlock Text="Peer ID" TextTrimming="None" />
+                            </DataGridTemplateColumn.Header>
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding PeerIDShort}" TextTrimming="None"
+                                               ToolTip.Tip="{Binding PeerID}"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="NAT" Width="125">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding NATType}" TextTrimming="None"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Endpoint" Width="*" MinWidth="160">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding Endpoint}" TextTrimming="None"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Width="105">
+                            <DataGridTemplateColumn.Header>
+                                <TextBlock Text="Latency" TextTrimming="None" />
+                            </DataGridTemplateColumn.Header>
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding LatencyDisplay}" TextTrimming="None"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Status" Width="100">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding StatusDisplay}" TextTrimming="None"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </DockPanel>
+
+            <GridSplitter Grid.Row="1"
+                          Height="1"
+                          HorizontalAlignment="Stretch"
+                          Background="{StaticResource BorderBrushStatic}"
+                          ResizeDirection="Rows"
+                          Cursor="SizeNorthSouth" />
+
+            <TextBox x:Name="LogTextBox"
+                     Grid.Row="2"
+                     IsReadOnly="True"
+                     AcceptsReturn="True"
+                     Background="#1A1A1A"
+                     Foreground="{StaticResource TextSecondaryBrush}"
+                     FontFamily="Consolas,Menlo,monospace"
+                     FontSize="11"
+                     BorderThickness="0"
+                     TextWrapping="NoWrap"
+                     Padding="8,4" />
+        </Grid>
+    </DockPanel>
+</Window>

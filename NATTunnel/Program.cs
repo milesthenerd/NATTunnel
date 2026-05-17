@@ -29,9 +29,29 @@ public static class Program
     /// <summary>Set to true by GUI to request reconnect after a disconnect.</summary>
     public static volatile bool ConnectRequested;
 
+    /// <summary>Bounded ring of recent log lines, served by GET /logs.</summary>
+    private const int MaxLogLines = 500;
+    private static readonly System.Collections.Concurrent.ConcurrentQueue<(long Seq, string Line)> RecentLogs = new();
+    private static long logSeq;
+
+    /// <summary>Populated by RunMeshMode once engine state exists; GET /status uses this.</summary>
+    private static Func<MeshState> meshStateProvider = () => new MeshState
+    {
+        ConnectionState = "Disconnected",
+        NetworkID = TunnelOptions.NetworkID,
+        OwnMeshIP = null,
+        OwnPeerID = null,
+        NATType = null,
+        UptimeSeconds = 0,
+    };
+
     public static void Log(string message)
     {
-        Console.WriteLine($"[{DateTime.UtcNow:HH:mm:ss}] {message}");
+        string line = $"[{DateTime.UtcNow:HH:mm:ss}] {message}";
+        Console.WriteLine(line);
+        long seq = System.Threading.Interlocked.Increment(ref logSeq);
+        RecentLogs.Enqueue((seq, line));
+        while (RecentLogs.Count > MaxLogLines && RecentLogs.TryDequeue(out _)) { }
     }
 
     /// <summary>Short deterministic interface name "nt-XXXXXXXX"; fits Linux's 15-byte IFNAMSIZ limit.</summary>
@@ -82,6 +102,184 @@ public static class Program
         UdpClient meshControlClient = null;
         try
         {
+            // Start the HTTP control/status endpoint first so the GUI can fetch logs
+            // (and serve `/status` etc.) immediately, before any of the slow setup below.
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    var httpListener = new HttpListener();
+                    httpListener.Prefixes.Add("http://localhost:51889/");
+                    httpListener.Start();
+                    Log("[Mesh] HTTP status endpoint listening on http://localhost:51889/status");
+
+                    while (true)
+                    {
+                        try
+                        {
+                            var context = httpListener.GetContext();
+                            var rawUrl = context.Request.RawUrl;
+                            var method = context.Request.HttpMethod;
+
+                            if (method == "GET" && rawUrl == "/status")
+                            {
+                                var meshState = meshStateProvider();
+                                var json = JsonSerializer.Serialize(meshState, new JsonSerializerOptions { WriteIndented = true });
+                                byte[] buffer = Encoding.UTF8.GetBytes(json);
+
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = buffer.Length;
+                                context.Response.OutputStream.Write(buffer, 0, buffer.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "GET" && rawUrl != null && rawUrl.StartsWith("/logs"))
+                            {
+                                long since = 0;
+                                int qIdx = rawUrl.IndexOf("since=", StringComparison.Ordinal);
+                                if (qIdx >= 0) long.TryParse(rawUrl[(qIdx + 6)..].Split('&')[0], out since);
+
+                                var snapshot = RecentLogs.ToArray();
+                                var newLines = new List<string>(snapshot.Length);
+                                long latest = since;
+                                foreach (var entry in snapshot)
+                                {
+                                    if (entry.Seq > latest) latest = entry.Seq;
+                                    if (entry.Seq > since) newLines.Add(entry.Line);
+                                }
+                                var payload = JsonSerializer.Serialize(new { latestSeq = latest, lines = newLines });
+                                byte[] buffer = Encoding.UTF8.GetBytes(payload);
+
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = buffer.Length;
+                                context.Response.OutputStream.Write(buffer, 0, buffer.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "POST" && rawUrl == "/disconnect")
+                            {
+                                DisconnectRequested = true;
+                                byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"disconnecting\"}");
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = resp.Length;
+                                context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "POST" && rawUrl == "/connect")
+                            {
+                                ConnectRequested = true;
+                                byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"connecting\"}");
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = resp.Length;
+                                context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "GET" && rawUrl == "/config")
+                            {
+                                var snapshot = new ConfigSnapshot
+                                {
+                                    MediationEndpoint = TunnelOptions.MediationEndpoint?.ToString(),
+                                    NetworkID = TunnelOptions.NetworkID,
+                                    NetworkSecret = TunnelOptions.NetworkSecret,
+                                    MeshSubnet = TunnelOptions.MeshSubnet,
+                                    HeartbeatIntervalSeconds = TunnelOptions.HeartbeatIntervalSeconds,
+                                    ProbeIntervalSeconds = TunnelOptions.ProbeIntervalSeconds,
+                                    StaleTimeoutSeconds = TunnelOptions.StaleTimeoutSeconds,
+                                    RepairCooldownSeconds = TunnelOptions.RepairCooldownSeconds,
+                                    DeadThreshold = TunnelOptions.DeadThreshold,
+                                    GracePeriodSecondsNonSymmetric = TunnelOptions.GracePeriodSecondsNonSymmetric,
+                                    GracePeriodSecondsSymmetric = TunnelOptions.GracePeriodSecondsSymmetric,
+                                    IsolationGracePeriodSeconds = TunnelOptions.IsolationGracePeriodSeconds,
+                                    PeerID = TunnelOptions.PeerID?.ToString(),
+                                };
+                                byte[] buffer = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(snapshot));
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = buffer.Length;
+                                context.Response.OutputStream.Write(buffer, 0, buffer.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "POST" && rawUrl == "/config")
+                            {
+                                string body;
+                                using (var reader = new System.IO.StreamReader(context.Request.InputStream, Encoding.UTF8))
+                                    body = reader.ReadToEnd();
+                                try
+                                {
+                                    var snapshot = JsonSerializer.Deserialize<ConfigSnapshot>(body);
+                                    if (snapshot == null) throw new Exception("Empty payload");
+
+                                    TunnelOptions.HeartbeatIntervalSeconds = snapshot.HeartbeatIntervalSeconds;
+                                    TunnelOptions.ProbeIntervalSeconds = snapshot.ProbeIntervalSeconds;
+                                    TunnelOptions.StaleTimeoutSeconds = snapshot.StaleTimeoutSeconds;
+                                    TunnelOptions.RepairCooldownSeconds = snapshot.RepairCooldownSeconds;
+                                    TunnelOptions.DeadThreshold = snapshot.DeadThreshold;
+                                    TunnelOptions.GracePeriodSecondsNonSymmetric = snapshot.GracePeriodSecondsNonSymmetric;
+                                    TunnelOptions.GracePeriodSecondsSymmetric = snapshot.GracePeriodSecondsSymmetric;
+                                    TunnelOptions.IsolationGracePeriodSeconds = snapshot.IsolationGracePeriodSeconds;
+
+                                    Config.SaveAllSettings(
+                                        snapshot.MediationEndpoint ?? "",
+                                        snapshot.NetworkID ?? "",
+                                        snapshot.NetworkSecret ?? "",
+                                        snapshot.MeshSubnet ?? "",
+                                        snapshot.HeartbeatIntervalSeconds,
+                                        snapshot.ProbeIntervalSeconds,
+                                        snapshot.StaleTimeoutSeconds,
+                                        snapshot.RepairCooldownSeconds,
+                                        snapshot.DeadThreshold,
+                                        snapshot.GracePeriodSecondsNonSymmetric,
+                                        snapshot.GracePeriodSecondsSymmetric,
+                                        snapshot.IsolationGracePeriodSeconds);
+
+                                    Config.TryLoadConfig();
+                                    byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"saved\"}");
+                                    context.Response.ContentType = "application/json";
+                                    context.Response.ContentLength64 = resp.Length;
+                                    context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                    context.Response.OutputStream.Close();
+                                }
+                                catch (Exception ex)
+                                {
+                                    context.Response.StatusCode = 400;
+                                    byte[] resp = Encoding.UTF8.GetBytes($"{{\"error\":\"{ex.Message}\"}}");
+                                    context.Response.ContentType = "application/json";
+                                    context.Response.ContentLength64 = resp.Length;
+                                    context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                    context.Response.OutputStream.Close();
+                                }
+                            }
+                            else if (method == "POST" && rawUrl == "/shutdown")
+                            {
+                                ShutdownRequested = true;
+                                byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"shutting_down\"}");
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = resp.Length;
+                                context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else
+                            {
+                                context.Response.StatusCode = 404;
+                                context.Response.OutputStream.Close();
+                            }
+                        }
+                        catch (HttpListenerException)
+                        {
+                            // Listener stopped or other HTTP error
+                            break;
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"[Mesh] HTTP endpoint error: {ex.Message}");
+                        }
+                    }
+
+                    httpListener.Stop();
+                }
+                catch (Exception ex)
+                {
+                    Log($"[Mesh] Failed to start HTTP status endpoint on port 51889 — another instance may already be running. ({ex.Message})");
+                }
+            });
+
             // Load persistent peer ID or generate and save a new one
             // This ensures stable mesh IP across restarts (mesh IP is derived from peer ID)
             Guid peerID;
@@ -356,6 +554,12 @@ public static class Program
                             // MeshIntroduction is no longer used
                         }
                     }
+                    catch (ObjectDisposedException)
+                    {
+                        // UdpClient was disposed — RunMeshMode is shutting down. Exit cleanly
+                        // instead of hot-looping on the same exception forever.
+                        break;
+                    }
                     catch (Exception ex)
                     {
                         Log($"[Mesh] Mesh control listener error: {ex.Message}");
@@ -405,7 +609,6 @@ public static class Program
 
             // Guards to prevent re-starting one-time background tasks on reconnect
             bool udpDispatcherStarted = false;
-            bool httpEndpointStarted = false;
 
             // ── Per-connect tracking state ──
             // Declared here (before outer loop) so background tasks (UDP dispatcher,
@@ -430,8 +633,23 @@ public static class Program
             // === OUTER CONNECT LOOP ===
             // Wraps mediation handshake + setup loop + mesh-control loop.
             // On disconnect, we return here to idle and wait for reconnect.
+            bool isFirstIteration = true;
             while (!ShutdownRequested)
             {
+            // First iteration: if AutoConnect is off, idle until /connect arrives. Subsequent
+            // iterations rely on the existing disconnect-then-idle path further below.
+            if (isFirstIteration && !TunnelOptions.AutoConnect)
+            {
+                isFirstIteration = false;
+                ConnectionState = MeshConnectionState.Disconnected;
+                Log("[Mesh] Idle (autoConnect=false). Waiting for /connect request...");
+                while (!ShutdownRequested && !ConnectRequested)
+                    System.Threading.Thread.Sleep(100);
+                ConnectRequested = false;
+                if (ShutdownRequested) break;
+            }
+            isFirstIteration = false;
+
             ConnectionState = MeshConnectionState.Connecting;
             DisconnectRequested = false;
             {
@@ -1072,6 +1290,7 @@ public static class Program
                 {
                     var state = new MeshState
                     {
+                        NetworkID = TunnelOptions.NetworkID,
                         OwnMeshIP = meshIP,
                         OwnPeerID = peerID.ToString(),
                         IsIntroducer = isIntroducer,
@@ -1235,6 +1454,7 @@ public static class Program
                     Log($"[Mesh] Error building mesh state: {ex.Message}");
                     return new MeshState
                     {
+                        NetworkID = TunnelOptions.NetworkID,
                         OwnMeshIP = meshIP,
                         OwnPeerID = peerID.ToString(),
                         IsIntroducer = isIntroducer,
@@ -1653,88 +1873,8 @@ public static class Program
             });
             } // end udpDispatcherStarted guard
 
-            // HTTP status endpoint for mesh state queries (used by GUI and CLI tools)
-            if (!httpEndpointStarted) { httpEndpointStarted = true;
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                try
-                {
-                    var httpListener = new HttpListener();
-                    httpListener.Prefixes.Add("http://localhost:51889/");
-                    httpListener.Start();
-                    Log("[Mesh] HTTP status endpoint listening on http://localhost:51889/status");
-
-                    while (true)
-                    {
-                        try
-                        {
-                            var context = httpListener.GetContext();
-                            var rawUrl = context.Request.RawUrl;
-                            var method = context.Request.HttpMethod;
-
-                            if (method == "GET" && rawUrl == "/status")
-                            {
-                                var meshState = GetMeshState();
-                                var json = JsonSerializer.Serialize(meshState, new JsonSerializerOptions { WriteIndented = true });
-                                byte[] buffer = Encoding.UTF8.GetBytes(json);
-
-                                context.Response.ContentType = "application/json";
-                                context.Response.ContentLength64 = buffer.Length;
-                                context.Response.OutputStream.Write(buffer, 0, buffer.Length);
-                                context.Response.OutputStream.Close();
-                            }
-                            else if (method == "POST" && rawUrl == "/disconnect")
-                            {
-                                DisconnectRequested = true;
-                                byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"disconnecting\"}");
-                                context.Response.ContentType = "application/json";
-                                context.Response.ContentLength64 = resp.Length;
-                                context.Response.OutputStream.Write(resp, 0, resp.Length);
-                                context.Response.OutputStream.Close();
-                            }
-                            else if (method == "POST" && rawUrl == "/connect")
-                            {
-                                ConnectRequested = true;
-                                byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"connecting\"}");
-                                context.Response.ContentType = "application/json";
-                                context.Response.ContentLength64 = resp.Length;
-                                context.Response.OutputStream.Write(resp, 0, resp.Length);
-                                context.Response.OutputStream.Close();
-                            }
-                            else if (method == "POST" && rawUrl == "/shutdown")
-                            {
-                                ShutdownRequested = true;
-                                byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"shutting_down\"}");
-                                context.Response.ContentType = "application/json";
-                                context.Response.ContentLength64 = resp.Length;
-                                context.Response.OutputStream.Write(resp, 0, resp.Length);
-                                context.Response.OutputStream.Close();
-                            }
-                            else
-                            {
-                                context.Response.StatusCode = 404;
-                                context.Response.OutputStream.Close();
-                            }
-                        }
-                        catch (HttpListenerException)
-                        {
-                            // Listener stopped or other HTTP error
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            Log($"[Mesh] HTTP endpoint error: {ex.Message}");
-                        }
-                    }
-
-                    httpListener.Stop();
-                }
-                catch (Exception ex)
-                {
-                    Log($"[Mesh] Failed to start HTTP status endpoint on port 51889 — another instance may already be running. ({ex.Message})");
-                }
-            });
-            } // end httpEndpointStarted guard
+            // Engine state is now ready — wire it up so the HTTP /status endpoint returns real data.
+            meshStateProvider = GetMeshState;
 
             // Track consecutive failed introducer connection retries.
             // After too many failures, break out to force a fresh mediation reconnection.
@@ -3981,7 +4121,8 @@ public static class Program
         }
         finally
         {
-            // Dispose resources so retries can rebind ports
+            // Signal background tasks (listener, HTTP) to stop before tearing down their sockets.
+            ShutdownRequested = true;
             try { meshControlClient?.Dispose(); } catch { }
             try { udpProxy?.Dispose(); } catch { }
             try { wireguardTunnel?.Dispose(); } catch { }

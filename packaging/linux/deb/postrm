@@ -3,11 +3,11 @@ set -e
 
 case "$1" in
     remove)
-        rm -f /usr/bin/nattunneld
+        rm -f /usr/bin/nattunneld /usr/bin/nattunnel-gui
         systemctl daemon-reload >/dev/null 2>&1 || true
         ;;
     purge)
-        rm -f /usr/bin/nattunneld
+        rm -f /usr/bin/nattunneld /usr/bin/nattunnel-gui
         # On purge, also drop the config directory.
         rm -rf /etc/nattunnel
         systemctl daemon-reload >/dev/null 2>&1 || true
