@@ -22,7 +22,6 @@ namespace NATTunnel
         private readonly bool isRunningAsService;
         private readonly bool skipTunnelCreation; // For mesh mode: don't create a Tunnel
         private WireGuardUdpProxy udpProxy;
-        private IntPtr wireguardAdapter = IntPtr.Zero;
         private byte[] privateKey;
         private byte[] publicKey;
         private CancellationTokenSource packetLoopCancellation;
@@ -618,8 +617,7 @@ namespace NATTunnel
                 if (!backend.AddOrUpdatePeer(interfaceName, peer))
                 {
                     // Fallback: full config reload
-                    if (wireguardAdapter != IntPtr.Zero)
-                        backend.ApplyFullConfig(interfaceName, configFilePath);
+                    backend.ApplyFullConfig(interfaceName, configFilePath);
                 }
             }
             else
@@ -709,8 +707,7 @@ namespace NATTunnel
                 if (!backend.AddOrUpdatePeer(interfaceName, peer))
                 {
                     // Fallback: full config reload
-                    if (wireguardAdapter != IntPtr.Zero)
-                        backend.ApplyFullConfig(interfaceName, configFilePath);
+                    backend.ApplyFullConfig(interfaceName, configFilePath);
                 }
             }
             else
@@ -758,8 +755,7 @@ namespace NATTunnel
                 if (!backend.AddOrUpdatePeer(interfaceName, gatewayPeer))
                 {
                     // Fallback: full config reload
-                    if (wireguardAdapter != IntPtr.Zero)
-                        backend.ApplyFullConfig(interfaceName, configFilePath);
+                    backend.ApplyFullConfig(interfaceName, configFilePath);
                 }
             }
 
@@ -805,8 +801,7 @@ namespace NATTunnel
                 {
                     if (!backend.AddOrUpdatePeer(interfaceName, gatewayPeer))
                     {
-                        if (wireguardAdapter != IntPtr.Zero)
-                            backend.ApplyFullConfig(interfaceName, configFilePath);
+                        backend.ApplyFullConfig(interfaceName, configFilePath);
                     }
                 }
                 RegenerateConfigWithPeers();
@@ -837,8 +832,7 @@ namespace NATTunnel
                 {
                     if (!backend.AddOrUpdatePeer(interfaceName, gatewayPeer))
                     {
-                        if (wireguardAdapter != IntPtr.Zero)
-                            backend.ApplyFullConfig(interfaceName, configFilePath);
+                        backend.ApplyFullConfig(interfaceName, configFilePath);
                     }
                 }
                 RegenerateConfigWithPeers();
@@ -864,9 +858,11 @@ namespace NATTunnel
             }
             peerManager.RemovePeer(connectionId);
 
-            // Update WireGuard-NT configuration dynamically
-            if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
+            // Apply the updated peer set to the live interface so the kernel state matches the
+            // in-memory peerManager. Without this the kernel keeps stale peer entries forever.
+            if (tunnelStarted)
             {
+                RegenerateConfigWithPeers();
                 backend.ApplyFullConfig(interfaceName, configFilePath);
             }
         }
@@ -889,9 +885,11 @@ namespace NATTunnel
             // Clear relay routes
             relayRoutes.Clear();
 
-            // Update WireGuard-NT configuration dynamically
-            if (tunnelStarted && wireguardAdapter != IntPtr.Zero)
+            // Apply the updated peer set to the live interface so the kernel state matches the
+            // in-memory peerManager. Without this the kernel keeps stale peer entries forever.
+            if (tunnelStarted)
             {
+                RegenerateConfigWithPeers();
                 backend.ApplyFullConfig(interfaceName, configFilePath);
             }
         }
@@ -1045,7 +1043,6 @@ namespace NATTunnel
                 try
                 {
                     backend.DestroyInterface(interfaceName);
-                    wireguardAdapter = IntPtr.Zero;
                 }
                 catch (Exception ex)
                 {

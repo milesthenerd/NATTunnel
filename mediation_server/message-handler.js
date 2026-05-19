@@ -672,9 +672,10 @@ class MessageHandler {
             // Use meshMembers as the candidate pool since it includes peers that may have
             // disconnected from the network registry but still have active TCP sockets.
             const allCandidates = meshMembers.length > otherPeers.length ? meshMembers : otherPeers;
-            const introducer = allCandidates.find(p => {
+
+            const isEligible = (p) => {
+                if (!p) return false;
                 if (p.natType === NATTypes.Symmetric) return false;
-                // Check if this peer has a live TCP socket (by clientID lookup)
                 const sockInfo = this.connectionManager.sockets.find(s => s.clientID === p.peerID);
                 if (!sockInfo) return false;
                 // Re-register them in the active network if they fell out
@@ -691,7 +692,23 @@ class MessageHandler {
                     });
                 }
                 return true;
-            });
+            };
+
+            // Reuse the sticky introducer when still eligible — fresh `find()` per join causes split-brain.
+            let introducer = null;
+            const stickyID = this.networkRegistry.getIntroducer(NetworkID);
+            if (stickyID && stickyID !== PeerID) {
+                const sticky = allCandidates.find(p => p.peerID === stickyID);
+                if (isEligible(sticky)) {
+                    introducer = sticky;
+                } else {
+                    console.log(`[MessageHandler] Sticky introducer ${stickyID} no longer eligible for ${NetworkID}, re-electing`);
+                    this.networkRegistry.clearIntroducer(NetworkID);
+                }
+            }
+            if (!introducer) {
+                introducer = allCandidates.find(isEligible);
+            }
 
             if (!introducer) {
                 // No eligible introducer (all symmetric or all disconnected).
@@ -727,6 +744,8 @@ class MessageHandler {
                     meshIP: introducer.meshIP
                 });
             }
+
+            this.networkRegistry.setIntroducer(NetworkID, introducer.peerID);
 
             const response = {
                 ID: MessageTypes.MeshJoinResponse,
