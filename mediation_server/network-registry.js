@@ -17,6 +17,20 @@ class NetworkRegistry {
         this.networks = new Map();
         // Map of networkID -> Map of peerID -> peer info (all members, persists across disconnections)
         this.meshMembers = new Map();
+        // Sticky introducer per network — prevents split-brain from re-electing on every join.
+        this.introducers = new Map();
+    }
+
+    getIntroducer(networkID) {
+        return this.introducers.get(networkID) || null;
+    }
+
+    setIntroducer(networkID, peerID) {
+        this.introducers.set(networkID, peerID);
+    }
+
+    clearIntroducer(networkID) {
+        this.introducers.delete(networkID);
     }
 
     /**
@@ -125,6 +139,11 @@ class NetworkRegistry {
                     console.log(`[NetworkRegistry] Peer ${peerID} marked as disconnected in mesh members`);
                 }
 
+                if (this.introducers.get(networkID) === peerID) {
+                    this.introducers.delete(networkID);
+                    console.log(`[NetworkRegistry] Cleared introducer for network ${networkID} (peer ${peerID} disconnected)`);
+                }
+
                 // Clean up empty active networks (but keep meshMembers)
                 if (network.size === 0) {
                     this.networks.delete(networkID);
@@ -195,6 +214,10 @@ class NetworkRegistry {
                 // Also remove from active if present
                 const network = this.networks.get(networkID);
                 if (network) network.delete(peerID);
+
+                if (this.introducers.get(networkID) === peerID) {
+                    this.introducers.delete(networkID);
+                }
 
                 // Clean up empty mesh member maps
                 if (members.size === 0) {

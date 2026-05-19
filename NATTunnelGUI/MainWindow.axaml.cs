@@ -32,6 +32,8 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
 
+        Title = $"NATTunnel {GetAppVersion()}";
+
         NetworkNameText.Text = "-";
         LogTextBox.Text = "Starting...\n";
 
@@ -252,6 +254,9 @@ public partial class MainWindow : Window
         httpClient.Dispose();
         base.OnClosing(e);
     }
+
+    private static string GetAppVersion() =>
+        $"v{System.Reflection.Assembly.GetEntryAssembly()?.GetName().Version?.ToString(3) ?? "?"}";
 }
 
 public class PeerDisplayItem
