@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Net;
 
 namespace NATTunnel;
@@ -73,6 +74,16 @@ public class WireGuardPeer
         {
             AllowedIPs = $"{AllowedIPs},{newEntry}";
         }
+    }
+
+    /// <summary>Remove one /32 entry from this peer's AllowedIPs without affecting other entries.</summary>
+    public void RemoveAllowedIP(IPAddress ip)
+    {
+        string target = $"{ip}/32";
+        var kept = AllowedIPs
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(e => e != target);
+        AllowedIPs = string.Join(",", kept);
     }
 
     public string GenerateConfigSection(bool useProxyEndpoint = true)

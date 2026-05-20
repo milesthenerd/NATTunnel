@@ -39,6 +39,10 @@ public class MeshState
     [JsonPropertyName("connectionState")]
     public string ConnectionState { get; set; }
 
+    /// <summary>Number of relay pairs this peer is currently hosting (forwarding traffic for).</summary>
+    [JsonPropertyName("hostedRelayPairs")]
+    public int HostedRelayPairs { get; set; }
+
     [JsonPropertyName("metrics")]
     public MeshMetrics Metrics { get; set; }
 

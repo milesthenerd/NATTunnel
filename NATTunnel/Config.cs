@@ -78,6 +78,12 @@ public static class Config
     private const string AutoConnect = "autoConnect";
     private const string TlsEnabled = "tlsEnabled";
     private const string TlsAllowSelfSigned = "tlsAllowSelfSigned";
+    private const string AllowRelayThrough = "allowRelayThrough";
+    private const string OwnRelayCapacity = "relayCapacity";
+    private const string RelayHealthTimeoutSeconds = "relayHealthTimeout";
+    private const string RelayReselectMinImprovement = "relayReselectMinImprovement";
+    private const string RelayReselectCooldownSeconds = "relayReselectCooldown";
+    private const string RelayLoadFactorMs = "relayLoadFactorMs";
 
     #endregion
 
@@ -213,6 +219,24 @@ public static class Config
         if (model.ContainsKey(TlsAllowSelfSigned) && model[TlsAllowSelfSigned] is bool tlsAllowSelfSigned)
             TunnelOptions.TlsAllowSelfSigned = tlsAllowSelfSigned;
 
+        if (model.ContainsKey(AllowRelayThrough) && model[AllowRelayThrough] is bool allowRelay)
+            TunnelOptions.AllowRelayThrough = allowRelay;
+
+        if (model.ContainsKey(OwnRelayCapacity) && model[OwnRelayCapacity] is string capStr &&
+            Enum.TryParse<RelayCapacity>(capStr, true, out var parsedCap))
+            TunnelOptions.OwnRelayCapacity = parsedCap;
+
+        TryParseConfigInt(model, RelayHealthTimeoutSeconds, v => TunnelOptions.RelayHealthTimeoutSeconds = v);
+        TryParseConfigInt(model, RelayReselectCooldownSeconds, v => TunnelOptions.RelayReselectCooldownSeconds = v);
+        TryParseConfigInt(model, RelayLoadFactorMs, v => TunnelOptions.RelayLoadFactorMs = v);
+
+        if (model.ContainsKey(RelayReselectMinImprovement))
+        {
+            object v = model[RelayReselectMinImprovement];
+            if (v is double d) TunnelOptions.RelayReselectMinImprovement = d;
+            else if (v is long l) TunnelOptions.RelayReselectMinImprovement = l;
+        }
+
         return true;
     }
 
@@ -262,7 +286,13 @@ public static class Config
         int deadThreshold,
         int gracePeriod,
         int gracePeriodSymmetric,
-        int isolationGracePeriod)
+        int isolationGracePeriod,
+        bool allowRelayThrough,
+        string ownRelayCapacity,
+        int relayHealthTimeout,
+        int relayReselectCooldown,
+        int relayLoadFactorMs,
+        double relayReselectMinImprovement)
     {
         string configPath = GetConfigFilePath();
         if (configPath == null || !File.Exists(configPath)) return;
@@ -281,6 +311,12 @@ public static class Config
         SetConfigLine(ref lines, GracePeriodSeconds, gracePeriod.ToString());
         SetConfigLine(ref lines, GracePeriodSecondsSymmetric, gracePeriodSymmetric.ToString());
         SetConfigLine(ref lines, IsolationGracePeriod, isolationGracePeriod.ToString());
+        SetConfigLine(ref lines, AllowRelayThrough, allowRelayThrough ? "true" : "false");
+        SetConfigLine(ref lines, OwnRelayCapacity, $"\"{ownRelayCapacity}\"");
+        SetConfigLine(ref lines, RelayHealthTimeoutSeconds, relayHealthTimeout.ToString());
+        SetConfigLine(ref lines, RelayReselectCooldownSeconds, relayReselectCooldown.ToString());
+        SetConfigLine(ref lines, RelayLoadFactorMs, relayLoadFactorMs.ToString());
+        SetConfigLine(ref lines, RelayReselectMinImprovement, relayReselectMinImprovement.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
         File.WriteAllLines(configPath, lines);
     }
@@ -508,25 +544,29 @@ public static class Config
         }
 
         // Check for each timeout/interval field and add if missing
-        var fieldsToCheck = new[]
+        var fieldsToCheck = new (string key, string value, string comment)[]
         {
-            (key: HeartbeatInterval, value: TunnelOptions.HeartbeatIntervalSeconds, comment: "Introducer heartbeat interval (seconds)"),
-            (key: ProbeInterval, value: TunnelOptions.ProbeIntervalSeconds, comment: "Introducer probe interval (seconds)"),
-            (key: StaleTimeout, value: TunnelOptions.StaleTimeoutSeconds, comment: "Stale connection timeout (seconds)"),
-            (key: RepairCooldown, value: TunnelOptions.RepairCooldownSeconds, comment: "Relay repair cooldown (seconds)"),
-            (key: DeadThreshold, value: TunnelOptions.DeadThreshold, comment: "Dead peer threshold (missed heartbeats)"),
-            (key: GracePeriodSeconds, value: TunnelOptions.GracePeriodSecondsNonSymmetric, comment: "Grace period for non-symmetric NAT (seconds)"),
-            (key: GracePeriodSecondsSymmetric, value: TunnelOptions.GracePeriodSecondsSymmetric, comment: "Grace period for symmetric NAT (seconds)"),
-            (key: IsolationGracePeriod, value: TunnelOptions.IsolationGracePeriodSeconds, comment: "Isolation grace period (seconds)")
+            (HeartbeatInterval, TunnelOptions.HeartbeatIntervalSeconds.ToString(), "Introducer heartbeat interval (seconds)"),
+            (ProbeInterval, TunnelOptions.ProbeIntervalSeconds.ToString(), "Introducer probe interval (seconds)"),
+            (StaleTimeout, TunnelOptions.StaleTimeoutSeconds.ToString(), "Stale connection timeout (seconds)"),
+            (RepairCooldown, TunnelOptions.RepairCooldownSeconds.ToString(), "Relay repair cooldown (seconds)"),
+            (DeadThreshold, TunnelOptions.DeadThreshold.ToString(), "Dead peer threshold (missed heartbeats)"),
+            (GracePeriodSeconds, TunnelOptions.GracePeriodSecondsNonSymmetric.ToString(), "Grace period for non-symmetric NAT (seconds)"),
+            (GracePeriodSecondsSymmetric, TunnelOptions.GracePeriodSecondsSymmetric.ToString(), "Grace period for symmetric NAT (seconds)"),
+            (IsolationGracePeriod, TunnelOptions.IsolationGracePeriodSeconds.ToString(), "Isolation grace period (seconds)"),
+            (AllowRelayThrough, TunnelOptions.AllowRelayThrough ? "true" : "false", "Allow this peer to relay traffic for other pairs"),
+            (OwnRelayCapacity, $"\"{TunnelOptions.OwnRelayCapacity}\"", "Relay capacity hint: Low | Normal | High"),
+            (RelayHealthTimeoutSeconds, TunnelOptions.RelayHealthTimeoutSeconds.ToString(), "Relay health probe timeout (seconds of WG silence)"),
+            (RelayReselectCooldownSeconds, TunnelOptions.RelayReselectCooldownSeconds.ToString(), "Minimum interval between relay reselections per pair (seconds)"),
+            (RelayLoadFactorMs, TunnelOptions.RelayLoadFactorMs.ToString(), "Per-active-route penalty in relay scoring (ms)"),
+            (RelayReselectMinImprovement, TunnelOptions.RelayReselectMinImprovement.ToString(System.Globalization.CultureInfo.InvariantCulture), "Required score improvement to swap relays (0.0-1.0)")
         };
 
         foreach (var field in fieldsToCheck)
         {
-            // Check if field already exists
             bool fieldExists = lines.Any(line => line.TrimStart().StartsWith(field.key + " ") || line.TrimStart().StartsWith(field.key + "="));
             if (!fieldExists)
             {
-                // Add comment line and field with default value (two separate lines)
                 Array.Resize(ref lines, lines.Length + 2);
                 lines[lines.Length - 2] = $"# {field.comment}";
                 lines[lines.Length - 1] = $"{field.key} = {field.value}";

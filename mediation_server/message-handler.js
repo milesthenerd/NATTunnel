@@ -710,6 +710,23 @@ class MessageHandler {
                 introducer = allCandidates.find(isEligible);
             }
 
+            // If no one else is eligible, consider the requesting peer itself. It's the
+            // perfect candidate in takeover scenarios where it's the last surviving
+            // non-symmetric peer. We know its NATType and TCP socket is alive (it just
+            // sent us this join).
+            if (!introducer && NATType !== NATTypes.Symmetric) {
+                const selfSockInfo = this.connectionManager.sockets.find(s => s.clientID === PeerID);
+                if (selfSockInfo) {
+                    introducer = {
+                        peerID: PeerID,
+                        endpoint: endpoint,
+                        natType: NATType,
+                        meshIP: PrivateAddressString
+                    };
+                    console.log(`[MessageHandler] Self-electing ${PeerID} as introducer for ${NetworkID} (no other eligible candidates)`);
+                }
+            }
+
             if (!introducer) {
                 // No eligible introducer (all symmetric or all disconnected).
                 // Fall back to direct mediation-brokered connections for all reachable peers.

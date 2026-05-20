@@ -69,9 +69,9 @@ public static class TunnelOptions
 
     /// <summary>
     /// Cooldown before attempting to repair a broken relay route (in seconds).
-    /// Default: 30 seconds
+    /// Default: 15 seconds
     /// </summary>
-    public static int RepairCooldownSeconds = 30;
+    public static int RepairCooldownSeconds = 15;
 
     /// <summary>
     /// Number of consecutive repair attempts before escalating to mediation server fallback.
@@ -120,6 +120,24 @@ public static class TunnelOptions
     /// Default: true (the default server setup uses an auto-generated self-signed cert).
     /// </summary>
     public static bool TlsAllowSelfSigned = true;
+
+    /// <summary>Whether this peer is willing to relay traffic for other pairs. Default: true.</summary>
+    public static bool AllowRelayThrough = true;
+
+    /// <summary>Operator hint about this peer's uplink capacity for relay scoring.</summary>
+    public static RelayCapacity OwnRelayCapacity = RelayCapacity.Normal;
+
+    /// <summary>WireGuard silence (in seconds) before a relayed peer probes its relay's health.</summary>
+    public static int RelayHealthTimeoutSeconds = 45;
+
+    /// <summary>New candidate must score this fraction better than the current relay to swap.</summary>
+    public static double RelayReselectMinImprovement = 0.30;
+
+    /// <summary>Minimum interval between reselections for the same pair (in seconds).</summary>
+    public static int RelayReselectCooldownSeconds = 30;
+
+    /// <summary>Per-active-route latency penalty (ms) in the relay scoring function.</summary>
+    public static int RelayLoadFactorMs = 50;
 
     /// <summary>
     /// Indicated whether IPv6 is supported.

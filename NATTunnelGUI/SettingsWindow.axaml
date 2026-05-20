@@ -2,7 +2,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         x:Class="NATTunnelGUI.SettingsWindow"
         Title="Settings"
-        Height="560"
+        Height="720"
         Width="420"
         Background="{StaticResource ContentBrush}"
         WindowStartupLocation="CenterOwner"
@@ -117,6 +117,67 @@
                     <TextBlock Grid.Row="7" Text="Isolation Grace Period" Classes="label" VerticalAlignment="Center" />
                     <TextBox Grid.Row="7" Grid.Column="1" x:Name="IsolationGraceBox" Classes="input" Margin="0,4,0,0" />
                     <TextBlock Grid.Row="7" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+                </Grid>
+
+                <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,14,0,8" />
+
+                <TextBlock Text="RELAY"
+                           Foreground="{StaticResource AccentBlueBrush}"
+                           FontSize="12"
+                           FontWeight="Bold"
+                           Margin="0,0,0,2" />
+                <TextBlock Text="Lets your peer carry traffic for others when direct connection fails"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           FontSize="10"
+                           FontStyle="Italic"
+                           Margin="0,0,0,4" />
+
+                <CheckBox x:Name="AllowRelayThroughBox"
+                          Content="Allow relaying for other peers"
+                          Foreground="{StaticResource TextPrimaryBrush}"
+                          Margin="0,4,0,4" />
+
+                <TextBlock Text="Capacity Hint" Classes="label" />
+                <ComboBox x:Name="RelayCapacityBox"
+                          Background="#1E1E1E"
+                          Foreground="{StaticResource TextPrimaryBrush}"
+                          BorderBrush="{StaticResource BorderBrushStatic}"
+                          BorderThickness="1"
+                          FontSize="12"
+                          HorizontalAlignment="Stretch">
+                    <ComboBoxItem Content="Low" />
+                    <ComboBoxItem Content="Normal" />
+                    <ComboBoxItem Content="High" />
+                </ComboBox>
+
+                <Grid Margin="0,8,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="70" />
+                        <ColumnDefinition Width="30" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                        <RowDefinition />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="Health Timeout" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="0" Grid.Column="1" x:Name="RelayHealthTimeoutBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="0" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="1" Text="Reselect Cooldown" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="RelayReselectCooldownBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="1" Grid.Column="2" Text="sec" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="2" Text="Load Factor" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="RelayLoadFactorBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="2" Grid.Column="2" Text="ms" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
+
+                    <TextBlock Grid.Row="3" Text="Reselect Threshold" Classes="label" VerticalAlignment="Center" />
+                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="RelayReselectMinImpBox" Classes="input" Margin="0,4,0,0" />
+                    <TextBlock Grid.Row="3" Grid.Column="2" Text="" Classes="label" VerticalAlignment="Center" Margin="6,0,0,0" />
                 </Grid>
 
                 <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,14,0,8" />

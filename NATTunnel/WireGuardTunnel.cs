@@ -821,11 +821,12 @@ namespace NATTunnel
 
             relayRoutes.Remove(relayedPeerIP);
 
-            // Reset the gateway peer's AllowedIPs back to just its own IP
+            // Drop only this one relayed entry. Other relay routes through the same gateway
+            // must survive — ResetAllowedIPs here would wipe them all.
             var gatewayPeer = peerManager.GetPeer(gatewayPeerIP);
             if (gatewayPeer != null)
             {
-                gatewayPeer.ResetAllowedIPs();
+                gatewayPeer.RemoveAllowedIP(relayedPeerIP);
                 Program.Log($"[WireGuard] Removed relay route for {relayedPeerIP} (was via {gatewayPeerIP})");
 
                 if (tunnelStarted)

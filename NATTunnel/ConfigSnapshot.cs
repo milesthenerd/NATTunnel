@@ -43,4 +43,22 @@ public class ConfigSnapshot
 
     [JsonPropertyName("peerID")]
     public string PeerID { get; set; }
+
+    [JsonPropertyName("allowRelayThrough")]
+    public bool AllowRelayThrough { get; set; }
+
+    [JsonPropertyName("relayCapacity")]
+    public string RelayCapacity { get; set; }
+
+    [JsonPropertyName("relayHealthTimeoutSeconds")]
+    public int RelayHealthTimeoutSeconds { get; set; }
+
+    [JsonPropertyName("relayReselectCooldownSeconds")]
+    public int RelayReselectCooldownSeconds { get; set; }
+
+    [JsonPropertyName("relayLoadFactorMs")]
+    public int RelayLoadFactorMs { get; set; }
+
+    [JsonPropertyName("relayReselectMinImprovement")]
+    public double RelayReselectMinImprovement { get; set; }
 }

@@ -60,6 +60,15 @@ public partial class SettingsWindow : Window
         GracePeriodSymBox.Text = snap.GracePeriodSecondsSymmetric.ToString();
         IsolationGraceBox.Text = snap.IsolationGracePeriodSeconds.ToString();
 
+        AllowRelayThroughBox.IsChecked = snap.AllowRelayThrough;
+        string cap = string.IsNullOrEmpty(snap.RelayCapacity) ? "Normal" : snap.RelayCapacity;
+        RelayCapacityBox.SelectedIndex = cap.Equals("Low", StringComparison.OrdinalIgnoreCase) ? 0
+                                       : cap.Equals("High", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
+        RelayHealthTimeoutBox.Text = snap.RelayHealthTimeoutSeconds.ToString();
+        RelayReselectCooldownBox.Text = snap.RelayReselectCooldownSeconds.ToString();
+        RelayLoadFactorBox.Text = snap.RelayLoadFactorMs.ToString();
+        RelayReselectMinImpBox.Text = snap.RelayReselectMinImprovement.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
         PeerIDBox.Text = string.IsNullOrEmpty(snap.PeerID) || snap.PeerID == "00000000-0000-0000-0000-000000000000"
             ? "(not yet assigned)"
             : snap.PeerID;
@@ -101,6 +110,20 @@ public partial class SettingsWindow : Window
         if (!okGs) return;
         var (okIg, isolationGrace) = await TryParsePositiveInt(IsolationGraceBox.Text, "Isolation Grace Period");
         if (!okIg) return;
+        var (okRht, relayHealth) = await TryParsePositiveInt(RelayHealthTimeoutBox.Text, "Relay Health Timeout");
+        if (!okRht) return;
+        var (okRrc, relayReCooldown) = await TryParsePositiveInt(RelayReselectCooldownBox.Text, "Relay Reselect Cooldown");
+        if (!okRrc) return;
+        var (okRlf, relayLoadFactor) = await TryParsePositiveInt(RelayLoadFactorBox.Text, "Relay Load Factor");
+        if (!okRlf) return;
+        if (!double.TryParse(RelayReselectMinImpBox.Text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double relayReMinImp)
+            || relayReMinImp <= 0 || relayReMinImp >= 1)
+        {
+            await DialogHelpers.ShowInfoAsync(this, "Validation Error", "Relay Reselect Threshold must be a fraction between 0 and 1 (e.g. 0.3).");
+            return;
+        }
+
+        string relayCapacity = (RelayCapacityBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Normal";
 
         var snap = new ConfigSnapshot
         {
@@ -116,6 +139,12 @@ public partial class SettingsWindow : Window
             GracePeriodSecondsNonSymmetric = gracePeriod,
             GracePeriodSecondsSymmetric = gracePeriodSym,
             IsolationGracePeriodSeconds = isolationGrace,
+            AllowRelayThrough = AllowRelayThroughBox.IsChecked == true,
+            RelayCapacity = relayCapacity,
+            RelayHealthTimeoutSeconds = relayHealth,
+            RelayReselectCooldownSeconds = relayReCooldown,
+            RelayLoadFactorMs = relayLoadFactor,
+            RelayReselectMinImprovement = relayReMinImp,
         };
 
         try

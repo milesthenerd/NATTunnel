@@ -144,6 +144,22 @@ public partial class MainWindow : Window
                 IntroducerText.IsVisible = false;
             }
 
+            if (state.HostedRelayPairs > 0)
+            {
+                RelayHostingLabel.IsVisible = true;
+                RelayHostingText.IsVisible = true;
+                StopRelayingButton.IsVisible = true;
+                RelayHostingText.Text = state.HostedRelayPairs == 1
+                    ? "Carrying 1 pair"
+                    : $"Carrying {state.HostedRelayPairs} pairs";
+            }
+            else
+            {
+                RelayHostingLabel.IsVisible = false;
+                RelayHostingText.IsVisible = false;
+                StopRelayingButton.IsVisible = false;
+            }
+
             PeerCountHeader.Text = $"Peers ({state.ConnectedPeers?.Count ?? 0})";
             var peerItems = new List<PeerDisplayItem>();
             if (state.ConnectedPeers != null)
@@ -222,6 +238,29 @@ public partial class MainWindow : Window
     {
         var settingsWindow = new SettingsWindow();
         settingsWindow.ShowDialog(this);
+    }
+
+    private async void StopRelaying_Click(object? sender, RoutedEventArgs e)
+    {
+        StopRelayingButton.IsEnabled = false;
+        try
+        {
+            string getJson = await httpClient.GetStringAsync("http://localhost:51889/config");
+            var snap = JsonSerializer.Deserialize<NATTunnel.ConfigSnapshot>(getJson);
+            if (snap == null) return;
+            snap.AllowRelayThrough = false;
+            string payload = JsonSerializer.Serialize(snap);
+            using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
+            await httpClient.PostAsync("http://localhost:51889/config", content);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[GUI] Failed to disable relay hosting: {ex.Message}");
+        }
+        finally
+        {
+            StopRelayingButton.IsEnabled = true;
+        }
     }
 
     private async void Stop_Click(object? sender, RoutedEventArgs e)

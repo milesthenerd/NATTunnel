@@ -91,6 +91,45 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
 
     public bool EnableForwarding(string interfaceName)
     {
+        // Windows requires global IPEnableRouter=1 in addition to per-interface forwarding;
+        // netsh forwarding=enabled is a no-op without the registry key.
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
+                @"SYSTEM\CurrentControlSet\Services\Tcpip\Parameters", writable: true);
+            if (key != null)
+            {
+                object current = key.GetValue("IPEnableRouter");
+                if (current is not int i || i != 1)
+                {
+                    key.SetValue("IPEnableRouter", 1, Microsoft.Win32.RegistryValueKind.DWord);
+                    Program.Log("[WireGuard] Set IPEnableRouter=1 (takes effect on RemoteAccess start or reboot)");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Program.Log($"[WireGuard] Could not set IPEnableRouter: {ex.Message}");
+        }
+
+        // Start RemoteAccess service so IPEnableRouter takes effect without a reboot.
+        try
+        {
+            var startPsi = new ProcessStartInfo
+            {
+                FileName = "sc",
+                Arguments = "start RemoteAccess",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true,
+            };
+            using var sp = Process.Start(startPsi);
+            sp.WaitForExit();
+            // Non-zero exit usually means already running or disabled — non-fatal.
+        }
+        catch { }
+
         var psi = new ProcessStartInfo
         {
             FileName = "netsh",

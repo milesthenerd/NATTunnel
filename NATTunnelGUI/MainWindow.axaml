@@ -138,6 +138,34 @@
                              Classes="copyable"
                              Margin="0" />
 
+                    <TextBlock x:Name="RelayHostingLabel"
+                               Text="RELAYING"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="0,0,0,2"
+                               IsVisible="False" />
+                    <TextBox x:Name="RelayHostingText"
+                             Text="-"
+                             Foreground="{StaticResource AccentTealBrush}"
+                             FontSize="12"
+                             Classes="copyable"
+                             IsVisible="False" />
+                    <Button x:Name="StopRelayingButton"
+                            Content="Stop Relaying"
+                            Click="StopRelaying_Click"
+                            Height="28"
+                            Margin="0,4,0,0"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#3E3E42"
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            BorderBrush="{StaticResource BorderBrushStatic}"
+                            BorderThickness="1"
+                            FontSize="11"
+                            Cursor="Hand"
+                            IsVisible="False" />
+
                     <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,4,0,12" />
 
                     <Button x:Name="ConnectButton"

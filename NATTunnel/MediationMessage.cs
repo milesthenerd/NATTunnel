@@ -137,6 +137,48 @@ public class MediationMessage
     /// <summary>Set on MeshHeartbeat by the sender if it currently holds the introducer role.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool IsIntroducer { get; set; }
+    /// <summary>MeshHeartbeat: sender opts in to being a relay candidate for other pairs.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool RelayCapable { get; set; }
+    /// <summary>MeshHeartbeat: number of pairs currently relaying through this peer (self-reported).</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int ActiveRelayRoutes { get; set; }
+    /// <summary>MeshHeartbeat: operator hint about uplink capacity for relay scoring.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public RelayCapacity RelayCapacity { get; set; }
+    /// <summary>
+    /// MeshConnectionBegin: the peer whose WireGuard interface relays traffic for this pair.
+    /// When unset on an IsRelay=true message, treat as equal to IntroducerMeshIP (back-compat).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string RelayMeshIP { get; set; }
+    /// <summary>MeshRelayAssignment / MeshRelayHealthReport: first endpoint of the relayed pair.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string PeerA { get; set; }
+    /// <summary>MeshRelayAssignment / MeshRelayHealthReport: second endpoint of the relayed pair.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string PeerB { get; set; }
+    /// <summary>MeshRelayAssignmentAck: whether the chosen relay successfully set up the route.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Success { get; set; }
+    /// <summary>MeshRelayAssignment: when true, tear down the relay route for this pair instead of setting it up.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Release { get; set; }
+    /// <summary>MeshRelayAssignmentAck / MeshRelayHealthReport: optional failure or observation detail.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Error { get; set; }
+    /// <summary>MeshRelayHealthReport: which kind of failure the reporting peer observed.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public RelayHealthObservation Observation { get; set; }
+    /// <summary>MeshRelayHealthReport: mesh IP of the reporting peer.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Self { get; set; }
+    /// <summary>MeshRelayHealthReport: mesh IP of the unreachable peer at the other end of the relay.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string Remote { get; set; }
+    /// <summary>MeshRelayHealthReport: mesh IP of the currently-assigned relay being reported.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string CurrentRelay { get; set; }
     /// <summary>
     /// Authentication token: SHA256(networkID + ":" + networkSecret) as base64.
     /// Sent in MeshJoinRequest; reused for error message in MeshJoinResponse on auth failure.
@@ -337,8 +379,30 @@ public enum MediationMessageType
     /// <summary>
     ///Sent by a peer to all connected peers when shutting down gracefully
     /// </summary>
-    MeshPeerLeave       // 34
+    MeshPeerLeave,      // 34
+    /// <summary>Introducer → both endpoints + chosen relay: assigns the relay for a pair.</summary>
+    MeshRelayAssignment,    // 35
+    /// <summary>Chosen relay → introducer: confirms or rejects the assignment.</summary>
+    MeshRelayAssignmentAck, // 36
+    /// <summary>Relayed peer → introducer: reports that the current relay is degraded.</summary>
+    MeshRelayHealthReport   // 37
     // Note: Latency ping/pong uses binary 0xFF-prefixed packets, not JSON message types
+}
+
+/// <summary>Operator hint about a peer's willingness/capacity to serve as a relay.</summary>
+public enum RelayCapacity
+{
+    Normal = 0,
+    Low = 1,
+    High = 2
+}
+
+/// <summary>What kind of relay failure a peer observed before sending a health report.</summary>
+public enum RelayHealthObservation
+{
+    Other = 0,
+    DownstreamFailed = 1,
+    RelayUnreachable = 2
 }
 
 /// <summary>
