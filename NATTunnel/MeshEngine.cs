@@ -876,196 +876,7 @@ public class MeshEngine
                         lastIntroducerProbe = DateTime.UtcNow;
                     }
 
-                    // ── Introducer heartbeat ────────────────────────────────────────────
-                    // Periodically send MeshHeartbeat to all peers, collect acks, and
-                    // re-send MeshConnectionBegin for any missing peer-to-peer links.
-                    if (isIntroducer && heartbeatAckDeadline == null &&
-                        DateTime.UtcNow - lastHeartbeat > heartbeatInterval)
-                    {
-                        // Send heartbeats to all peers we have WireGuard tunnels to
-                        var allPeers = wireguardTunnel.GetAllPeers();
-                        heartbeatTargets.Clear();
-                        heartbeatAcks.Clear();
-
-                        // Build peer roster so non-introducer peers can learn about all mesh members
-                        var roster = new List<string>();
-                        foreach (var peer in allPeers)
-                        {
-                            string pip = peer.PrivateAddress.ToString();
-                            if (peerInfoByMeshIP.TryGetValue(pip, out var pi))
-                                roster.Add($"{pip}|{pi.peerID}|{(int)pi.natType}|{pi.endpoint}");
-                        }
-                        var rosterArray = roster.Count > 0 ? roster.ToArray() : null;
-
-                        foreach (var peer in allPeers)
-                        {
-                            string peerIP = peer.PrivateAddress.ToString();
-                            heartbeatTargets.Add(peerIP);
-
-                            var hb = new MediationMessage(MediationMessageType.MeshHeartbeat)
-                            {
-                                PeerRoster = rosterArray,
-                                IsIntroducer = true,
-                                RelayCapable = TunnelOptions.AllowRelayThrough,
-                                ActiveRelayRoutes = HostedRelayCount(),
-                                RelayCapacity = TunnelOptions.OwnRelayCapacity
-                            };
-                            try
-                            {
-                                byte[] hbBytes = Encoding.UTF8.GetBytes(hb.Serialize());
-                                MeshSend(hbBytes, hbBytes.Length,
-                                    new IPEndPoint(peer.PrivateAddress, MeshControlPort));
-                            }
-                            catch (Exception ex)
-                            {
-                                Program.Log($"[Mesh] Failed to send heartbeat to {peerIP}: {ex.Message}");
-                            }
-                        }
-
-                        if (heartbeatTargets.Count > 1)
-                        {
-                            heartbeatAckDeadline = DateTime.UtcNow.AddSeconds(5);
-                            heartbeatSentTime = DateTime.UtcNow;
-                            metricHeartbeatsSent++;
-                            Program.Log($"[Mesh] Heartbeat sent to {heartbeatTargets.Count} peer(s), collecting acks...");
-                        }
-                        else
-                        {
-                            // 0 or 1 peers — nothing to check connectivity between
-                            lastHeartbeat = DateTime.UtcNow;
-                        }
-                    }
-
-                    // Collect heartbeat acks
-                    if (heartbeatAckDeadline != null)
-                    {
-                        while (meshHeartbeatAckQueue.TryDequeue(out var ackMsg))
-                        {
-                            string ackMeshIP = ackMsg.PrivateAddressString;
-                            if (!string.IsNullOrEmpty(ackMeshIP) && ackMsg.ConnectedMeshIPs != null)
-                            {
-                                heartbeatAcks[ackMeshIP] = new HashSet<string>(ackMsg.ConnectedMeshIPs);
-                                metricHeartbeatAcksReceived++;
-                            }
-                            // Cache peer info from heartbeat acks — this is the most reliable
-                            // source since every peer responds with its NAT type on every cycle.
-                            if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
-                            {
-                                // Preserve existing endpoint — heartbeat acks don't include it
-                                string existingEndpoint = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing) ? existing.endpoint : null;
-                                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType);
-                            }
-                        }
-
-                        // Process after deadline
-                        if (DateTime.UtcNow > heartbeatAckDeadline.Value)
-                        {
-                            if (heartbeatSentTime != null)
-                                metricLastHeartbeatResponseMs = (long)(DateTime.UtcNow - heartbeatSentTime.Value).TotalMilliseconds;
-                            Program.Log($"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
-
-                            // Track consecutive misses per peer and remove dead ones
-                            var deadPeers = new List<string>();
-                            foreach (var ip in heartbeatTargets)
-                            {
-                                if (heartbeatAcks.ContainsKey(ip))
-                                {
-                                    heartbeatMissCount[ip] = 0;
-                                }
-                                else
-                                {
-                                    heartbeatMissCount.TryGetValue(ip, out int prev);
-                                    heartbeatMissCount[ip] = prev + 1;
-                                    metricHeartbeatsMissed++;
-                                    Program.Log($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{peerDeadThreshold})");
-                                    if (heartbeatMissCount[ip] >= peerDeadThreshold)
-                                    {
-                                        // Don't declare dead if we have a pending tunnel — symmetric NAT
-                                        // hole-punching can take longer than the heartbeat window.
-                                        string peerPID = peerInfoByMeshIP.TryGetValue(ip, out var pi) ? pi.peerID : null;
-                                        bool hasPendingTunnel = (!string.IsNullOrEmpty(peerPID) && activePeerTunnels.ContainsKey(peerPID)) ||
-                                                                activePeerTunnels.ContainsKey(ip) ||
-                                                                (!string.IsNullOrEmpty(peerPID) && pendingConnectionRequests.ContainsKey(peerPID));
-                                        if (hasPendingTunnel)
-                                        {
-                                            Program.Log($"[Mesh] Peer {ip} would be dead but has pending tunnel — deferring removal");
-                                            heartbeatMissCount[ip] = 0; // Reset so we don't immediately re-trigger
-                                            continue;
-                                        }
-                                        deadPeers.Add(ip);
-                                    }
-                                }
-                            }
-                            foreach (var deadIP in deadPeers)
-                            {
-                                metricPeersLost++;
-                                Program.Log($"[Mesh] Peer {deadIP} declared dead after {peerDeadThreshold} consecutive missed heartbeats");
-                                // Notify all remaining peers before removing locally
-                                string deadPID = peerInfoByMeshIP.TryGetValue(deadIP, out var di) ? di.peerID : null;
-                                var removeMsg = new MediationMessage(MediationMessageType.MeshPeerRemoved)
-                                {
-                                    PrivateAddressString = deadIP,
-                                    PeerID = deadPID ?? ""
-                                };
-                                byte[] rmBytes = Encoding.UTF8.GetBytes(removeMsg.Serialize());
-                                foreach (var peerIP in heartbeatTargets)
-                                {
-                                    if (peerIP == deadIP) continue;
-                                    try
-                                    {
-                                        MeshSend(rmBytes, rmBytes.Length,
-                                            new IPEndPoint(IPAddress.Parse(peerIP), MeshControlPort));
-                                    }
-                                    catch { }
-                                }
-                                RemoveDeadPeer(deadIP);
-                            }
-
-                            // Check every pair of peers for missing connectivity and repair
-                            var targetList = heartbeatTargets.Where(ip => !deadPeers.Contains(ip)).ToList();
-                            int repairCount = RepairBrokenLinks(targetList, heartbeatAcks, tcpClient, stream);
-                            if (repairCount > 0)
-                                Program.Log($"[Mesh] Heartbeat: sent {repairCount} repair message(s)");
-
-                            // Retry connecting to peers that are known but never got a completed tunnel.
-                            // This handles the case where the initial connection attempt failed (e.g. hole-punch
-                            // timeout) and the peer is stuck with no WireGuard tunnel to the introducer.
-                            if (tcpClient.Connected)
-                            {
-                                foreach (var kvp in peerInfoByMeshIP)
-                                {
-                                    string peerMeshIP = kvp.Key;
-                                    if (peerMeshIP == meshIP) continue; // Skip self
-                                    if (completedTunnelMeshIPs.Contains(peerMeshIP)) continue; // Already connected
-                                    if (deadPeers.Contains(peerMeshIP)) continue; // Just declared dead
-                                    if (string.IsNullOrEmpty(kvp.Value.peerID)) continue;
-                                    if (pendingConnectionRequests.ContainsKey(kvp.Value.peerID)) continue; // Already pending
-                                    if (activePeerTunnels.ContainsKey(kvp.Value.peerID) || activePeerTunnels.ContainsKey(peerMeshIP)) continue; // Tunnel in progress
-
-                                    Program.Log($"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
-                                    try
-                                    {
-                                        var reconnReq = new MediationMessage(MediationMessageType.ConnectionRequest)
-                                        {
-                                            PeerID = kvp.Value.peerID,
-                                            NATType = detectedNatType
-                                        };
-                                        byte[] reconnBuf = Encoding.ASCII.GetBytes(reconnReq.Serialize());
-                                        stream.Write(reconnBuf, 0, reconnBuf.Length);
-                                        stream.Flush();
-                                        pendingConnectionRequests[kvp.Value.peerID] = DateTime.UtcNow;
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Program.Log($"[Mesh] Failed to send reconnection request for {peerMeshIP}: {ex.Message}");
-                                    }
-                                }
-                            }
-
-                            heartbeatAckDeadline = null;
-                            lastHeartbeat = DateTime.UtcNow;
-                        }
-                    }
+                    RunIntroducerHeartbeat(tcpClient, stream);
 
                     SendLatencyPingsAndHealthProbe();
 
@@ -1827,187 +1638,7 @@ public class MeshEngine
                     {
                         DrainInboundQueues();
 
-                        // ── Introducer heartbeat (failover introducer) ──────────────────────
-                        // Same Program.Logic as the primary introducer loop — send heartbeats, collect
-                        // acks, and repair missing peer-to-peer links.
-                        if (isIntroducer && heartbeatAckDeadline == null &&
-                            DateTime.UtcNow - lastHeartbeat > heartbeatInterval)
-                        {
-                            var allPeers = wireguardTunnel.GetAllPeers();
-                            heartbeatTargets.Clear();
-                            heartbeatAcks.Clear();
-
-                            // Build peer roster for failover introducer heartbeats
-                            var roster2 = new List<string>();
-                            foreach (var peer in allPeers)
-                            {
-                                string pip = peer.PrivateAddress.ToString();
-                                if (peerInfoByMeshIP.TryGetValue(pip, out var pi))
-                                    roster2.Add($"{pip}|{pi.peerID}|{(int)pi.natType}|{pi.endpoint}");
-                            }
-                            var rosterArray2 = roster2.Count > 0 ? roster2.ToArray() : null;
-
-                            foreach (var peer in allPeers)
-                            {
-                                string peerIP = peer.PrivateAddress.ToString();
-                                heartbeatTargets.Add(peerIP);
-
-                                var hb = new MediationMessage(MediationMessageType.MeshHeartbeat)
-                                {
-                                    PeerRoster = rosterArray2,
-                                    IsIntroducer = true,
-                                    RelayCapable = TunnelOptions.AllowRelayThrough,
-                                    ActiveRelayRoutes = HostedRelayCount(),
-                                    RelayCapacity = TunnelOptions.OwnRelayCapacity
-                                };
-                                try
-                                {
-                                    byte[] hbBytes = Encoding.UTF8.GetBytes(hb.Serialize());
-                                    MeshSend(hbBytes, hbBytes.Length,
-                                        new IPEndPoint(peer.PrivateAddress, MeshControlPort));
-                                }
-                                catch (Exception ex)
-                                {
-                                    Program.Log($"[Mesh] Failed to send heartbeat to {peerIP}: {ex.Message}");
-                                }
-                            }
-
-                            if (heartbeatTargets.Count > 1)
-                            {
-                                heartbeatAckDeadline = DateTime.UtcNow.AddSeconds(5);
-                                heartbeatSentTime = DateTime.UtcNow;
-                                metricHeartbeatsSent++;
-                                Program.Log($"[Mesh] Heartbeat sent to {heartbeatTargets.Count} peer(s), collecting acks...");
-                            }
-                            else
-                            {
-                                lastHeartbeat = DateTime.UtcNow;
-                            }
-                        }
-
-                        // Collect heartbeat acks (failover introducer)
-                        if (heartbeatAckDeadline != null)
-                        {
-                            while (meshHeartbeatAckQueue.TryDequeue(out var ackMsg))
-                            {
-                                string ackMeshIP = ackMsg.PrivateAddressString;
-                                if (!string.IsNullOrEmpty(ackMeshIP) && ackMsg.ConnectedMeshIPs != null)
-                                {
-                                    heartbeatAcks[ackMeshIP] = new HashSet<string>(ackMsg.ConnectedMeshIPs);
-                                    metricHeartbeatAcksReceived++;
-                                }
-                                // Cache peer info from heartbeat acks — this is the most reliable
-                                // source since every peer responds with its NAT type on every cycle.
-                                if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
-                                {
-                                    // Preserve existing endpoint — heartbeat acks don't include it
-                                    string existingEndpoint = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing) ? existing.endpoint : null;
-                                    peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType);
-                                }
-                            }
-
-                            if (DateTime.UtcNow > heartbeatAckDeadline.Value)
-                            {
-                                if (heartbeatSentTime != null)
-                                    metricLastHeartbeatResponseMs = (long)(DateTime.UtcNow - heartbeatSentTime.Value).TotalMilliseconds;
-                                Program.Log($"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
-
-                                // Track consecutive misses per peer and remove dead ones
-                                var deadPeers = new List<string>();
-                                foreach (var ip in heartbeatTargets)
-                                {
-                                    if (heartbeatAcks.ContainsKey(ip))
-                                    {
-                                        heartbeatMissCount[ip] = 0;
-                                    }
-                                    else
-                                    {
-                                        heartbeatMissCount.TryGetValue(ip, out int prev);
-                                        heartbeatMissCount[ip] = prev + 1;
-                                        metricHeartbeatsMissed++;
-                                        Program.Log($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{peerDeadThreshold})");
-                                        if (heartbeatMissCount[ip] >= peerDeadThreshold)
-                                        {
-                                            string peerPID = peerInfoByMeshIP.TryGetValue(ip, out var pi) ? pi.peerID : null;
-                                            bool hasPendingTunnel = (!string.IsNullOrEmpty(peerPID) && activePeerTunnels.ContainsKey(peerPID)) ||
-                                                                    activePeerTunnels.ContainsKey(ip) ||
-                                                                    (!string.IsNullOrEmpty(peerPID) && pendingConnectionRequests.ContainsKey(peerPID));
-                                            if (hasPendingTunnel)
-                                            {
-                                                Program.Log($"[Mesh] Peer {ip} would be dead but has pending tunnel — deferring removal");
-                                                heartbeatMissCount[ip] = 0;
-                                                continue;
-                                            }
-                                            deadPeers.Add(ip);
-                                        }
-                                    }
-                                }
-                                foreach (var deadIP in deadPeers)
-                                {
-                                    metricPeersLost++;
-                                    Program.Log($"[Mesh] Peer {deadIP} declared dead after {peerDeadThreshold} consecutive missed heartbeats");
-                                    string deadPID = peerInfoByMeshIP.TryGetValue(deadIP, out var di) ? di.peerID : null;
-                                    var removeMsg = new MediationMessage(MediationMessageType.MeshPeerRemoved)
-                                    {
-                                        PrivateAddressString = deadIP,
-                                        PeerID = deadPID ?? ""
-                                    };
-                                    byte[] rmBytes = Encoding.UTF8.GetBytes(removeMsg.Serialize());
-                                    foreach (var peerIP in heartbeatTargets)
-                                    {
-                                        if (peerIP == deadIP) continue;
-                                        try
-                                        {
-                                            MeshSend(rmBytes, rmBytes.Length,
-                                                new IPEndPoint(IPAddress.Parse(peerIP), MeshControlPort));
-                                        }
-                                        catch { }
-                                    }
-                                    RemoveDeadPeer(deadIP);
-                                }
-
-                                var targetList = heartbeatTargets.Where(ip => !deadPeers.Contains(ip)).ToList();
-                                int repairCount = RepairBrokenLinks(targetList, heartbeatAcks, reconnectedTcpClient, reconnectedStream);
-                                if (repairCount > 0)
-                                    Program.Log($"[Mesh] Heartbeat: sent {repairCount} repair message(s)");
-
-                                // Retry connecting to peers that are known but never got a completed tunnel.
-                                if (reconnectedTcpClient != null && reconnectedTcpClient.Connected)
-                                {
-                                    foreach (var kvp in peerInfoByMeshIP)
-                                    {
-                                        string peerMeshIP = kvp.Key;
-                                        if (peerMeshIP == meshIP) continue;
-                                        if (completedTunnelMeshIPs.Contains(peerMeshIP)) continue;
-                                        if (deadPeers.Contains(peerMeshIP)) continue;
-                                        if (string.IsNullOrEmpty(kvp.Value.peerID)) continue;
-                                        if (pendingConnectionRequests.ContainsKey(kvp.Value.peerID)) continue;
-                                        if (activePeerTunnels.ContainsKey(kvp.Value.peerID) || activePeerTunnels.ContainsKey(peerMeshIP)) continue;
-
-                                        Program.Log($"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
-                                        try
-                                        {
-                                            var reconnReq = new MediationMessage(MediationMessageType.ConnectionRequest)
-                                            {
-                                                PeerID = kvp.Value.peerID,
-                                                NATType = detectedNatType
-                                            };
-                                            byte[] reconnBuf = Encoding.ASCII.GetBytes(reconnReq.Serialize());
-                                            reconnectedStream.Write(reconnBuf, 0, reconnBuf.Length);
-                                            reconnectedStream.Flush();
-                                            pendingConnectionRequests[kvp.Value.peerID] = DateTime.UtcNow;
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Program.Log($"[Mesh] Failed to send reconnection request for {peerMeshIP}: {ex.Message}");
-                                        }
-                                    }
-                                }
-
-                                heartbeatAckDeadline = null;
-                                lastHeartbeat = DateTime.UtcNow;
-                            }
-                        }
+                        RunIntroducerHeartbeat(reconnectedTcpClient, reconnectedStream);
 
                         SendLatencyPingsAndHealthProbe();
 
@@ -3844,6 +3475,194 @@ public class MeshEngine
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// One introducer-heartbeat round: send heartbeats, collect acks, declare dead peers,
+    /// run repair, and (if the mediation TCP is connected) request fresh ConnectionRequests
+    /// for peers with no completed tunnel.
+    /// `mediationClient` and `mediationStream` are the TCP client + stream the caller currently
+    /// owns — the primary loop passes tcpClient/stream, the mesh-control-only loop passes
+    /// reconnectedTcpClient/reconnectedStream.
+    /// </summary>
+    private void RunIntroducerHeartbeat(TcpClient mediationClient, Stream mediationStream)
+    {
+        if (isIntroducer && heartbeatAckDeadline == null &&
+            DateTime.UtcNow - lastHeartbeat > heartbeatInterval)
+        {
+            var allPeers = wireguardTunnel.GetAllPeers();
+            heartbeatTargets.Clear();
+            heartbeatAcks.Clear();
+
+            // Build peer roster so non-introducer peers can learn about all mesh members
+            var roster = new List<string>();
+            foreach (var peer in allPeers)
+            {
+                string pip = peer.PrivateAddress.ToString();
+                if (peerInfoByMeshIP.TryGetValue(pip, out var pi))
+                    roster.Add($"{pip}|{pi.peerID}|{(int)pi.natType}|{pi.endpoint}");
+            }
+            var rosterArray = roster.Count > 0 ? roster.ToArray() : null;
+
+            foreach (var peer in allPeers)
+            {
+                string peerIP = peer.PrivateAddress.ToString();
+                heartbeatTargets.Add(peerIP);
+
+                var hb = new MediationMessage(MediationMessageType.MeshHeartbeat)
+                {
+                    PeerRoster = rosterArray,
+                    IsIntroducer = true,
+                    RelayCapable = TunnelOptions.AllowRelayThrough,
+                    ActiveRelayRoutes = HostedRelayCount(),
+                    RelayCapacity = TunnelOptions.OwnRelayCapacity
+                };
+                try
+                {
+                    byte[] hbBytes = Encoding.UTF8.GetBytes(hb.Serialize());
+                    MeshSend(hbBytes, hbBytes.Length,
+                        new IPEndPoint(peer.PrivateAddress, MeshControlPort));
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"[Mesh] Failed to send heartbeat to {peerIP}: {ex.Message}");
+                }
+            }
+
+            if (heartbeatTargets.Count > 1)
+            {
+                heartbeatAckDeadline = DateTime.UtcNow.AddSeconds(5);
+                heartbeatSentTime = DateTime.UtcNow;
+                metricHeartbeatsSent++;
+                Program.Log($"[Mesh] Heartbeat sent to {heartbeatTargets.Count} peer(s), collecting acks...");
+            }
+            else
+            {
+                // 0 or 1 peers — nothing to check connectivity between
+                lastHeartbeat = DateTime.UtcNow;
+            }
+        }
+
+        // Collect heartbeat acks
+        if (heartbeatAckDeadline == null) return;
+
+        while (meshHeartbeatAckQueue.TryDequeue(out var ackMsg))
+        {
+            string ackMeshIP = ackMsg.PrivateAddressString;
+            if (!string.IsNullOrEmpty(ackMeshIP) && ackMsg.ConnectedMeshIPs != null)
+            {
+                heartbeatAcks[ackMeshIP] = new HashSet<string>(ackMsg.ConnectedMeshIPs);
+                metricHeartbeatAcksReceived++;
+            }
+            if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
+            {
+                string existingEndpoint = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing) ? existing.endpoint : null;
+                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType);
+            }
+        }
+
+        if (DateTime.UtcNow <= heartbeatAckDeadline.Value) return;
+
+        if (heartbeatSentTime != null)
+            metricLastHeartbeatResponseMs = (long)(DateTime.UtcNow - heartbeatSentTime.Value).TotalMilliseconds;
+        Program.Log($"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
+
+        var deadPeers = new List<string>();
+        foreach (var ip in heartbeatTargets)
+        {
+            if (heartbeatAcks.ContainsKey(ip))
+            {
+                heartbeatMissCount[ip] = 0;
+            }
+            else
+            {
+                heartbeatMissCount.TryGetValue(ip, out int prev);
+                heartbeatMissCount[ip] = prev + 1;
+                metricHeartbeatsMissed++;
+                Program.Log($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{peerDeadThreshold})");
+                if (heartbeatMissCount[ip] >= peerDeadThreshold)
+                {
+                    // Symmetric NAT hole-punching can take longer than the heartbeat window —
+                    // don't declare dead if a tunnel attempt is still in flight.
+                    string peerPID = peerInfoByMeshIP.TryGetValue(ip, out var pi) ? pi.peerID : null;
+                    bool hasPendingTunnel = (!string.IsNullOrEmpty(peerPID) && activePeerTunnels.ContainsKey(peerPID)) ||
+                                            activePeerTunnels.ContainsKey(ip) ||
+                                            (!string.IsNullOrEmpty(peerPID) && pendingConnectionRequests.ContainsKey(peerPID));
+                    if (hasPendingTunnel)
+                    {
+                        Program.Log($"[Mesh] Peer {ip} would be dead but has pending tunnel — deferring removal");
+                        heartbeatMissCount[ip] = 0;
+                        continue;
+                    }
+                    deadPeers.Add(ip);
+                }
+            }
+        }
+        foreach (var deadIP in deadPeers)
+        {
+            metricPeersLost++;
+            Program.Log($"[Mesh] Peer {deadIP} declared dead after {peerDeadThreshold} consecutive missed heartbeats");
+            string deadPID = peerInfoByMeshIP.TryGetValue(deadIP, out var di) ? di.peerID : null;
+            var removeMsg = new MediationMessage(MediationMessageType.MeshPeerRemoved)
+            {
+                PrivateAddressString = deadIP,
+                PeerID = deadPID ?? ""
+            };
+            byte[] rmBytes = Encoding.UTF8.GetBytes(removeMsg.Serialize());
+            foreach (var peerIP in heartbeatTargets)
+            {
+                if (peerIP == deadIP) continue;
+                try
+                {
+                    MeshSend(rmBytes, rmBytes.Length,
+                        new IPEndPoint(IPAddress.Parse(peerIP), MeshControlPort));
+                }
+                catch { }
+            }
+            RemoveDeadPeer(deadIP);
+        }
+
+        var targetList = heartbeatTargets.Where(ip => !deadPeers.Contains(ip)).ToList();
+        int repairCount = RepairBrokenLinks(targetList, heartbeatAcks, mediationClient, mediationStream);
+        if (repairCount > 0)
+            Program.Log($"[Mesh] Heartbeat: sent {repairCount} repair message(s)");
+
+        // Retry ConnectionRequest for peers with no completed tunnel — only if we have
+        // a live mediation TCP. Without it, mediation-brokered reconnection isn't possible.
+        if (mediationClient != null && mediationClient.Connected && mediationStream != null)
+        {
+            foreach (var kvp in peerInfoByMeshIP)
+            {
+                string peerMeshIP = kvp.Key;
+                if (peerMeshIP == meshIP) continue;
+                if (completedTunnelMeshIPs.Contains(peerMeshIP)) continue;
+                if (deadPeers.Contains(peerMeshIP)) continue;
+                if (string.IsNullOrEmpty(kvp.Value.peerID)) continue;
+                if (pendingConnectionRequests.ContainsKey(kvp.Value.peerID)) continue;
+                if (activePeerTunnels.ContainsKey(kvp.Value.peerID) || activePeerTunnels.ContainsKey(peerMeshIP)) continue;
+
+                Program.Log($"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
+                try
+                {
+                    var reconnReq = new MediationMessage(MediationMessageType.ConnectionRequest)
+                    {
+                        PeerID = kvp.Value.peerID,
+                        NATType = detectedNatType
+                    };
+                    byte[] reconnBuf = Encoding.ASCII.GetBytes(reconnReq.Serialize());
+                    mediationStream.Write(reconnBuf, 0, reconnBuf.Length);
+                    mediationStream.Flush();
+                    pendingConnectionRequests[kvp.Value.peerID] = DateTime.UtcNow;
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"[Mesh] Failed to send reconnection request for {peerMeshIP}: {ex.Message}");
+                }
+            }
+        }
+
+        heartbeatAckDeadline = null;
+        lastHeartbeat = DateTime.UtcNow;
     }
 
     /// <summary>
