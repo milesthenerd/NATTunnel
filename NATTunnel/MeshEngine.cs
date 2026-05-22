@@ -94,6 +94,14 @@ public class MeshEngine
     private int introducerMissedProbes;
     private readonly TimeSpan introducerProbeInterval = TimeSpan.FromSeconds(TunnelOptions.ProbeIntervalSeconds);
 
+    // ── Takeover-bid state (mesh-control-only loop) ──
+    // Null except while a reconnect-to-mediation bid is in-progress. Promoted from locals
+    // so shared helpers like DrainInboundQueues can check whether a takeover is in-progress.
+    private TcpClient reconnectedTcpClient;
+    private Stream reconnectedStream;
+    private DateTime? lastReconnectDiscovery;
+    private DateTime? isolationDetectedAt;
+
     // Metrics counters for health monitoring
     private int metricTunnelsEstablished = 0;
     private int metricTunnelsFailed = 0;
@@ -768,283 +776,7 @@ public class MeshEngine
                         }
                     }
 
-                    // Process MeshConnectionBegin messages: create tunnels that hole-punch directly
-                    // without going through the mediation server (introducer-relayed coordination).
-                    while (meshConnectionBeginQueue.TryDequeue(out var cbMsg))
-                    {
-                        ProcessMeshConnectionBegin(cbMsg);
-                    }
-
-                    // Process peer removal notifications from the introducer
-                    while (meshPeerRemovedQueue.TryDequeue(out var rmMsg))
-                    {
-                        if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
-                            RemoveDeadPeer(rmMsg.PrivateAddressString);
-                    }
-
-                    // GUI flipped off "allow relay through" — drop all hosted relay routes.
-                    if (Program.RelayHostingDisableRequested)
-                    {
-                        Program.RelayHostingDisableRequested = false;
-                        string[] dropped;
-                        lock (hostedRelayLock) { dropped = hostedRelays.ToArray(); hostedRelays.Clear(); }
-                        foreach (var pk in dropped)
-                        {
-                            var parts = pk.Split('|', 2);
-                            if (parts.Length != 2) continue;
-                            try
-                            {
-                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
-                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
-                            }
-                            catch { }
-                            // If we're the introducer, drive reassignment for the pairs we just stopped
-                            // hosting so endpoints don't wait for the 45s health timeout.
-                            if (isIntroducer)
-                            {
-                                lastRelayReselect.TryRemove(pk, out _);
-                                meshRelayHealthReportQueue.Enqueue(new MediationMessage(MediationMessageType.MeshRelayHealthReport)
-                                {
-                                    PeerA = parts[0],
-                                    PeerB = parts[1],
-                                    CurrentRelay = meshIP,
-                                    Self = parts[0],
-                                    Remote = parts[1],
-                                    Observation = RelayHealthObservation.Other
-                                });
-                            }
-                        }
-                        if (dropped.Length > 0)
-                            Program.Log($"[Mesh] Disabled relay hosting — dropped {dropped.Length} pair(s)");
-
-                        // Send an immediate heartbeat with RelayCapable=false so the introducer learns
-                        // right away and reassigns affected pairs, instead of waiting up to ProbeInterval
-                        // seconds for the next regular probe.
-                        if (!isIntroducer && !string.IsNullOrEmpty(introducerMeshIP))
-                        {
-                            try
-                            {
-                                var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
-                                {
-                                    RelayCapable = false,
-                                    RelayCapacity = TunnelOptions.OwnRelayCapacity
-                                };
-                                byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
-                                MeshSend(probeBytes, probeBytes.Length,
-                                    new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                                Program.Log("[Mesh] Sent immediate heartbeat advertising RelayCapable=false");
-                            }
-                            catch (Exception ex)
-                            {
-                                Program.Log($"[Mesh] Failed to send immediate opt-out heartbeat: {ex.Message}");
-                            }
-                        }
-                    }
-
-                    // We've been chosen as a relay for some pair — set up forwarding + ack.
-                    while (meshRelayAssignmentQueue.TryDequeue(out var raMsg))
-                    {
-                        if (raMsg.RelayMeshIP != meshIP)
-                        {
-                            Program.Log($"[Mesh] Ignoring MeshRelayAssignment not addressed to us (RelayMeshIP={raMsg.RelayMeshIP})");
-                            continue;
-                        }
-                        string sortA = string.Compare(raMsg.PeerA, raMsg.PeerB, StringComparison.Ordinal) < 0 ? raMsg.PeerA : raMsg.PeerB;
-                        string sortB = sortA == raMsg.PeerA ? raMsg.PeerB : raMsg.PeerA;
-                        string pairKey = $"{sortA}|{sortB}";
-
-                        if (raMsg.Release)
-                        {
-                            try
-                            {
-                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerA));
-                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerB));
-                            }
-                            catch { }
-                            RemoveHostedRelay(pairKey);
-                            Program.Log($"[Mesh] Released relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
-                            continue;
-                        }
-
-                        bool ok = false;
-                        string err = null;
-                        try
-                        {
-                            // The relay just needs IP forwarding + existing direct WG peers to both endpoints.
-                            // Don't touch AllowedIPs — adding the other endpoint's IP would steal cryptokey
-                            // routing from the direct peer entry and break this peer's direct connection.
-                            wireguardTunnel.EnableForwarding();
-                            var aPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerA));
-                            var bPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerB));
-                            ok = aPeer != null && bPeer != null;
-                            if (ok)
-                            {
-                                AddHostedRelay(pairKey);
-                                Program.Log($"[Mesh] Hosting relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
-                            }
-                            else err = $"Missing direct WG peer (aPeer={aPeer != null}, bPeer={bPeer != null})";
-                        }
-                        catch (Exception ex) { err = ex.Message; }
-
-                        if (!string.IsNullOrEmpty(introducerMeshIP))
-                        {
-                            var ack = new MediationMessage(MediationMessageType.MeshRelayAssignmentAck)
-                            {
-                                PeerA = raMsg.PeerA,
-                                PeerB = raMsg.PeerB,
-                                RelayMeshIP = meshIP,
-                                Success = ok,
-                                Error = err
-                            };
-                            try
-                            {
-                                byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
-                                MeshSend(ackBytes, ackBytes.Length, new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                            }
-                            catch { }
-                        }
-                    }
-
-                    // Health reports from relayed peers — reselect if a meaningfully better candidate exists.
-                    while (meshRelayHealthReportQueue.TryDequeue(out var hrMsg))
-                    {
-                        if (!isIntroducer) continue;
-                        string pa = hrMsg.PeerA ?? hrMsg.Self;
-                        string pb = hrMsg.PeerB ?? hrMsg.Remote;
-                        if (string.IsNullOrEmpty(pa) || string.IsNullOrEmpty(pb)) continue;
-                        string sortA = string.Compare(pa, pb, StringComparison.Ordinal) < 0 ? pa : pb;
-                        string sortB = sortA == pa ? pb : pa;
-                        string pairKey = $"{sortA}|{sortB}";
-
-                        var cooldown = TimeSpan.FromSeconds(TunnelOptions.RelayReselectCooldownSeconds);
-                        if (lastRelayReselect.TryGetValue(pairKey, out var lastSel) && DateTime.UtcNow - lastSel < cooldown)
-                        {
-                            Program.Log($"[Mesh] Health report for {pairKey} within cooldown — ignored");
-                            continue;
-                        }
-
-                        string oldRelay = hrMsg.CurrentRelay;
-                        if (string.IsNullOrEmpty(oldRelay)) relayAssignments.TryGetValue(pairKey, out oldRelay);
-
-                        long? OldScore()
-                        {
-                            if (string.IsNullOrEmpty(oldRelay)) return null;
-                            long lA = peerLatencyMs.TryGetValue(oldRelay == pa ? pb : pa, out var x) ? x : long.MaxValue / 4;
-                            long lB = peerLatencyMs.TryGetValue(oldRelay == pb ? pa : pb, out var y) ? y : long.MaxValue / 4;
-                            int load = oldRelay == meshIP ? HostedRelayCount()
-                                       : (relayCandidates.TryGetValue(oldRelay, out var rc) ? rc.activeRoutes : 0);
-                            return lA + lB + (long)TunnelOptions.RelayLoadFactorMs * load;
-                        }
-
-                        // Temporarily mark the old relay ineligible so PickRelay skips it.
-                        bool restored = false;
-                        (bool capable, int activeRoutes, RelayCapacity capacity, DateTime lastSeen) saved = default;
-                        if (!string.IsNullOrEmpty(oldRelay) && oldRelay != meshIP && relayCandidates.TryGetValue(oldRelay, out saved))
-                        {
-                            relayCandidates[oldRelay] = (false, saved.activeRoutes, saved.capacity, saved.lastSeen);
-                            restored = true;
-                        }
-                        string newRelay = PickRelay(pa, pb);
-                        if (restored) relayCandidates[oldRelay] = saved;
-
-                        if (string.IsNullOrEmpty(newRelay) || newRelay == oldRelay)
-                        {
-                            Program.Log($"[Mesh] Health report for {pairKey}: no better candidate available");
-                            lastRelayReselect[pairKey] = DateTime.UtcNow;
-                            continue;
-                        }
-
-                        // Skip the score-improvement threshold when the old relay is no longer viable
-                        // (peer gone, or RelayCapable flipped false). Otherwise we'd "stay put" on a relay
-                        // that won't actually carry traffic.
-                        bool oldStillViable = !string.IsNullOrEmpty(oldRelay) &&
-                            (oldRelay == meshIP
-                                ? TunnelOptions.AllowRelayThrough
-                                : (relayCandidates.TryGetValue(oldRelay, out var rcOld) && rcOld.capable));
-                        long? oldS = OldScore();
-                        long newS = (peerLatencyMs.TryGetValue(newRelay == pa ? pb : pa, out var nlA) ? nlA : 0)
-                                  + (peerLatencyMs.TryGetValue(newRelay == pb ? pa : pb, out var nlB) ? nlB : 0)
-                                  + (long)TunnelOptions.RelayLoadFactorMs *
-                                    (newRelay == meshIP ? HostedRelayCount()
-                                     : (relayCandidates.TryGetValue(newRelay, out var nc) ? nc.activeRoutes : 0));
-                        if (oldStillViable && oldS.HasValue && newS > oldS.Value * (1.0 - TunnelOptions.RelayReselectMinImprovement))
-                        {
-                            Program.Log($"[Mesh] Health report for {pairKey}: new candidate {newRelay} (score {newS}) not meaningfully better than {oldRelay} (score {oldS}) — staying put");
-                            lastRelayReselect[pairKey] = DateTime.UtcNow;
-                            continue;
-                        }
-
-                        Program.Log($"[Mesh] Reselecting relay for {pairKey}: {oldRelay ?? "(unknown)"} → {newRelay}");
-                        relayAssignments[pairKey] = newRelay;
-                        lastRelayReselect[pairKey] = DateTime.UtcNow;
-
-                        if (!string.IsNullOrEmpty(oldRelay) && oldRelay != newRelay)
-                        {
-                            if (oldRelay == meshIP)
-                            {
-                                try
-                                {
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pa));
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pb));
-                                }
-                                catch { }
-                                RemoveHostedRelay(pairKey);
-                            }
-                            else
-                            {
-                                var release = new MediationMessage(MediationMessageType.MeshRelayAssignment)
-                                {
-                                    PeerA = pa,
-                                    PeerB = pb,
-                                    RelayMeshIP = oldRelay,
-                                    Release = true
-                                };
-                                try { byte[] rb = Encoding.UTF8.GetBytes(release.Serialize()); MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(oldRelay), MeshControlPort)); }
-                                catch (Exception ex) { Program.Log($"[Mesh] Failed to release old relay {oldRelay}: {ex.Message}"); }
-                            }
-                        }
-
-                        if (newRelay == meshIP)
-                        {
-                            wireguardTunnel.EnableForwarding();
-                            AddHostedRelay(pairKey);
-                        }
-                        else
-                        {
-                            var assign = new MediationMessage(MediationMessageType.MeshRelayAssignment)
-                            {
-                                PeerA = pa,
-                                PeerB = pb,
-                                RelayMeshIP = newRelay
-                            };
-                            try { byte[] ab = Encoding.UTF8.GetBytes(assign.Serialize()); MeshSend(ab, ab.Length, new IPEndPoint(IPAddress.Parse(newRelay), MeshControlPort)); }
-                            catch (Exception ex) { Program.Log($"[Mesh] Failed to dispatch MeshRelayAssignment to {newRelay}: {ex.Message}"); }
-                        }
-
-                        NotifyEndpoint(pa, pb, newRelay);
-                        NotifyEndpoint(pb, pa, newRelay);
-                    }
-
-                    // Process graceful peer leave notifications
-                    while (meshPeerLeaveQueue.TryDequeue(out var leaveMsg))
-                    {
-                        if (!string.IsNullOrEmpty(leaveMsg.PrivateAddressString))
-                        {
-                            Program.Log($"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
-                            bool wasIntroducer = leaveMsg.PrivateAddressString == introducerMeshIP;
-                            RemoveDeadPeer(leaveMsg.PrivateAddressString);
-                            if (wasIntroducer && !isIntroducer)
-                            {
-                                Program.Log("[Mesh] Introducer left gracefully — forcing immediate takeover check");
-                                // Pre-arm both counters: clearing the ack flag so the probe block's
-                                // first branch fires, and bumping misses one past threshold so even
-                                // after the block's ++ the takeover gate trips.
-                                introducerProbeAckReceived = false;
-                                introducerMissedProbes = IntroducerMissedProbeThreshold;
-                                lastIntroducerProbe = DateTime.UtcNow.AddSeconds(-introducerProbeInterval.TotalSeconds - 1);
-                            }
-                        }
-                    }
+                    DrainInboundQueues();
 
                     // ── Non-introducer failover probe (primary loop) ─────────────────────
                     // If we're not the introducer and we have a known introducer mesh IP,
@@ -2165,12 +1897,14 @@ public class MeshEngine
                     // Isolation detection: if all WireGuard peers are dead, reconnect to mediation.
                     var lastIsolationCheck = DateTime.UtcNow;
                     var isolationCheckInterval = TimeSpan.FromSeconds(30);
-                    DateTime? isolationDetectedAt = null;
+                    // isolationDetectedAt, reconnectedTcpClient, reconnectedStream, lastReconnectDiscovery
+                    // are now fields on MeshEngine — reset to fresh state for this loop entry.
+                    isolationDetectedAt = null;
+                    reconnectedTcpClient = null;
+                    reconnectedStream = null;
+                    lastReconnectDiscovery = null;
                     int IsolationGracePeriodSeconds = TunnelOptions.IsolationGracePeriodSeconds; // Wait before reconnecting to avoid thrashing
-                    TcpClient reconnectedTcpClient = null;
-                    Stream reconnectedStream = null;
                     string reconnectedTcpBuffer = ""; // Accumulates partial TCP data across reads
-                    DateTime? lastReconnectDiscovery = null;
                     int reconnectDiscoverySeconds = TunnelOptions.HeartbeatIntervalSeconds;
                     int reconnectDiscoveryAttempts = 0;
                     const int MaxReconnectDiscoveryAttempts = 5; // After this many re-sends, tear down and reconnect fresh
@@ -2183,282 +1917,7 @@ public class MeshEngine
 
                     while (!Program.ShutdownRequested && !Program.DisconnectRequested)
                     {
-                        // Process MeshConnectionBegin messages (introducer-relayed, no mediation server needed)
-                        while (meshConnectionBeginQueue.TryDequeue(out var cbMsg))
-                        {
-                            ProcessMeshConnectionBegin(cbMsg);
-                        }
-
-                        // Process peer removal notifications from the introducer
-                        while (meshPeerRemovedQueue.TryDequeue(out var rmMsg))
-                        {
-                            if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
-                                RemoveDeadPeer(rmMsg.PrivateAddressString);
-                        }
-
-                        // GUI flipped off "allow relay through" — drop all hosted relay routes.
-                        if (Program.RelayHostingDisableRequested)
-                        {
-                            Program.RelayHostingDisableRequested = false;
-                            string[] dropped;
-                            lock (hostedRelayLock) { dropped = hostedRelays.ToArray(); hostedRelays.Clear(); }
-                            foreach (var pk in dropped)
-                            {
-                                var parts = pk.Split('|', 2);
-                                if (parts.Length != 2) continue;
-                                try
-                                {
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
-                                }
-                                catch { }
-                                // If we're the introducer, drive reassignment for the pairs we just stopped
-                                // hosting so endpoints don't wait for the 45s health timeout.
-                                if (isIntroducer)
-                                {
-                                    lastRelayReselect.TryRemove(pk, out _);
-                                    meshRelayHealthReportQueue.Enqueue(new MediationMessage(MediationMessageType.MeshRelayHealthReport)
-                                    {
-                                        PeerA = parts[0],
-                                        PeerB = parts[1],
-                                        CurrentRelay = meshIP,
-                                        Self = parts[0],
-                                        Remote = parts[1],
-                                        Observation = RelayHealthObservation.Other
-                                    });
-                                }
-                            }
-                            if (dropped.Length > 0)
-                                Program.Log($"[Mesh] Disabled relay hosting — dropped {dropped.Length} pair(s)");
-
-                            // Send an immediate heartbeat with RelayCapable=false so the introducer learns
-                            // right away and reassigns affected pairs, instead of waiting up to ProbeInterval
-                            // seconds for the next regular probe.
-                            if (!isIntroducer && !string.IsNullOrEmpty(introducerMeshIP))
-                            {
-                                try
-                                {
-                                    var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
-                                    {
-                                        RelayCapable = false,
-                                        RelayCapacity = TunnelOptions.OwnRelayCapacity
-                                    };
-                                    byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
-                                    MeshSend(probeBytes, probeBytes.Length,
-                                        new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                                    Program.Log("[Mesh] Sent immediate heartbeat advertising RelayCapable=false");
-                                }
-                                catch (Exception ex)
-                                {
-                                    Program.Log($"[Mesh] Failed to send immediate opt-out heartbeat: {ex.Message}");
-                                }
-                            }
-                        }
-
-                        // We've been chosen as a relay for some pair — set up forwarding + ack.
-                        while (meshRelayAssignmentQueue.TryDequeue(out var raMsg))
-                        {
-                            if (raMsg.RelayMeshIP != meshIP)
-                            {
-                                Program.Log($"[Mesh] Ignoring MeshRelayAssignment not addressed to us (RelayMeshIP={raMsg.RelayMeshIP})");
-                                continue;
-                            }
-                            string sortA = string.Compare(raMsg.PeerA, raMsg.PeerB, StringComparison.Ordinal) < 0 ? raMsg.PeerA : raMsg.PeerB;
-                            string sortB = sortA == raMsg.PeerA ? raMsg.PeerB : raMsg.PeerA;
-                            string pairKey = $"{sortA}|{sortB}";
-
-                            if (raMsg.Release)
-                            {
-                                try
-                                {
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerA));
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerB));
-                                }
-                                catch { }
-                                RemoveHostedRelay(pairKey);
-                                Program.Log($"[Mesh] Released relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
-                                continue;
-                            }
-
-                            bool ok = false;
-                            string err = null;
-                            try
-                            {
-                                // The relay just needs IP forwarding + existing direct WG peers to both endpoints.
-                                // Don't touch AllowedIPs — adding the other endpoint's IP would steal cryptokey
-                                // routing from the direct peer entry and break this peer's direct connection.
-                                wireguardTunnel.EnableForwarding();
-                                var aPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerA));
-                                var bPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerB));
-                                ok = aPeer != null && bPeer != null;
-                                if (ok)
-                                {
-                                    AddHostedRelay(pairKey);
-                                    Program.Log($"[Mesh] Hosting relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
-                                }
-                                else err = $"Missing direct WG peer (aPeer={aPeer != null}, bPeer={bPeer != null})";
-                            }
-                            catch (Exception ex) { err = ex.Message; }
-
-                            if (!string.IsNullOrEmpty(introducerMeshIP))
-                            {
-                                var ack = new MediationMessage(MediationMessageType.MeshRelayAssignmentAck)
-                                {
-                                    PeerA = raMsg.PeerA,
-                                    PeerB = raMsg.PeerB,
-                                    RelayMeshIP = meshIP,
-                                    Success = ok,
-                                    Error = err
-                                };
-                                try
-                                {
-                                    byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
-                                    MeshSend(ackBytes, ackBytes.Length, new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                                }
-                                catch { }
-                            }
-                        }
-
-                        // Health reports from relayed peers — reselect if a meaningfully better candidate exists.
-                        while (meshRelayHealthReportQueue.TryDequeue(out var hrMsg))
-                        {
-                            if (!isIntroducer) continue;
-                            string pa = hrMsg.PeerA ?? hrMsg.Self;
-                            string pb = hrMsg.PeerB ?? hrMsg.Remote;
-                            if (string.IsNullOrEmpty(pa) || string.IsNullOrEmpty(pb)) continue;
-                            string sortA = string.Compare(pa, pb, StringComparison.Ordinal) < 0 ? pa : pb;
-                            string sortB = sortA == pa ? pb : pa;
-                            string pairKey = $"{sortA}|{sortB}";
-
-                            var cooldown = TimeSpan.FromSeconds(TunnelOptions.RelayReselectCooldownSeconds);
-                            if (lastRelayReselect.TryGetValue(pairKey, out var lastSel) && DateTime.UtcNow - lastSel < cooldown)
-                            {
-                                Program.Log($"[Mesh] Health report for {pairKey} within cooldown — ignored");
-                                continue;
-                            }
-
-                            string oldRelay = hrMsg.CurrentRelay;
-                            if (string.IsNullOrEmpty(oldRelay)) relayAssignments.TryGetValue(pairKey, out oldRelay);
-
-                            long? OldScore()
-                            {
-                                if (string.IsNullOrEmpty(oldRelay)) return null;
-                                long lA = peerLatencyMs.TryGetValue(oldRelay == pa ? pb : pa, out var x) ? x : long.MaxValue / 4;
-                                long lB = peerLatencyMs.TryGetValue(oldRelay == pb ? pa : pb, out var y) ? y : long.MaxValue / 4;
-                                int load = oldRelay == meshIP ? HostedRelayCount()
-                                           : (relayCandidates.TryGetValue(oldRelay, out var rc) ? rc.activeRoutes : 0);
-                                return lA + lB + (long)TunnelOptions.RelayLoadFactorMs * load;
-                            }
-
-                            // Temporarily mark the old relay ineligible so PickRelay skips it.
-                            bool restored = false;
-                            (bool capable, int activeRoutes, RelayCapacity capacity, DateTime lastSeen) saved = default;
-                            if (!string.IsNullOrEmpty(oldRelay) && oldRelay != meshIP && relayCandidates.TryGetValue(oldRelay, out saved))
-                            {
-                                relayCandidates[oldRelay] = (false, saved.activeRoutes, saved.capacity, saved.lastSeen);
-                                restored = true;
-                            }
-                            string newRelay = PickRelay(pa, pb);
-                            if (restored) relayCandidates[oldRelay] = saved;
-
-                            if (string.IsNullOrEmpty(newRelay) || newRelay == oldRelay)
-                            {
-                                Program.Log($"[Mesh] Health report for {pairKey}: no better candidate available");
-                                lastRelayReselect[pairKey] = DateTime.UtcNow;
-                                continue;
-                            }
-
-                            // Skip the score-improvement threshold when the old relay is no longer viable
-                            // (peer gone, or RelayCapable flipped false). Otherwise we'd "stay put" on a relay
-                            // that won't actually carry traffic.
-                            bool oldStillViable = !string.IsNullOrEmpty(oldRelay) &&
-                                (oldRelay == meshIP
-                                    ? TunnelOptions.AllowRelayThrough
-                                    : (relayCandidates.TryGetValue(oldRelay, out var rcOld) && rcOld.capable));
-                            long? oldS = OldScore();
-                            long newS = (peerLatencyMs.TryGetValue(newRelay == pa ? pb : pa, out var nlA) ? nlA : 0)
-                                      + (peerLatencyMs.TryGetValue(newRelay == pb ? pa : pb, out var nlB) ? nlB : 0)
-                                      + (long)TunnelOptions.RelayLoadFactorMs *
-                                        (newRelay == meshIP ? HostedRelayCount()
-                                         : (relayCandidates.TryGetValue(newRelay, out var nc) ? nc.activeRoutes : 0));
-                            if (oldStillViable && oldS.HasValue && newS > oldS.Value * (1.0 - TunnelOptions.RelayReselectMinImprovement))
-                            {
-                                Program.Log($"[Mesh] Health report for {pairKey}: new candidate {newRelay} (score {newS}) not meaningfully better than {oldRelay} (score {oldS}) — staying put");
-                                lastRelayReselect[pairKey] = DateTime.UtcNow;
-                                continue;
-                            }
-
-                            Program.Log($"[Mesh] Reselecting relay for {pairKey}: {oldRelay ?? "(unknown)"} → {newRelay}");
-                            relayAssignments[pairKey] = newRelay;
-                            lastRelayReselect[pairKey] = DateTime.UtcNow;
-
-                            if (!string.IsNullOrEmpty(oldRelay) && oldRelay != newRelay)
-                            {
-                                if (oldRelay == meshIP)
-                                {
-                                    try
-                                    {
-                                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pa));
-                                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pb));
-                                    }
-                                    catch { }
-                                    RemoveHostedRelay(pairKey);
-                                }
-                                else
-                                {
-                                    var release = new MediationMessage(MediationMessageType.MeshRelayAssignment)
-                                    {
-                                        PeerA = pa,
-                                        PeerB = pb,
-                                        RelayMeshIP = oldRelay,
-                                        Release = true
-                                    };
-                                    try { byte[] rb = Encoding.UTF8.GetBytes(release.Serialize()); MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(oldRelay), MeshControlPort)); }
-                                    catch (Exception ex) { Program.Log($"[Mesh] Failed to release old relay {oldRelay}: {ex.Message}"); }
-                                }
-                            }
-
-                            if (newRelay == meshIP)
-                            {
-                                wireguardTunnel.EnableForwarding();
-                                AddHostedRelay(pairKey);
-                            }
-                            else
-                            {
-                                var assign = new MediationMessage(MediationMessageType.MeshRelayAssignment)
-                                {
-                                    PeerA = pa,
-                                    PeerB = pb,
-                                    RelayMeshIP = newRelay
-                                };
-                                try { byte[] ab = Encoding.UTF8.GetBytes(assign.Serialize()); MeshSend(ab, ab.Length, new IPEndPoint(IPAddress.Parse(newRelay), MeshControlPort)); }
-                                catch (Exception ex) { Program.Log($"[Mesh] Failed to dispatch MeshRelayAssignment to {newRelay}: {ex.Message}"); }
-                            }
-
-                            NotifyEndpoint(pa, pb, newRelay);
-                            NotifyEndpoint(pb, pa, newRelay);
-                        }
-
-                        // Process graceful peer leave notifications
-                        while (meshPeerLeaveQueue.TryDequeue(out var leaveMsg))
-                        {
-                            if (!string.IsNullOrEmpty(leaveMsg.PrivateAddressString))
-                            {
-                                Program.Log($"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
-                                bool wasIntroducer = leaveMsg.PrivateAddressString == introducerMeshIP;
-                                RemoveDeadPeer(leaveMsg.PrivateAddressString);
-                                if (wasIntroducer && !isIntroducer && reconnectedTcpClient == null)
-                                {
-                                    Program.Log("[Mesh] Introducer left gracefully — forcing immediate takeover check");
-                                    // Pre-arm both counters: clearing the ack flag so the probe block's
-                                    // first branch fires, and bumping misses one past threshold so even
-                                    // after the block's ++ the takeover gate trips.
-                                    introducerProbeAckReceived = false;
-                                    introducerMissedProbes = IntroducerMissedProbeThreshold;
-                                    lastIntroducerProbe = DateTime.UtcNow.AddSeconds(-introducerProbeInterval.TotalSeconds - 1);
-                                }
-                            }
-                        }
+                        DrainInboundQueues();
 
                         // ── Introducer heartbeat (failover introducer) ──────────────────────
                         // Same Program.Logic as the primary introducer loop — send heartbeats, collect
@@ -4232,6 +3691,289 @@ public class MeshEngine
             writeStream.Write(connBuffer, 0, connBuffer.Length);
             writeStream.Flush();
             pendingConnectionRequests[targetPeerID] = DateTime.UtcNow;
+        }
+    }
+
+    private void DrainInboundQueues()
+    {
+        // Process MeshConnectionBegin messages: create tunnels that hole-punch directly
+        // without going through the mediation server (introducer-relayed coordination).
+        while (meshConnectionBeginQueue.TryDequeue(out var cbMsg))
+        {
+            ProcessMeshConnectionBegin(cbMsg);
+        }
+
+        // Process peer removal notifications from the introducer
+        while (meshPeerRemovedQueue.TryDequeue(out var rmMsg))
+        {
+            if (!string.IsNullOrEmpty(rmMsg.PrivateAddressString))
+                RemoveDeadPeer(rmMsg.PrivateAddressString);
+        }
+
+        // GUI flipped off "allow relay through" — drop all hosted relay routes.
+        if (Program.RelayHostingDisableRequested)
+        {
+            Program.RelayHostingDisableRequested = false;
+            string[] dropped;
+            lock (hostedRelayLock) { dropped = hostedRelays.ToArray(); hostedRelays.Clear(); }
+            foreach (var pk in dropped)
+            {
+                var parts = pk.Split('|', 2);
+                if (parts.Length != 2) continue;
+                try
+                {
+                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
+                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
+                }
+                catch { }
+                // If we're the introducer, drive reassignment for the pairs we just stopped
+                // hosting so endpoints don't wait for the 45s health timeout.
+                if (isIntroducer)
+                {
+                    lastRelayReselect.TryRemove(pk, out _);
+                    meshRelayHealthReportQueue.Enqueue(new MediationMessage(MediationMessageType.MeshRelayHealthReport)
+                    {
+                        PeerA = parts[0],
+                        PeerB = parts[1],
+                        CurrentRelay = meshIP,
+                        Self = parts[0],
+                        Remote = parts[1],
+                        Observation = RelayHealthObservation.Other
+                    });
+                }
+            }
+            if (dropped.Length > 0)
+                Program.Log($"[Mesh] Disabled relay hosting — dropped {dropped.Length} pair(s)");
+
+            // Send an immediate heartbeat with RelayCapable=false so the introducer learns
+            // right away and reassigns affected pairs, instead of waiting up to ProbeInterval
+            // seconds for the next regular probe.
+            if (!isIntroducer && !string.IsNullOrEmpty(introducerMeshIP))
+            {
+                try
+                {
+                    var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
+                    {
+                        RelayCapable = false,
+                        RelayCapacity = TunnelOptions.OwnRelayCapacity
+                    };
+                    byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
+                    MeshSend(probeBytes, probeBytes.Length,
+                        new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
+                    Program.Log("[Mesh] Sent immediate heartbeat advertising RelayCapable=false");
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"[Mesh] Failed to send immediate opt-out heartbeat: {ex.Message}");
+                }
+            }
+        }
+
+        // We've been chosen as a relay for some pair — set up forwarding + ack.
+        while (meshRelayAssignmentQueue.TryDequeue(out var raMsg))
+        {
+            if (raMsg.RelayMeshIP != meshIP)
+            {
+                Program.Log($"[Mesh] Ignoring MeshRelayAssignment not addressed to us (RelayMeshIP={raMsg.RelayMeshIP})");
+                continue;
+            }
+            string sortA = string.Compare(raMsg.PeerA, raMsg.PeerB, StringComparison.Ordinal) < 0 ? raMsg.PeerA : raMsg.PeerB;
+            string sortB = sortA == raMsg.PeerA ? raMsg.PeerB : raMsg.PeerA;
+            string pairKey = $"{sortA}|{sortB}";
+
+            if (raMsg.Release)
+            {
+                try
+                {
+                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerA));
+                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerB));
+                }
+                catch { }
+                RemoveHostedRelay(pairKey);
+                Program.Log($"[Mesh] Released relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
+                continue;
+            }
+
+            bool ok = false;
+            string err = null;
+            try
+            {
+                // The relay just needs IP forwarding + existing direct WG peers to both endpoints.
+                // Don't touch AllowedIPs — adding the other endpoint's IP would steal cryptokey
+                // routing from the direct peer entry and break this peer's direct connection.
+                wireguardTunnel.EnableForwarding();
+                var aPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerA));
+                var bPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerB));
+                ok = aPeer != null && bPeer != null;
+                if (ok)
+                {
+                    AddHostedRelay(pairKey);
+                    Program.Log($"[Mesh] Hosting relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
+                }
+                else err = $"Missing direct WG peer (aPeer={aPeer != null}, bPeer={bPeer != null})";
+            }
+            catch (Exception ex) { err = ex.Message; }
+
+            if (!string.IsNullOrEmpty(introducerMeshIP))
+            {
+                var ack = new MediationMessage(MediationMessageType.MeshRelayAssignmentAck)
+                {
+                    PeerA = raMsg.PeerA,
+                    PeerB = raMsg.PeerB,
+                    RelayMeshIP = meshIP,
+                    Success = ok,
+                    Error = err
+                };
+                try
+                {
+                    byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
+                    MeshSend(ackBytes, ackBytes.Length, new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
+                }
+                catch { }
+            }
+        }
+
+        // Health reports from relayed peers — reselect if a meaningfully better candidate exists.
+        while (meshRelayHealthReportQueue.TryDequeue(out var hrMsg))
+        {
+            if (!isIntroducer) continue;
+            string pa = hrMsg.PeerA ?? hrMsg.Self;
+            string pb = hrMsg.PeerB ?? hrMsg.Remote;
+            if (string.IsNullOrEmpty(pa) || string.IsNullOrEmpty(pb)) continue;
+            string sortA = string.Compare(pa, pb, StringComparison.Ordinal) < 0 ? pa : pb;
+            string sortB = sortA == pa ? pb : pa;
+            string pairKey = $"{sortA}|{sortB}";
+
+            var cooldown = TimeSpan.FromSeconds(TunnelOptions.RelayReselectCooldownSeconds);
+            if (lastRelayReselect.TryGetValue(pairKey, out var lastSel) && DateTime.UtcNow - lastSel < cooldown)
+            {
+                Program.Log($"[Mesh] Health report for {pairKey} within cooldown — ignored");
+                continue;
+            }
+
+            string oldRelay = hrMsg.CurrentRelay;
+            if (string.IsNullOrEmpty(oldRelay)) relayAssignments.TryGetValue(pairKey, out oldRelay);
+
+            long? OldScore()
+            {
+                if (string.IsNullOrEmpty(oldRelay)) return null;
+                long lA = peerLatencyMs.TryGetValue(oldRelay == pa ? pb : pa, out var x) ? x : long.MaxValue / 4;
+                long lB = peerLatencyMs.TryGetValue(oldRelay == pb ? pa : pb, out var y) ? y : long.MaxValue / 4;
+                int load = oldRelay == meshIP ? HostedRelayCount()
+                           : (relayCandidates.TryGetValue(oldRelay, out var rc) ? rc.activeRoutes : 0);
+                return lA + lB + (long)TunnelOptions.RelayLoadFactorMs * load;
+            }
+
+            // Temporarily mark the old relay ineligible so PickRelay skips it.
+            bool restored = false;
+            (bool capable, int activeRoutes, RelayCapacity capacity, DateTime lastSeen) saved = default;
+            if (!string.IsNullOrEmpty(oldRelay) && oldRelay != meshIP && relayCandidates.TryGetValue(oldRelay, out saved))
+            {
+                relayCandidates[oldRelay] = (false, saved.activeRoutes, saved.capacity, saved.lastSeen);
+                restored = true;
+            }
+            string newRelay = PickRelay(pa, pb);
+            if (restored) relayCandidates[oldRelay] = saved;
+
+            if (string.IsNullOrEmpty(newRelay) || newRelay == oldRelay)
+            {
+                Program.Log($"[Mesh] Health report for {pairKey}: no better candidate available");
+                lastRelayReselect[pairKey] = DateTime.UtcNow;
+                continue;
+            }
+
+            // Skip the score-improvement threshold when the old relay is no longer viable
+            // (peer gone, or RelayCapable flipped false). Otherwise we'd "stay put" on a relay
+            // that won't actually carry traffic.
+            bool oldStillViable = !string.IsNullOrEmpty(oldRelay) &&
+                (oldRelay == meshIP
+                    ? TunnelOptions.AllowRelayThrough
+                    : (relayCandidates.TryGetValue(oldRelay, out var rcOld) && rcOld.capable));
+            long? oldS = OldScore();
+            long newS = (peerLatencyMs.TryGetValue(newRelay == pa ? pb : pa, out var nlA) ? nlA : 0)
+                      + (peerLatencyMs.TryGetValue(newRelay == pb ? pa : pb, out var nlB) ? nlB : 0)
+                      + (long)TunnelOptions.RelayLoadFactorMs *
+                        (newRelay == meshIP ? HostedRelayCount()
+                         : (relayCandidates.TryGetValue(newRelay, out var nc) ? nc.activeRoutes : 0));
+            if (oldStillViable && oldS.HasValue && newS > oldS.Value * (1.0 - TunnelOptions.RelayReselectMinImprovement))
+            {
+                Program.Log($"[Mesh] Health report for {pairKey}: new candidate {newRelay} (score {newS}) not meaningfully better than {oldRelay} (score {oldS}) — staying put");
+                lastRelayReselect[pairKey] = DateTime.UtcNow;
+                continue;
+            }
+
+            Program.Log($"[Mesh] Reselecting relay for {pairKey}: {oldRelay ?? "(unknown)"} → {newRelay}");
+            relayAssignments[pairKey] = newRelay;
+            lastRelayReselect[pairKey] = DateTime.UtcNow;
+
+            if (!string.IsNullOrEmpty(oldRelay) && oldRelay != newRelay)
+            {
+                if (oldRelay == meshIP)
+                {
+                    try
+                    {
+                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pa));
+                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pb));
+                    }
+                    catch { }
+                    RemoveHostedRelay(pairKey);
+                }
+                else
+                {
+                    var release = new MediationMessage(MediationMessageType.MeshRelayAssignment)
+                    {
+                        PeerA = pa,
+                        PeerB = pb,
+                        RelayMeshIP = oldRelay,
+                        Release = true
+                    };
+                    try { byte[] rb = Encoding.UTF8.GetBytes(release.Serialize()); MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(oldRelay), MeshControlPort)); }
+                    catch (Exception ex) { Program.Log($"[Mesh] Failed to release old relay {oldRelay}: {ex.Message}"); }
+                }
+            }
+
+            if (newRelay == meshIP)
+            {
+                wireguardTunnel.EnableForwarding();
+                AddHostedRelay(pairKey);
+            }
+            else
+            {
+                var assign = new MediationMessage(MediationMessageType.MeshRelayAssignment)
+                {
+                    PeerA = pa,
+                    PeerB = pb,
+                    RelayMeshIP = newRelay
+                };
+                try { byte[] ab = Encoding.UTF8.GetBytes(assign.Serialize()); MeshSend(ab, ab.Length, new IPEndPoint(IPAddress.Parse(newRelay), MeshControlPort)); }
+                catch (Exception ex) { Program.Log($"[Mesh] Failed to dispatch MeshRelayAssignment to {newRelay}: {ex.Message}"); }
+            }
+
+            NotifyEndpoint(pa, pb, newRelay);
+            NotifyEndpoint(pb, pa, newRelay);
+        }
+
+        // Process graceful peer leave notifications
+        while (meshPeerLeaveQueue.TryDequeue(out var leaveMsg))
+        {
+            if (!string.IsNullOrEmpty(leaveMsg.PrivateAddressString))
+            {
+                Program.Log($"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
+                bool wasIntroducer = leaveMsg.PrivateAddressString == introducerMeshIP;
+                RemoveDeadPeer(leaveMsg.PrivateAddressString);
+                // Don't pre-arm takeover counters if a reconnect-to-mediation bid is already in flight
+                // (mesh-control-only loop). reconnectedTcpClient is always null in the primary loop.
+                if (wasIntroducer && !isIntroducer && reconnectedTcpClient == null)
+                {
+                    Program.Log("[Mesh] Introducer left gracefully — forcing immediate takeover check");
+                    // Pre-arm both counters: clearing the ack flag so the probe block's
+                    // first branch fires, and bumping misses one past threshold so even
+                    // after the block's ++ the takeover gate trips.
+                    introducerProbeAckReceived = false;
+                    introducerMissedProbes = IntroducerMissedProbeThreshold;
+                    lastIntroducerProbe = DateTime.UtcNow.AddSeconds(-introducerProbeInterval.TotalSeconds - 1);
+                }
+            }
         }
     }
 
