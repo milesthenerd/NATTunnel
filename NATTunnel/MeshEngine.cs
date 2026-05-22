@@ -1067,99 +1067,7 @@ public class MeshEngine
                         }
                     }
 
-                    // ── Latency ping ──────────────────────────────────────────────────
-                    // Periodically send binary ping (0xFF 'P') to all reachable mesh IPs.
-                    if (DateTime.UtcNow - lastPingTime > pingInterval)
-                    {
-                        byte[] pingPacket = new byte[] { 0xFF, (byte)'P' };
-                        var allPeers = wireguardTunnel.GetAllPeers();
-                        var pingedIPs = new HashSet<string>();
-                        foreach (var peer in allPeers)
-                        {
-                            string peerIP = peer.PrivateAddress.ToString();
-                            if (pingedIPs.Add(peerIP))
-                            {
-                                pingSentTicks[peerIP] = System.Diagnostics.Stopwatch.GetTimestamp();
-                                try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(peer.PrivateAddress, MeshControlPort)); } catch { }
-                            }
-                            // Also ping any relayed IPs in this peer's AllowedIPs
-                            if (!string.IsNullOrEmpty(peer.AllowedIPs))
-                            {
-                                foreach (var cidr in peer.AllowedIPs.Split(',', StringSplitOptions.TrimEntries))
-                                {
-                                    string ip = cidr.Split('/')[0];
-                                    if (!string.IsNullOrEmpty(ip) && ip != peerIP && pingedIPs.Add(ip))
-                                    {
-                                        pingSentTicks[ip] = System.Diagnostics.Stopwatch.GetTimestamp();
-                                        try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(IPAddress.Parse(ip), MeshControlPort)); } catch { }
-                                    }
-                                }
-                            }
-                        }
-                        // Expire stale latency entries (no pong in 30s)
-                        var staleCutoff = DateTime.UtcNow.AddSeconds(-30);
-                        foreach (var kvp in peerLastPong)
-                        {
-                            if (kvp.Value < staleCutoff)
-                            {
-                                peerLatencyMs.TryRemove(kvp.Key, out _);
-                                peerLastPong.TryRemove(kvp.Key, out _);
-                            }
-                        }
-
-                        lastPingTime = DateTime.UtcNow;
-
-                        // Relay health probe: for each remote reached via a non-self relay, check whether
-                        // WG has heard from the remote recently. If silent past the timeout, look at pongs
-                        // to distinguish "relay is fine but remote is unreachable" (asymmetric flake →
-                        // report) from "relay itself is down" (also report, with a different observation).
-                        if (!string.IsNullOrEmpty(introducerMeshIP))
-                        {
-                            var silenceCutoff = DateTime.UtcNow.AddSeconds(-TunnelOptions.RelayHealthTimeoutSeconds);
-                            var pongRecentCutoff = DateTime.UtcNow.AddSeconds(-15);
-                            var reportCooldown = TimeSpan.FromSeconds(TunnelOptions.RelayReselectCooldownSeconds);
-                            foreach (var kv in relayedRemotes)
-                            {
-                                string remote = kv.Key;
-                                string relay = kv.Value;
-                                if (relay == meshIP) continue;
-                                if (lastRelayHealthReport.TryGetValue(remote, out var last) && DateTime.UtcNow - last < reportCooldown)
-                                    continue;
-
-                                DateTime wgLast = DateTime.MinValue;
-                                try { wgLast = wireguardTunnel?.GetPeer(IPAddress.Parse(relay))?.LastActivity ?? DateTime.MinValue; } catch { }
-                                if (wgLast > silenceCutoff) continue;
-
-                                bool relayReachable = peerLastPong.TryGetValue(relay, out var relayPong) && relayPong > pongRecentCutoff;
-                                bool remoteReachable = peerLastPong.TryGetValue(remote, out var remotePong) && remotePong > pongRecentCutoff;
-                                if (remoteReachable) continue;
-
-                                RelayHealthObservation obs = relayReachable
-                                    ? RelayHealthObservation.DownstreamFailed
-                                    : RelayHealthObservation.RelayUnreachable;
-                                var report = new MediationMessage(MediationMessageType.MeshRelayHealthReport)
-                                {
-                                    Self = meshIP,
-                                    Remote = remote,
-                                    CurrentRelay = relay,
-                                    PeerA = meshIP,
-                                    PeerB = remote,
-                                    Observation = obs
-                                };
-                                try
-                                {
-                                    byte[] rBytes = Encoding.UTF8.GetBytes(report.Serialize());
-                                    MeshSend(rBytes, rBytes.Length, new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                                    lastRelayHealthReport[remote] = DateTime.UtcNow;
-                                    Program.Log($"[Mesh] Sent MeshRelayHealthReport: remote={remote} relay={relay} obs={obs}");
-                                }
-                                catch (Exception ex)
-                                {
-                                    Program.Log($"[Mesh] Failed to send MeshRelayHealthReport: {ex.Message}");
-                                }
-                            }
-                        }
-                    }
+                    SendLatencyPingsAndHealthProbe();
 
                     try
                     {
@@ -2101,46 +2009,7 @@ public class MeshEngine
                             }
                         }
 
-                        // ── Latency ping (mesh-only loop) ────────────────────────────────
-                        if (DateTime.UtcNow - lastPingTime > pingInterval)
-                        {
-                            byte[] pingPacket = new byte[] { 0xFF, (byte)'P' };
-                            var allPeers = wireguardTunnel.GetAllPeers();
-                            var pingedIPs = new HashSet<string>();
-                            foreach (var peer in allPeers)
-                            {
-                                string peerIP = peer.PrivateAddress.ToString();
-                                if (pingedIPs.Add(peerIP))
-                                {
-                                    pingSentTicks[peerIP] = System.Diagnostics.Stopwatch.GetTimestamp();
-                                    try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(peer.PrivateAddress, MeshControlPort)); } catch { }
-                                }
-                                if (!string.IsNullOrEmpty(peer.AllowedIPs))
-                                {
-                                    foreach (var cidr in peer.AllowedIPs.Split(',', StringSplitOptions.TrimEntries))
-                                    {
-                                        string ip = cidr.Split('/')[0];
-                                        if (!string.IsNullOrEmpty(ip) && ip != peerIP && pingedIPs.Add(ip))
-                                        {
-                                            pingSentTicks[ip] = System.Diagnostics.Stopwatch.GetTimestamp();
-                                            try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(IPAddress.Parse(ip), MeshControlPort)); } catch { }
-                                        }
-                                    }
-                                }
-                            }
-                            // Expire stale latency entries (no pong in 30s)
-                            var staleCutoff = DateTime.UtcNow.AddSeconds(-30);
-                            foreach (var kvp in peerLastPong)
-                            {
-                                if (kvp.Value < staleCutoff)
-                                {
-                                    peerLatencyMs.TryRemove(kvp.Key, out _);
-                                    peerLastPong.TryRemove(kvp.Key, out _);
-                                }
-                            }
-
-                            lastPingTime = DateTime.UtcNow;
-                        }
+                        SendLatencyPingsAndHealthProbe();
 
                         // If we have a reconnected TCP connection, process incoming messages
                         if (reconnectedTcpClient != null && reconnectedTcpClient.Connected)
@@ -3973,6 +3842,105 @@ public class MeshEngine
                     introducerMissedProbes = IntroducerMissedProbeThreshold;
                     lastIntroducerProbe = DateTime.UtcNow.AddSeconds(-introducerProbeInterval.TotalSeconds - 1);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sends one round of latency pings to all reachable mesh IPs, expires stale latency entries,
+    /// and (if we have an introducer) probes relay health for any remotes reached via a non-self relay,
+    /// emitting MeshRelayHealthReport when a relay's downstream looks broken.
+    /// Called from both the primary loop and the mesh-control-only loop.
+    /// </summary>
+    private void SendLatencyPingsAndHealthProbe()
+    {
+        if (DateTime.UtcNow - lastPingTime <= pingInterval) return;
+
+        byte[] pingPacket = new byte[] { 0xFF, (byte)'P' };
+        var allPeers = wireguardTunnel.GetAllPeers();
+        var pingedIPs = new HashSet<string>();
+        foreach (var peer in allPeers)
+        {
+            string peerIP = peer.PrivateAddress.ToString();
+            if (pingedIPs.Add(peerIP))
+            {
+                pingSentTicks[peerIP] = System.Diagnostics.Stopwatch.GetTimestamp();
+                try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(peer.PrivateAddress, MeshControlPort)); } catch { }
+            }
+            // Also ping any relayed IPs in this peer's AllowedIPs
+            if (!string.IsNullOrEmpty(peer.AllowedIPs))
+            {
+                foreach (var cidr in peer.AllowedIPs.Split(',', StringSplitOptions.TrimEntries))
+                {
+                    string ip = cidr.Split('/')[0];
+                    if (!string.IsNullOrEmpty(ip) && ip != peerIP && pingedIPs.Add(ip))
+                    {
+                        pingSentTicks[ip] = System.Diagnostics.Stopwatch.GetTimestamp();
+                        try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(IPAddress.Parse(ip), MeshControlPort)); } catch { }
+                    }
+                }
+            }
+        }
+        // Expire stale latency entries (no pong in 30s)
+        var staleCutoff = DateTime.UtcNow.AddSeconds(-30);
+        foreach (var kvp in peerLastPong)
+        {
+            if (kvp.Value < staleCutoff)
+            {
+                peerLatencyMs.TryRemove(kvp.Key, out _);
+                peerLastPong.TryRemove(kvp.Key, out _);
+            }
+        }
+
+        lastPingTime = DateTime.UtcNow;
+
+        // Relay health probe: for each remote reached via a non-self relay, check whether
+        // WG has heard from the remote recently. If silent past the timeout, look at pongs
+        // to distinguish "relay is fine but remote is unreachable" (asymmetric flake →
+        // report) from "relay itself is down" (also report, with a different observation).
+        if (string.IsNullOrEmpty(introducerMeshIP)) return;
+
+        var silenceCutoff = DateTime.UtcNow.AddSeconds(-TunnelOptions.RelayHealthTimeoutSeconds);
+        var pongRecentCutoff = DateTime.UtcNow.AddSeconds(-15);
+        var reportCooldown = TimeSpan.FromSeconds(TunnelOptions.RelayReselectCooldownSeconds);
+        foreach (var kv in relayedRemotes)
+        {
+            string remote = kv.Key;
+            string relay = kv.Value;
+            if (relay == meshIP) continue;
+            if (lastRelayHealthReport.TryGetValue(remote, out var last) && DateTime.UtcNow - last < reportCooldown)
+                continue;
+
+            DateTime wgLast = DateTime.MinValue;
+            try { wgLast = wireguardTunnel?.GetPeer(IPAddress.Parse(relay))?.LastActivity ?? DateTime.MinValue; } catch { }
+            if (wgLast > silenceCutoff) continue;
+
+            bool relayReachable = peerLastPong.TryGetValue(relay, out var relayPong) && relayPong > pongRecentCutoff;
+            bool remoteReachable = peerLastPong.TryGetValue(remote, out var remotePong) && remotePong > pongRecentCutoff;
+            if (remoteReachable) continue;
+
+            RelayHealthObservation obs = relayReachable
+                ? RelayHealthObservation.DownstreamFailed
+                : RelayHealthObservation.RelayUnreachable;
+            var report = new MediationMessage(MediationMessageType.MeshRelayHealthReport)
+            {
+                Self = meshIP,
+                Remote = remote,
+                CurrentRelay = relay,
+                PeerA = meshIP,
+                PeerB = remote,
+                Observation = obs
+            };
+            try
+            {
+                byte[] rBytes = Encoding.UTF8.GetBytes(report.Serialize());
+                MeshSend(rBytes, rBytes.Length, new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
+                lastRelayHealthReport[remote] = DateTime.UtcNow;
+                Program.Log($"[Mesh] Sent MeshRelayHealthReport: remote={remote} relay={relay} obs={obs}");
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"[Mesh] Failed to send MeshRelayHealthReport: {ex.Message}");
             }
         }
     }
