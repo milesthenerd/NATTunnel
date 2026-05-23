@@ -894,6 +894,18 @@ namespace NATTunnel
                 backend.ApplyFullConfig(interfaceName, configFilePath);
             }
         }
+
+        public void ForwardDataPacket(byte[] data, System.Net.IPEndPoint sourceEndpoint)
+        {
+            // Daemon mode: WG-shaped packets go to the WG kernel interface via the proxy.
+            GetUdpProxy()?.ForwardToWireGuard(data, sourceEndpoint);
+        }
+
+        public void ConfigureNewTunnel(Tunnel tunnel)
+        {
+            // Daemon mode: wire this WireGuardTunnel into the Tunnel so it can do WG key exchange.
+            tunnel.SetWireGuardTunnel(this);
+        }
         public int GetPeerCount() => peerManager.GetPeerCount();
         public string GetConfigPath() => configFilePath;
 

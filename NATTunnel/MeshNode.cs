@@ -38,12 +38,6 @@ public class MeshNode
     /// embedded mode will eventually supply a different implementation.
     /// </summary>
     private IMeshHost host;
-    /// <summary>
-    /// Concrete WireGuardTunnel reference. Today this is the same object as <see cref="host"/>,
-    /// but kept typed separately because Tunnel.SetWireGuardTunnel still requires the concrete
-    /// type. Will be removed in Phase 2 when Tunnel stops being WG-aware.
-    /// </summary>
-    private WireGuardTunnel wireguardTunnel;
     private WireGuardUdpProxy udpProxy;
     private Stream stream;
     private byte[] buffer = new byte[8192];
@@ -171,8 +165,9 @@ public class MeshNode
 
     public void Run(WireGuardTunnel wireguardTunnel, string meshIP, UdpClient udpClient, WireGuardUdpProxy udpProxy, Guid peerID)
     {
-        this.wireguardTunnel = wireguardTunnel;
-        this.host = wireguardTunnel;   // same instance, IMeshHost-typed for protocol calls
+        // wireguardTunnel is the daemon's host implementation today. Embedded mode
+        // will supply a different IMeshHost via a new overload (Checkpoint D).
+        this.host = wireguardTunnel;
         this.meshIP = meshIP;
         this.udpClient = udpClient;
         this.udpProxy = udpProxy;
@@ -532,7 +527,7 @@ public class MeshNode
 
                                 if (isWireGuard)
                                 {
-                                    wireguardTunnel?.GetUdpProxy()?.ForwardToWireGuard(data, ep);
+                                    host?.ForwardDataPacket(data, ep);
                                 }
                                 else
                                 {
@@ -992,7 +987,7 @@ public class MeshNode
                                                         }
                                                     }
                                                 );
-                                                reconnectTunnel.SetWireGuardTunnel(wireguardTunnel);
+                                                host?.ConfigureNewTunnel(reconnectTunnel);
                                                 lock (meshLock) { activeConnectionTunnels[capturedConnID] = reconnectTunnel; }
                                                 if (!string.IsNullOrEmpty(capturedPeerIDStr))
                                                 {
@@ -2017,7 +2012,7 @@ public class MeshNode
             }
         );
 
-        peerTunnel.SetWireGuardTunnel(wireguardTunnel);
+        host?.ConfigureNewTunnel(peerTunnel);
 
         // Track the tunnel
         lock (meshLock) { activeConnectionTunnels[capturedPeerID.GetHashCode()] = peerTunnel; }
@@ -2743,7 +2738,7 @@ public class MeshNode
             }
         );
 
-        peerTunnel.SetWireGuardTunnel(wireguardTunnel);
+        host?.ConfigureNewTunnel(peerTunnel);
         lock (meshLock) { activeConnectionTunnels[msg.ConnectionID] = peerTunnel; }
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
             activePeerTunnels[msg.PrivateAddressString] = peerTunnel;

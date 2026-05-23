@@ -46,4 +46,18 @@ public interface IMeshHost
 
     /// <summary>Remove every peer (used during disconnect cleanup).</summary>
     void RemoveAllPeers();
+
+    /// <summary>
+    /// Receive-path forward for binary data packets (WireGuard message types 1-4 in daemon mode;
+    /// embedded mode dispatches to the appropriate MeshPeerProxy by source endpoint).
+    /// Called from the shared UDP dispatcher when an incoming packet looks like binary data
+    /// rather than JSON mesh-control.
+    /// </summary>
+    void ForwardDataPacket(byte[] data, IPEndPoint sourceEndpoint);
+
+    /// <summary>
+    /// Host-specific setup for a newly created Tunnel. Daemon mode wires the WireGuardTunnel
+    /// reference into the Tunnel so it can perform WG key exchange; embedded mode does nothing.
+    /// </summary>
+    void ConfigureNewTunnel(Tunnel tunnel);
 }
