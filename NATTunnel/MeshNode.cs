@@ -16,7 +16,7 @@ namespace NATTunnel;
 /// Encapsulates the per-process mesh networking engine.
 /// One instance per Run() lifetime; replaces the giant RunMeshMode local-variable closure.
 /// </summary>
-public class MeshEngine
+public class MeshNode
 {
     // ── Constants ──
     public const int MeshControlPort = 51888;
@@ -32,6 +32,17 @@ public class MeshEngine
     private UdpClient meshControlClient;
     private UdpClient udpClient;
     private TcpClient tcpClient;
+    /// <summary>
+    /// Host adapter for everything the mesh protocol needs from the underlying transport
+    /// (peer add/remove, relay routes, IP forwarding). In daemon mode this is a WireGuardTunnel;
+    /// embedded mode will eventually supply a different implementation.
+    /// </summary>
+    private IMeshHost host;
+    /// <summary>
+    /// Concrete WireGuardTunnel reference. Today this is the same object as <see cref="host"/>,
+    /// but kept typed separately because Tunnel.SetWireGuardTunnel still requires the concrete
+    /// type. Will be removed in Phase 2 when Tunnel stops being WG-aware.
+    /// </summary>
     private WireGuardTunnel wireguardTunnel;
     private WireGuardUdpProxy udpProxy;
     private Stream stream;
@@ -161,6 +172,7 @@ public class MeshEngine
     public void Run(WireGuardTunnel wireguardTunnel, string meshIP, UdpClient udpClient, WireGuardUdpProxy udpProxy, Guid peerID)
     {
         this.wireguardTunnel = wireguardTunnel;
+        this.host = wireguardTunnel;   // same instance, IMeshHost-typed for protocol calls
         this.meshIP = meshIP;
         this.udpClient = udpClient;
         this.udpProxy = udpProxy;
@@ -417,7 +429,7 @@ public class MeshEngine
                     if (resolved)
                     {
                         Program.Log($"[Mesh] WARNING: Mesh IP collision detected ({originalMeshIP} already taken). Reassigning to {meshIP}.");
-                        wireguardTunnel.SetClientIPAndRestart(meshIP, 16);
+                        host.SetClientIPAndRestart(meshIP, 16);
                     }
                     else
                     {
@@ -821,7 +833,7 @@ public class MeshEngine
                     var lastIsolationCheck = DateTime.UtcNow;
                     var isolationCheckInterval = TimeSpan.FromSeconds(30);
                     // isolationDetectedAt, reconnectedTcpClient, reconnectedStream, lastReconnectDiscovery
-                    // are now fields on MeshEngine — reset to fresh state for this loop entry.
+                    // are now fields on MeshNode — reset to fresh state for this loop entry.
                     isolationDetectedAt = null;
                     reconnectedTcpClient = null;
                     reconnectedStream = null;
@@ -1039,7 +1051,7 @@ public class MeshEngine
 
                                                     peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType);
 
-                                                    if (wireguardTunnel.GetPeer(IPAddress.Parse(exMeshIP)) == null)
+                                                    if (host.GetPeer(IPAddress.Parse(exMeshIP)) == null)
                                                     {
                                                         Program.Log($"[Mesh] Reconnect introducer: no WG tunnel to {exMeshIP} — skipping");
                                                         continue;
@@ -1055,8 +1067,8 @@ public class MeshEngine
                                                         if (relayedPairs.Remove(rpKey))
                                                         {
                                                             Program.Log($"[Mesh] Reconnect: removed stale relay pair {rpKey}");
-                                                            wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(exMeshIP));
-                                                            wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parsedMsg.PrivateAddressString));
+                                                            host.RemoveRelayRouteForPeer(IPAddress.Parse(exMeshIP));
+                                                            host.RemoveRelayRouteForPeer(IPAddress.Parse(parsedMsg.PrivateAddressString));
                                                         }
                                                     }
 
@@ -1082,8 +1094,8 @@ public class MeshEngine
                                                             {
                                                                 try
                                                                 {
-                                                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(exMeshIP));
-                                                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parsedMsg.PrivateAddressString));
+                                                                    host.RemoveRelayRouteForPeer(IPAddress.Parse(exMeshIP));
+                                                                    host.RemoveRelayRouteForPeer(IPAddress.Parse(parsedMsg.PrivateAddressString));
                                                                 }
                                                                 catch { }
                                                                 RemoveHostedRelay(pairKeyR);
@@ -1105,7 +1117,7 @@ public class MeshEngine
 
                                                         if (chosenRelay == meshIP)
                                                         {
-                                                            wireguardTunnel.EnableForwarding();
+                                                            host.EnableForwarding();
                                                             AddHostedRelay(pairKeyR);
                                                         }
                                                         else
@@ -1261,7 +1273,7 @@ public class MeshEngine
                                     reconnectedStreamLocal.Write(kaBytes, 0, kaBytes.Length);
 
                                     // Re-send discovery if still isolated
-                                    var wgPeers = wireguardTunnel.GetAllPeers();
+                                    var wgPeers = host.GetAllPeers();
                                     bool stillIsolated = !wgPeers.Any(p =>
                                         (DateTime.UtcNow - p.LastActivity).TotalSeconds < RelayGatewayTimeoutSeconds);
                                     if (stillIsolated && pendingTunnelCount == 0 && pendingConnectionRequests.Count == 0)
@@ -1331,7 +1343,7 @@ public class MeshEngine
                         {
                             lastIsolationCheck = DateTime.UtcNow;
 
-                            var allWgPeers = wireguardTunnel.GetAllPeers();
+                            var allWgPeers = host.GetAllPeers();
                             bool hasActivePeers = allWgPeers.Any(p =>
                                 (DateTime.UtcNow - p.LastActivity).TotalSeconds < RelayGatewayTimeoutSeconds);
 
@@ -1458,7 +1470,7 @@ public class MeshEngine
                         if ((DateTime.UtcNow - lastRelayHealthCheck).TotalMilliseconds >= RelayHealthCheckIntervalMs)
                         {
                             lastRelayHealthCheck = DateTime.UtcNow;
-                            var relayRoutes = wireguardTunnel.GetRelayRoutes();
+                            var relayRoutes = host.GetRelayRoutes();
 
                             if (relayRoutes.Count > 0)
                             {
@@ -1466,7 +1478,7 @@ public class MeshEngine
                                 var deadGateways = new HashSet<IPAddress>();
                                 foreach (var gatewayIP in relayRoutes.Values.Distinct().ToList())
                                 {
-                                    var gatewayPeer = wireguardTunnel.GetPeer(gatewayIP);
+                                    var gatewayPeer = host.GetPeer(gatewayIP);
                                     if (gatewayPeer == null ||
                                         (DateTime.UtcNow - gatewayPeer.LastActivity).TotalSeconds > RelayGatewayTimeoutSeconds)
                                     {
@@ -1480,7 +1492,7 @@ public class MeshEngine
 
                                     foreach (var deadGateway in deadGateways)
                                     {
-                                        var removedRoutes = wireguardTunnel.RemoveRelayRoutesViaGateway(deadGateway);
+                                        var removedRoutes = host.RemoveRelayRoutesViaGateway(deadGateway);
                                         Program.Log($"[Mesh] Removed {removedRoutes.Count} relay route(s) via {deadGateway}");
                                     }
                                     // New relay assignments will come from the introducer via MeshConnectionBegin
@@ -1512,7 +1524,7 @@ public class MeshEngine
                             PeerID = peerID.ToString()
                         };
                         byte[] leaveBytes = Encoding.UTF8.GetBytes(leaveMsg.Serialize());
-                        foreach (var peer in wireguardTunnel.GetAllPeers())
+                        foreach (var peer in host.GetAllPeers())
                         {
                             try
                             {
@@ -1525,7 +1537,7 @@ public class MeshEngine
                     catch { }
 
                     // Remove all WireGuard peers (keeps adapter alive)
-                    wireguardTunnel.RemoveAllPeers();
+                    host.RemoveAllPeers();
 
                     // Clear all tracking state (use Clear() to preserve closure references)
                     activePeerTunnels.Clear();
@@ -1871,15 +1883,15 @@ public class MeshEngine
         // completedTunnelMeshIPs still had the entry — let it through to re-establish.
         if (cbMsg.IsRelay && wasRelayed && !string.IsNullOrEmpty(remoteMeshIP))
         {
-            var relayRoutes = wireguardTunnel.GetRelayRoutes();
+            var relayRoutes = host.GetRelayRoutes();
             bool routeExists = relayRoutes.TryGetValue(IPAddress.Parse(remoteMeshIP), out var currentGateway);
             string newGateway = !string.IsNullOrEmpty(cbMsg.RelayMeshIP) ? cbMsg.RelayMeshIP : cbMsg.IntroducerMeshIP;
             if (routeExists && !string.IsNullOrEmpty(newGateway) && currentGateway != null &&
                 currentGateway.ToString() != newGateway)
             {
                 Program.Log($"[Mesh] Relay reselect for {remoteMeshIP}: gateway {currentGateway} → {newGateway}");
-                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(remoteMeshIP));
-                if (wireguardTunnel.AddRelayRoute(IPAddress.Parse(newGateway), IPAddress.Parse(remoteMeshIP)))
+                host.RemoveRelayRouteForPeer(IPAddress.Parse(remoteMeshIP));
+                if (host.AddRelayRoute(IPAddress.Parse(newGateway), IPAddress.Parse(remoteMeshIP)))
                 {
                     relayedRemotes[remoteMeshIP] = newGateway;
                     lastRelayHealthReport.TryRemove(remoteMeshIP, out _);
@@ -1921,7 +1933,7 @@ public class MeshEngine
             if (!string.IsNullOrEmpty(gatewayIP))
             {
                 var gatewayIPAddr = IPAddress.Parse(gatewayIP);
-                if (wireguardTunnel.AddRelayRoute(gatewayIPAddr, remoteMeshIPAddr))
+                if (host.AddRelayRoute(gatewayIPAddr, remoteMeshIPAddr))
                 {
                     Program.Log($"[Mesh] Relay route added: {remoteMeshIP} via {gatewayIP} — peer {remotePeerID} is reachable");
                     metricRelayRoutesEstablished++;
@@ -2051,7 +2063,7 @@ public class MeshEngine
                 PeerID = peerID.ToString()
             };
             byte[] leaveBytes = Encoding.UTF8.GetBytes(leaveMsg.Serialize());
-            var allPeers = wireguardTunnel.GetAllPeers();
+            var allPeers = host.GetAllPeers();
             foreach (var peer in allPeers)
             {
                 try
@@ -2170,8 +2182,8 @@ public class MeshEngine
                 if (parts.Length != 2) continue;
                 try
                 {
-                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
-                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
+                    host.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
+                    host.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
                 }
                 catch { }
                 // If we're the introducer, drive reassignment for the pairs we just stopped
@@ -2233,8 +2245,8 @@ public class MeshEngine
             {
                 try
                 {
-                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerA));
-                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerB));
+                    host.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerA));
+                    host.RemoveRelayRouteForPeer(IPAddress.Parse(raMsg.PeerB));
                 }
                 catch { }
                 RemoveHostedRelay(pairKey);
@@ -2249,9 +2261,9 @@ public class MeshEngine
                 // The relay just needs IP forwarding + existing direct WG peers to both endpoints.
                 // Don't touch AllowedIPs — adding the other endpoint's IP would steal cryptokey
                 // routing from the direct peer entry and break this peer's direct connection.
-                wireguardTunnel.EnableForwarding();
-                var aPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerA));
-                var bPeer = wireguardTunnel.GetPeer(IPAddress.Parse(raMsg.PeerB));
+                host.EnableForwarding();
+                var aPeer = host.GetPeer(IPAddress.Parse(raMsg.PeerA));
+                var bPeer = host.GetPeer(IPAddress.Parse(raMsg.PeerB));
                 ok = aPeer != null && bPeer != null;
                 if (ok)
                 {
@@ -2360,8 +2372,8 @@ public class MeshEngine
                 {
                     try
                     {
-                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pa));
-                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(pb));
+                        host.RemoveRelayRouteForPeer(IPAddress.Parse(pa));
+                        host.RemoveRelayRouteForPeer(IPAddress.Parse(pb));
                     }
                     catch { }
                     RemoveHostedRelay(pairKey);
@@ -2382,7 +2394,7 @@ public class MeshEngine
 
             if (newRelay == meshIP)
             {
-                wireguardTunnel.EnableForwarding();
+                host.EnableForwarding();
                 AddHostedRelay(pairKey);
             }
             else
@@ -2438,7 +2450,7 @@ public class MeshEngine
         if (isIntroducer && heartbeatAckDeadline == null &&
             DateTime.UtcNow - lastHeartbeat > heartbeatInterval)
         {
-            var allPeers = wireguardTunnel.GetAllPeers();
+            var allPeers = host.GetAllPeers();
             heartbeatTargets.Clear();
             heartbeatAcks.Clear();
 
@@ -2803,8 +2815,8 @@ public class MeshEngine
                     if (parts.Length != 2) continue;
                     try
                     {
-                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
-                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
+                        host.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
+                        host.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
                     }
                     catch { }
                 }
@@ -2893,7 +2905,7 @@ public class MeshEngine
 
                 // OtherPeers includes all mesh members; we can only send MeshConnectionBegin
                 // over WireGuard to peers we already have tunnels with.
-                if (wireguardTunnel.GetPeer(IPAddress.Parse(existingPeerMeshIP)) == null)
+                if (host.GetPeer(IPAddress.Parse(existingPeerMeshIP)) == null)
                 {
                     Program.Log($"[Mesh] Skipping peer {existingPeerID} ({existingPeerMeshIP}) — no WireGuard tunnel to this peer");
                     continue;
@@ -2909,8 +2921,8 @@ public class MeshEngine
                     if (relayedPairs.Remove(pairKey))
                     {
                         Program.Log($"[Mesh] Removed stale relay pair {pairKey} (NAT types changed)");
-                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
-                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
+                        host.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
+                        host.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
                     }
                 }
 
@@ -2944,8 +2956,8 @@ public class MeshEngine
                         {
                             try
                             {
-                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
-                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
+                                host.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
+                                host.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
                             }
                             catch { }
                             RemoveHostedRelay(pairKey);
@@ -2967,7 +2979,7 @@ public class MeshEngine
 
                     if (chosenRelay == meshIP)
                     {
-                        wireguardTunnel.EnableForwarding();
+                        host.EnableForwarding();
                         AddHostedRelay(pairKey);
                     }
                     else
@@ -3652,7 +3664,7 @@ public class MeshEngine
         if (DateTime.UtcNow - lastPingTime <= pingInterval) return;
 
         byte[] pingPacket = new byte[] { 0xFF, (byte)'P' };
-        var allPeers = wireguardTunnel.GetAllPeers();
+        var allPeers = host.GetAllPeers();
         var pingedIPs = new HashSet<string>();
         foreach (var peer in allPeers)
         {
@@ -3707,7 +3719,7 @@ public class MeshEngine
                 continue;
 
             DateTime wgLast = DateTime.MinValue;
-            try { wgLast = wireguardTunnel?.GetPeer(IPAddress.Parse(relay))?.LastActivity ?? DateTime.MinValue; } catch { }
+            try { wgLast = host?.GetPeer(IPAddress.Parse(relay))?.LastActivity ?? DateTime.MinValue; } catch { }
             if (wgLast > silenceCutoff) continue;
 
             bool relayReachable = peerLastPong.TryGetValue(relay, out var relayPong) && relayPong > pongRecentCutoff;
@@ -3764,15 +3776,15 @@ public class MeshEngine
 
         // Remove from WireGuard
         var deadIPAddr = IPAddress.Parse(deadMeshIP);
-        var wgPeer = wireguardTunnel.GetPeer(deadIPAddr);
+        var wgPeer = host.GetPeer(deadIPAddr);
         if (wgPeer != null)
         {
-            wireguardTunnel.RemovePeer(wgPeer.ConnectionId);
+            host.RemovePeer(wgPeer.ConnectionId);
             Program.Log($"[Mesh] Removed WireGuard peer {deadMeshIP}");
         }
 
         // Remove relay routes through this peer (as gateway)
-        var removedRelays = wireguardTunnel.RemoveRelayRoutesViaGateway(deadIPAddr);
+        var removedRelays = host.RemoveRelayRoutesViaGateway(deadIPAddr);
         if (removedRelays.Count > 0)
         {
             metricRelayRoutesRemoved += removedRelays.Count;
@@ -3780,7 +3792,7 @@ public class MeshEngine
         }
 
         // Remove relay route targeting this peer (was relayed through a gateway)
-        if (wireguardTunnel.RemoveRelayRouteForPeer(deadIPAddr))
+        if (host.RemoveRelayRouteForPeer(deadIPAddr))
         {
             metricRelayRoutesRemoved++;
         }
@@ -3915,7 +3927,7 @@ public class MeshEngine
             var gatewayIPs = new HashSet<string>(); // peers that serve as relay gateways
             try
             {
-                var allWgPeers = wireguardTunnel?.GetAllPeers();
+                var allWgPeers = host?.GetAllPeers();
                 if (allWgPeers != null)
                 {
                     foreach (var wgPeer in allWgPeers)
@@ -3968,7 +3980,7 @@ public class MeshEngine
                 DateTime lastActivity = DateTime.MinValue;
                 try
                 {
-                    var wgPeer = wireguardTunnel?.GetPeer(IPAddress.Parse(peerMeshIP));
+                    var wgPeer = host?.GetPeer(IPAddress.Parse(peerMeshIP));
                     if (wgPeer != null)
                         lastActivity = wgPeer.LastActivity;
                 }
@@ -4143,8 +4155,8 @@ public class MeshEngine
                             {
                                 try
                                 {
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(ipA));
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(ipB));
+                                    host.RemoveRelayRouteForPeer(IPAddress.Parse(ipA));
+                                    host.RemoveRelayRouteForPeer(IPAddress.Parse(ipB));
                                 }
                                 catch { }
                                 RemoveHostedRelay(pairKey);
@@ -4156,7 +4168,7 @@ public class MeshEngine
 
                         if (assignedRelay == meshIP)
                         {
-                            wireguardTunnel.EnableForwarding();
+                            host.EnableForwarding();
                             AddHostedRelay(pairKey);
                         }
                         else
@@ -4318,8 +4330,8 @@ public class MeshEngine
                             {
                                 try
                                 {
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(ipA));
-                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(ipB));
+                                    host.RemoveRelayRouteForPeer(IPAddress.Parse(ipA));
+                                    host.RemoveRelayRouteForPeer(IPAddress.Parse(ipB));
                                 }
                                 catch { }
                                 RemoveHostedRelay(pairKey);
@@ -4330,7 +4342,7 @@ public class MeshEngine
 
                         if (chosenRelay == meshIP)
                         {
-                            wireguardTunnel.EnableForwarding();
+                            host.EnableForwarding();
                             AddHostedRelay(pairKey);
                         }
                         else
@@ -4402,8 +4414,8 @@ public class MeshEngine
                     else
                     {
                         // Non-symmetric pair — re-introduce with direct hole-punch
-                        bool hasWgA = wireguardTunnel.GetPeer(IPAddress.Parse(ipA)) != null;
-                        bool hasWgB = wireguardTunnel.GetPeer(IPAddress.Parse(ipB)) != null;
+                        bool hasWgA = host.GetPeer(IPAddress.Parse(ipA)) != null;
+                        bool hasWgB = host.GetPeer(IPAddress.Parse(ipB)) != null;
                         if (!hasWgA || !hasWgB)
                         {
                             Program.Log($"[Mesh] Skipping repair for {ipA} <-> {ipB} — no WireGuard tunnel to {(!hasWgA ? ipA : ipB)}");

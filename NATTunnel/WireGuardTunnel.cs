@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 
 namespace NATTunnel
 {
-    public class WireGuardTunnel : IDisposable
+    public class WireGuardTunnel : IDisposable, IMeshHost
     {
         private readonly string configFilePath;
         private readonly string interfaceName;
