@@ -35,6 +35,14 @@ public class Tunnel : IDisposable
     private int currentConnectionID = 0;
     public IPAddress privateIP = null;
     private WireGuardTunnel wireguardTunnel;
+
+    /// <summary>
+    /// Raised when a non-WireGuard, non-mediation binary packet arrives from the peer.
+    /// Only fires when wireguardTunnel is null (i.e., embedded/library mode, no kernel WG).
+    /// The handler receives the raw packet bytes; the sender endpoint is implicit (this tunnel's peer).
+    /// </summary>
+    public event Action<byte[]> DataPacketReceived;
+
     private int maxConnectionTimeout = 15;
     private int symmetricConnectionTimeout = 60; // Symmetric NAT needs more time for random port spray
     private int connectionTimeout;
@@ -262,7 +270,11 @@ public class Tunnel : IDisposable
         probeConnected = 0;
         connectionTimeout = maxConnectionTimeout;
         retryAttempt = 0;
-        initialConnectionTimer.Enabled = true;
+        // Defer enabling the countdown timer until after the NAT-strategy branches below
+        // have had a chance to bump connectionTimeout to symmetricConnectionTimeout.
+        // Otherwise the timer can tick between here and the branch, racing connectionTimeout
+        // to 0 if either was somehow ≤ 1 — and in any case, enabling early just shortens
+        // the effective timeout by however long branch setup takes.
 
         // Store peer's mesh IP
         if (!string.IsNullOrEmpty(peerMeshIPString))
@@ -315,12 +327,14 @@ public class Tunnel : IDisposable
                         probe.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                     }
                 }
-                else if (!connected)
+                else
                 {
-                    // Connection confirmed but not yet fully established — keep sending from
-                    // the winning probe (udpClient) so the non-symmetric peer continues to
-                    // receive packets and can respond. Without this, both sides stop sending
-                    // and the connection stalls.
+                    // Threshold reached locally — but the non-symmetric peer may not yet have
+                    // received any of our packets (only one of 256 probes "won"). Keep sending
+                    // hole-punches from the winning probe (udpClient) until peer 2 confirms by
+                    // bouncing a packet back; otherwise both sides stall and peer 2 times out.
+                    // No `!connected` gate: even after `connected=true` locally, we still need
+                    // to drive peer 2's state machine until it also flips.
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
@@ -445,6 +459,9 @@ public class Tunnel : IDisposable
                 }
             };
         }
+
+        // Now that connectionTimeout reflects the chosen strategy's full budget, start counting.
+        initialConnectionTimer.Enabled = true;
     }
 
     /// <summary>
@@ -480,20 +497,26 @@ public class Tunnel : IDisposable
 
     private void ProcessUdpPacketBody(byte[] receiveBuffer, IPEndPoint listenEndpoint)
     {
-        // Check if this is a WireGuard packet (binary, not JSON)
-        // WireGuard packets start with message type (1-4) and don't contain '{' or '['
-        bool looksLikeWireGuard = receiveBuffer.Length > 0 &&
-                                 receiveBuffer[0] != (byte)'{' &&
-                                 receiveBuffer[0] != (byte)'[' &&
-                                 receiveBuffer[0] >= 1 && receiveBuffer[0] <= 4;
-
-        if (looksLikeWireGuard && wireguardTunnel != null)
+        // Daemon (WG) mode — bytes 1-4 are WireGuard message types; route to WG proxy.
+        if (wireguardTunnel != null && receiveBuffer.Length > 0 &&
+            receiveBuffer[0] != (byte)'{' && receiveBuffer[0] != (byte)'[' &&
+            receiveBuffer[0] >= 1 && receiveBuffer[0] <= 4)
         {
-            // Forward to WireGuard via proxy
             var proxy = wireguardTunnel.GetUdpProxy();
-            if (proxy != null)
+            if (proxy != null) proxy.ForwardToWireGuard(receiveBuffer, listenEndpoint);
+            return;
+        }
+
+        // Embedded mode — route designated marker bytes to DataPacketReceived. 0x01 is the
+        // encrypted data envelope (design doc); 0x10 is the Noise handshake envelope. Both
+        // must come from our target peer; pre-connection packets are dropped silently to
+        // avoid acting on a racing peer's early traffic.
+        if (wireguardTunnel == null && receiveBuffer.Length > 0 &&
+            (receiveBuffer[0] == 0x01 || receiveBuffer[0] == 0x10))
+        {
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
             {
-                proxy.ForwardToWireGuard(receiveBuffer, listenEndpoint);
+                DataPacketReceived?.Invoke(receiveBuffer);
             }
             return;
         }
@@ -539,8 +562,24 @@ public class Tunnel : IDisposable
             {
                 connected = true;
                 initialConnectionTimer.Enabled = false;
-                connectionAttempt.Enabled = false;
+                // WG mode: disable hole-punch timer now; WG key exchange takes over.
+                // Embedded mode: keep the timer running so the symmetric peer continues
+                // sending hole-punches from the winning probe to the non-symmetric peer
+                // until the non-symmetric peer also flips to connected. Otherwise only
+                // a single hole-punch was sent (from one of 256 probes) and peer 2 likely
+                // missed it. The timer naturally stops on Dispose/Cleanup.
+                if (wireguardTunnel != null)
+                {
+                    connectionAttempt.Enabled = false;
+                }
                 Program.Log("[Mesh] Connection established - hole punching successful!");
+
+                // Embedded mode (no WG): hole-punch success IS the connection-complete signal.
+                // WG mode defers this until after the public-key exchange below.
+                if (wireguardTunnel == null)
+                {
+                    onConnectionComplete?.Invoke();
+                }
 
                 // Send WireGuard public key to peer immediately
                 if (wireguardTunnel != null && !wgKeySent)
@@ -572,6 +611,7 @@ public class Tunnel : IDisposable
             }
         }
 
+        Program.Log($"{receivedMessage.ID}: Received from {listenEndpoint.Address}:{listenEndpoint.Port}, targetPeerIp={targetPeerIp}, targetPeerPort={targetPeerPort}");
         switch (receivedMessage.ID)
         {
             case MediationMessageType.HolePunchAttempt:
@@ -772,6 +812,18 @@ public class Tunnel : IDisposable
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Send a raw data packet to this tunnel's peer over the established UDP connection.
+    /// Used in embedded mode where the host wants to push arbitrary payloads through the
+    /// NAT-traversed channel rather than route them via WireGuard.
+    /// </summary>
+    public void SendDataPacket(byte[] data)
+    {
+        if (!connected || targetPeerIp == null || targetPeerPort == 0)
+            throw new InvalidOperationException("Tunnel is not connected yet.");
+        udpClient.Send(data, data.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
     }
 
     /// <summary>

@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <PackageReference Include="tomlyn" Version="0.16.2" />
+    <PackageReference Include="Noise.NET" Version="1.0.0" />
   </ItemGroup>
 
   <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish. -->
