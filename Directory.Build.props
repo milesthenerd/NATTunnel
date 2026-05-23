@@ -4,9 +4,9 @@
   <PropertyGroup>
     <!-- Version is the single source of truth; bump here and rebuild for a release.
          Both .deb/.rpm build.sh scripts read this value too. -->
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
-    <FileVersion>1.1.0.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
 
     <TargetFramework>net10.0</TargetFramework>
     <RollForward>LatestMajor</RollForward>
