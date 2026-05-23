@@ -778,103 +778,7 @@ public class MeshEngine
 
                     DrainInboundQueues();
 
-                    // ── Non-introducer failover probe (primary loop) ─────────────────────
-                    // If we're not the introducer and we have a known introducer mesh IP,
-                    // periodically probe it. If dead, take over as introducer. We deliberately
-                    // don't gate on completedTunnelMeshIPs — RemoveDeadPeer strips the introducer
-                    // from that set when MeshPeerLeave arrives, but introducerMeshIP stays set,
-                    // and gating on the tunnel-completed set would freeze takeover after a
-                    // graceful introducer disconnect.
-                    if (!isIntroducer && !string.IsNullOrEmpty(introducerMeshIP) &&
-                        detectedNatType != NATType.Symmetric &&
-                        DateTime.UtcNow - lastIntroducerProbe > introducerProbeInterval)
-                    {
-                        if (!introducerProbeAckReceived)
-                        {
-                            introducerMissedProbes++;
-                            Program.Log($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
-                        }
-                        else
-                        {
-                            if (introducerMissedProbes > 0)
-                                Program.Log($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
-                            introducerMissedProbes = 0;
-                        }
-
-                        if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
-                        {
-                            // Random election delay: with multiple eligible peers, makes simultaneous
-                            // takeover attempts statistically rare. During the wait, a heartbeat from
-                            // a new introducer (handled in the listener) updates introducerMeshIP and
-                            // we abort.
-                            string electionTarget = introducerMeshIP;
-                            int delayMs = new Random().Next(0, 5000);
-                            Program.Log($"[Mesh] Introducer confirmed dead (primary loop) — election delay {delayMs}ms");
-                            for (int slept = 0; slept < delayMs; slept += 100)
-                            {
-                                System.Threading.Thread.Sleep(100);
-                                if (Program.ShutdownRequested || Program.DisconnectRequested) break;
-                                if (introducerMeshIP != electionTarget)
-                                {
-                                    Program.Log("[Mesh] Primary-loop election aborted — another peer became introducer during delay");
-                                    introducerMissedProbes = 0;
-                                    introducerProbeAckReceived = true;
-                                    break;
-                                }
-                            }
-                            if (introducerMeshIP == electionTarget && !Program.ShutdownRequested && !Program.DisconnectRequested)
-                            {
-                                Program.Log("[Mesh] Election delay elapsed — sending MeshJoinRequest, awaiting server's choice");
-                                introducerMissedProbes = 0;
-
-                                // Send MeshJoinRequest. We do NOT claim isIntroducer=true here —
-                                // the MeshJoinResponse handler does that only if the server picks us.
-                                // This is what prevents split-brain when multiple eligible peers race.
-                                try
-                                {
-                                    var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
-                                    {
-                                        NetworkID = TunnelOptions.NetworkID,
-                                        PeerID = peerID.ToString(),
-                                        NATType = detectedNatType,
-                                        PrivateAddressString = meshIP,
-                                        AuthToken = authToken
-                                    };
-                                    byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
-                                    stream.Write(joinBytes, 0, joinBytes.Length);
-                                    stream.Flush();
-                                }
-                                catch (Exception ex)
-                                {
-                                    Program.Log($"[Mesh] Failed to send takeover MeshJoinRequest: {ex.Message}");
-                                }
-                            }
-                        }
-                        else
-                        {
-                            // Send a new probe
-                            introducerProbeAckReceived = false;
-                            try
-                            {
-                                var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
-                                {
-                                    RelayCapable = TunnelOptions.AllowRelayThrough,
-                                    RelayCapacity = TunnelOptions.OwnRelayCapacity
-                                };
-                                byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
-                                MeshSend(probeBytes, probeBytes.Length,
-                                    new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                            }
-                            catch (Exception)
-                            {
-                                // Probe send failure typically means the route to the dead introducer
-                                // has been pulled. The missed-probe counter will reach threshold and
-                                // we'll trigger takeover — no need to Program.Log per-attempt noise.
-                            }
-                        }
-
-                        lastIntroducerProbe = DateTime.UtcNow;
-                    }
+                    ProbeIntroducerHealth_PrimaryLoop();
 
                     RunIntroducerHeartbeat(tcpClient, stream);
 
@@ -2284,265 +2188,9 @@ public class MeshEngine
                             }
                         }
 
-                        // ── Introducer failover (active probe) ──────────────────────────────
-                        // Periodically send MeshHeartbeat to the introducer over port 51888.
-                        // If the introducer's NATTunnel process is alive, it responds with
-                        // MeshHeartbeatAck. WireGuard PersistentKeepalive (5s) keeps the tunnel
-                        // alive at the driver level even after the process exits, so we CANNOT
-                        // rely on WireGuard LastActivity — only application-level responses.
-                        if (!isIntroducer && reconnectedTcpClient == null &&
-                            detectedNatType != NATType.Symmetric &&
-                            DateTime.UtcNow - lastIntroducerProbe > introducerProbeInterval)
-                        {
-                            if (string.IsNullOrEmpty(introducerMeshIP))
-                            {
-                                // No introducer pointer (server returned (none) on last takeover bid, or no
-                                // heartbeat has arrived yet). Pre-arm missed-probes so the takeover block
-                                // below fires another bid this iteration.
-                                introducerMissedProbes = IntroducerMissedProbeThreshold;
-                                introducerProbeAckReceived = false;
-                            }
-                            // Check if the previous probe was acked
-                            else if (!introducerProbeAckReceived)
-                            {
-                                introducerMissedProbes++;
-                                Program.Log($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
-                            }
-                            else
-                            {
-                                if (introducerMissedProbes > 0)
-                                {
-                                    Program.Log($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
-                                }
-                                introducerMissedProbes = 0;
-                            }
+                        ProbeIntroducerHealth_MeshControlOnly();
 
-                            if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
-                            {
-                                // Random election delay: makes simultaneous takeover races unlikely.
-                                // During the wait, if a new heartbeat with IsIntroducer=true arrives from
-                                // a different peer, the listener updates introducerMeshIP and we abort.
-                                string electionTarget = introducerMeshIP;
-                                int delayMs = new Random().Next(0, 5000);
-                                Program.Log($"[Mesh] Introducer confirmed dead — election delay {delayMs}ms before takeover attempt");
-                                for (int slept = 0; slept < delayMs; slept += 100)
-                                {
-                                    System.Threading.Thread.Sleep(100);
-                                    if (Program.ShutdownRequested || Program.DisconnectRequested) break;
-                                    if (introducerMeshIP != electionTarget)
-                                    {
-                                        Program.Log("[Mesh] Election aborted — another peer became introducer during delay");
-                                        introducerMissedProbes = 0;
-                                        introducerProbeAckReceived = true;
-                                        break;
-                                    }
-                                }
-                                bool takeoverAborted = introducerMeshIP != electionTarget || Program.ShutdownRequested || Program.DisconnectRequested;
-                                if (takeoverAborted)
-                                {
-                                    // Someone else took over, or we're shutting down.
-                                    lastIntroducerProbe = DateTime.UtcNow;
-                                }
-
-                                if (!takeoverAborted) try
-                                    {
-                                        Program.Log("[Mesh] Election delay elapsed — reconnecting to mediation to claim introducer role");
-                                        var mediationEP = TunnelOptions.MediationEndpoint;
-                                        reconnectedTcpClient = new TcpClient();
-                                        reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
-                                        reconnectedTcpClient.Connect(mediationEP);
-                                        if (TunnelOptions.TlsEnabled)
-                                        {
-                                            var sslStream = new SslStream(reconnectedTcpClient.GetStream(), false,
-                                                TunnelOptions.TlsAllowSelfSigned
-                                                    ? (RemoteCertificateValidationCallback)((sender, cert, chain, errors) => true)
-                                                    : null);
-                                            sslStream.AuthenticateAsClient(mediationEP.Address.ToString());
-                                            reconnectedStream = sslStream;
-                                            Program.Log($"[Mesh] Takeover TLS handshake complete (protocol: {sslStream.SslProtocol})");
-                                        }
-                                        else
-                                        {
-                                            reconnectedStream = reconnectedTcpClient.GetStream();
-                                        }
-
-                                        // Clear stale peer state
-                                        pendingConnectionRequests.Clear();
-
-                                        // Perform full mediation handshake
-                                        reconnectedStream.ReadTimeout = 15000;
-                                        string reconRemainder2 = "";
-                                        byte[] reconBuf2 = new byte[4096];
-
-                                        MediationMessage ReadReconMessage2()
-                                        {
-                                            while (true)
-                                            {
-                                                var (m, r) = ExtractFirstJson(reconRemainder2);
-                                                if (m != null) { reconRemainder2 = r; return m; }
-                                                int n = reconnectedStream.Read(reconBuf2, 0, reconBuf2.Length);
-                                                if (n == 0) throw new IOException("Reconnected mediation stream closed");
-                                                reconRemainder2 += Encoding.ASCII.GetString(reconBuf2, 0, n);
-                                            }
-                                        }
-
-                                        // 1. Wait for Connected message
-                                        ReadReconMessage2();
-
-                                        // 2. NAT type detection (proper handshake)
-                                        var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
-                                        {
-                                            LocalPort = localUdpPort,
-                                            LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
-                                            ClientID = peerID
-                                        };
-                                        byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
-                                        reconnectedStream.Write(natReqBytes, 0, natReqBytes.Length);
-
-                                        var natTestBeginR2 = ReadReconMessage2();
-                                        if (natTestBeginR2.ID == MediationMessageType.NATTestBegin)
-                                        {
-                                            var natTestMsg2 = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
-                                            byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
-                                            udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortOne));
-                                            udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortTwo));
-                                        }
-
-                                        var natTypeRespR2 = ReadReconMessage2();
-                                        if (natTypeRespR2.ID == MediationMessageType.NATTypeResponse)
-                                        {
-                                            detectedNatType = natTypeRespR2.NATType;
-                                            Program.Log($"[Mesh] Reconnect NAT type: {detectedNatType}");
-                                        }
-
-                                        // 3. Send MeshJoinRequest. The server decides who's the introducer;
-                                        // we don't claim the role locally until the response confirms.
-                                        var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
-                                        {
-                                            NetworkID = TunnelOptions.NetworkID,
-                                            PeerID = peerID.ToString(),
-                                            NATType = detectedNatType,
-                                            PrivateAddressString = meshIP,
-                                            AuthToken = authToken
-                                        };
-                                        byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
-                                        reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
-                                        reconnectedStream.Flush();
-
-                                        // 4. Wait for MeshJoinResponse and honor server's introducer choice.
-                                        var joinResp = ReadReconMessage2();
-                                        if (joinResp.ID == MediationMessageType.MeshJoinResponse &&
-                                            joinResp.IntroducerPeerID == peerID.ToString())
-                                        {
-                                            isIntroducer = true;
-                                            introducerMeshIP = meshIP;
-                                            Program.Log("[Mesh] Server confirmed us as new introducer");
-                                        }
-                                        else
-                                        {
-                                            Program.Log($"[Mesh] Server picked different introducer: {joinResp.IntroducerPeerID ?? "(none)"}");
-                                            string oldIntroducerMeshIP = introducerMeshIP;
-                                            string newIntroducerMeshIP = null;
-                                            if (joinResp.Peers != null && !string.IsNullOrEmpty(joinResp.IntroducerPeerID))
-                                            {
-                                                foreach (var peerObj in joinResp.Peers)
-                                                {
-                                                    var pe = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
-                                                    string pid = pe.TryGetProperty("peerID", out var pidEl) ? pidEl.GetString() : null;
-                                                    string mip = pe.TryGetProperty("meshIP", out var mipEl) ? mipEl.GetString() : null;
-                                                    if (pid == joinResp.IntroducerPeerID && !string.IsNullOrEmpty(mip))
-                                                    {
-                                                        newIntroducerMeshIP = mip;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            if (!string.IsNullOrEmpty(newIntroducerMeshIP))
-                                            {
-                                                introducerMeshIP = newIntroducerMeshIP;
-                                                if (newIntroducerMeshIP != oldIntroducerMeshIP)
-                                                    Program.Log($"[Mesh] Introducer mesh IP updated: {oldIntroducerMeshIP ?? "(none)"} → {newIntroducerMeshIP}");
-                                            }
-                                            else
-                                            {
-                                                // Server chose someone we can't locate (or null). Clear our cached
-                                                // introducer pointer so we don't keep probing a dead IP. Next
-                                                // heartbeat with IsIntroducer=true will set it correctly.
-                                                if (!string.IsNullOrEmpty(oldIntroducerMeshIP))
-                                                    Program.Log($"[Mesh] Could not locate new introducer's mesh IP — clearing cached introducer pointer (was {oldIntroducerMeshIP})");
-                                                introducerMeshIP = null;
-                                            }
-                                        }
-
-                                        lastReconnectDiscovery = DateTime.UtcNow;
-                                        if (string.IsNullOrEmpty(introducerMeshIP))
-                                        {
-                                            // Server returned (none) or we couldn't resolve the chosen introducer.
-                                            // Keep the missed-probes counter at threshold so the next loop iteration
-                                            // retries the takeover bid. ProbeInterval acts as natural backoff.
-                                            introducerMissedProbes = IntroducerMissedProbeThreshold;
-                                            introducerProbeAckReceived = false;
-                                            Program.Log("[Mesh] No introducer resolved — will retry takeover on next probe cycle");
-                                        }
-                                        else
-                                        {
-                                            introducerMissedProbes = 0;
-                                            introducerProbeAckReceived = true;
-                                        }
-                                    }
-                                    catch (Exception ex)
-                                    {
-                                        Program.Log($"[Mesh] Failed to reconnect for introducer takeover: {ex.Message}");
-                                        try { reconnectedStream?.Dispose(); } catch { }
-                                        try { reconnectedTcpClient?.Dispose(); } catch { }
-                                        reconnectedTcpClient = null;
-                                        reconnectedStream = null;
-                                        introducerMissedProbes = 0; // Reset to retry later
-                                    }
-                            }
-                            else if (!string.IsNullOrEmpty(introducerMeshIP))
-                            {
-                                // Send a new probe to the introducer
-                                introducerProbeAckReceived = false;
-                                try
-                                {
-                                    var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
-                                    {
-                                        RelayCapable = TunnelOptions.AllowRelayThrough,
-                                        RelayCapacity = TunnelOptions.OwnRelayCapacity
-                                    };
-                                    byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
-                                    MeshSend(probeBytes, probeBytes.Length,
-                                        new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                                }
-                                catch (Exception)
-                                {
-                                    // Probe send failure typically means the route to the dead introducer
-                                    // has been pulled. The missed-probe counter will reach threshold and
-                                    // we'll trigger takeover — no need to Program.Log per-attempt noise.
-                                }
-                            }
-
-                            lastIntroducerProbe = DateTime.UtcNow;
-                        }
-
-                        // ── Local staleness fallback ─────────────────────────────────────────
-                        // If a peer hasn't sent any heartbeat/ack in 5 minutes, assume it's dead.
-                        // This catches cases where the introducer's MeshPeerRemoved was lost.
-                        if (!isIntroducer)
-                        {
-                            var staleThreshold = TimeSpan.FromMinutes(5);
-                            var now = DateTime.UtcNow;
-                            var stalePeers = lastHeartbeatReceivedFrom
-                                .Where(kvp => kvp.Key != meshIP && (now - kvp.Value) > staleThreshold)
-                                .Select(kvp => kvp.Key)
-                                .ToList();
-                            foreach (var staleIP in stalePeers)
-                            {
-                                Program.Log($"[Mesh] Peer {staleIP} has been silent for >{staleThreshold.TotalMinutes}m — removing locally");
-                                RemoveDeadPeer(staleIP);
-                            }
-                        }
+                        RunLocalStalenessFallback();
 
                         System.Threading.Thread.Sleep(100);
                     }
@@ -3663,6 +3311,365 @@ public class MeshEngine
 
         heartbeatAckDeadline = null;
         lastHeartbeat = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Mesh-control-only loop's introducer-failover probe. Differs from the primary-loop version
+    /// in that there's no live mediation TCP, so to claim the introducer role this peer must
+    /// reconnect to mediation, redo the NAT-detection handshake, and send a fresh MeshJoinRequest.
+    /// The server's response is authoritative — we only set isIntroducer=true if the server
+    /// picks us. If the server picks someone else (or "(none)"), we update our cached pointer
+    /// (or null it) and retry on the next probe cycle.
+    /// </summary>
+    private void ProbeIntroducerHealth_MeshControlOnly()
+    {
+        if (isIntroducer || reconnectedTcpClient != null ||
+            detectedNatType == NATType.Symmetric ||
+            DateTime.UtcNow - lastIntroducerProbe <= introducerProbeInterval) return;
+
+        if (string.IsNullOrEmpty(introducerMeshIP))
+        {
+            // No introducer pointer (server returned (none) on last takeover bid, or no
+            // heartbeat has arrived yet). Pre-arm missed-probes so the takeover block
+            // below fires another bid this iteration.
+            introducerMissedProbes = IntroducerMissedProbeThreshold;
+            introducerProbeAckReceived = false;
+        }
+        else if (!introducerProbeAckReceived)
+        {
+            introducerMissedProbes++;
+            Program.Log($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
+        }
+        else
+        {
+            if (introducerMissedProbes > 0)
+                Program.Log($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
+            introducerMissedProbes = 0;
+        }
+
+        if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
+        {
+            // Random election delay: makes simultaneous takeover races unlikely.
+            // During the wait, if a new heartbeat with IsIntroducer=true arrives from
+            // a different peer, the listener updates introducerMeshIP and we abort.
+            string electionTarget = introducerMeshIP;
+            int delayMs = new Random().Next(0, 5000);
+            Program.Log($"[Mesh] Introducer confirmed dead — election delay {delayMs}ms before takeover attempt");
+            for (int slept = 0; slept < delayMs; slept += 100)
+            {
+                System.Threading.Thread.Sleep(100);
+                if (Program.ShutdownRequested || Program.DisconnectRequested) break;
+                if (introducerMeshIP != electionTarget)
+                {
+                    Program.Log("[Mesh] Election aborted — another peer became introducer during delay");
+                    introducerMissedProbes = 0;
+                    introducerProbeAckReceived = true;
+                    break;
+                }
+            }
+            bool takeoverAborted = introducerMeshIP != electionTarget || Program.ShutdownRequested || Program.DisconnectRequested;
+            if (takeoverAborted)
+            {
+                lastIntroducerProbe = DateTime.UtcNow;
+                return;
+            }
+
+            try
+            {
+                Program.Log("[Mesh] Election delay elapsed — reconnecting to mediation to claim introducer role");
+                var mediationEP = TunnelOptions.MediationEndpoint;
+                reconnectedTcpClient = new TcpClient();
+                reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
+                reconnectedTcpClient.Connect(mediationEP);
+                if (TunnelOptions.TlsEnabled)
+                {
+                    var sslStream = new SslStream(reconnectedTcpClient.GetStream(), false,
+                        TunnelOptions.TlsAllowSelfSigned
+                            ? (RemoteCertificateValidationCallback)((sender, cert, chain, errors) => true)
+                            : null);
+                    sslStream.AuthenticateAsClient(mediationEP.Address.ToString());
+                    reconnectedStream = sslStream;
+                    Program.Log($"[Mesh] Takeover TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                }
+                else
+                {
+                    reconnectedStream = reconnectedTcpClient.GetStream();
+                }
+
+                pendingConnectionRequests.Clear();
+
+                reconnectedStream.ReadTimeout = 15000;
+                string reconRemainder2 = "";
+                byte[] reconBuf2 = new byte[4096];
+
+                MediationMessage ReadReconMessage2()
+                {
+                    while (true)
+                    {
+                        var (m, r) = ExtractFirstJson(reconRemainder2);
+                        if (m != null) { reconRemainder2 = r; return m; }
+                        int n = reconnectedStream.Read(reconBuf2, 0, reconBuf2.Length);
+                        if (n == 0) throw new IOException("Reconnected mediation stream closed");
+                        reconRemainder2 += Encoding.ASCII.GetString(reconBuf2, 0, n);
+                    }
+                }
+
+                // 1. Wait for Connected message
+                ReadReconMessage2();
+
+                // 2. NAT type detection (full handshake)
+                var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
+                {
+                    LocalPort = localUdpPort,
+                    LocalIP = Tunnel.GetLanIPAddress()?.ToString(),
+                    ClientID = peerID
+                };
+                byte[] natReqBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
+                reconnectedStream.Write(natReqBytes, 0, natReqBytes.Length);
+
+                var natTestBeginR2 = ReadReconMessage2();
+                if (natTestBeginR2.ID == MediationMessageType.NATTestBegin)
+                {
+                    var natTestMsg2 = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID };
+                    byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
+                    udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortOne));
+                    udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortTwo));
+                }
+
+                var natTypeRespR2 = ReadReconMessage2();
+                if (natTypeRespR2.ID == MediationMessageType.NATTypeResponse)
+                {
+                    detectedNatType = natTypeRespR2.NATType;
+                    Program.Log($"[Mesh] Reconnect NAT type: {detectedNatType}");
+                }
+
+                // 3. Send MeshJoinRequest. Server decides who's the introducer; we don't claim
+                // the role locally until the response confirms.
+                var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
+                {
+                    NetworkID = TunnelOptions.NetworkID,
+                    PeerID = peerID.ToString(),
+                    NATType = detectedNatType,
+                    PrivateAddressString = meshIP,
+                    AuthToken = authToken
+                };
+                byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
+                reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
+                reconnectedStream.Flush();
+
+                // 4. Wait for MeshJoinResponse and honor server's introducer choice.
+                var joinResp = ReadReconMessage2();
+                if (joinResp.ID == MediationMessageType.MeshJoinResponse &&
+                    joinResp.IntroducerPeerID == peerID.ToString())
+                {
+                    isIntroducer = true;
+                    introducerMeshIP = meshIP;
+                    Program.Log("[Mesh] Server confirmed us as new introducer");
+                }
+                else
+                {
+                    Program.Log($"[Mesh] Server picked different introducer: {joinResp.IntroducerPeerID ?? "(none)"}");
+                    string oldIntroducerMeshIP = introducerMeshIP;
+                    string newIntroducerMeshIP = null;
+                    if (joinResp.Peers != null && !string.IsNullOrEmpty(joinResp.IntroducerPeerID))
+                    {
+                        foreach (var peerObj in joinResp.Peers)
+                        {
+                            var pe = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
+                            string pid = pe.TryGetProperty("peerID", out var pidEl) ? pidEl.GetString() : null;
+                            string mip = pe.TryGetProperty("meshIP", out var mipEl) ? mipEl.GetString() : null;
+                            if (pid == joinResp.IntroducerPeerID && !string.IsNullOrEmpty(mip))
+                            {
+                                newIntroducerMeshIP = mip;
+                                break;
+                            }
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(newIntroducerMeshIP))
+                    {
+                        introducerMeshIP = newIntroducerMeshIP;
+                        if (newIntroducerMeshIP != oldIntroducerMeshIP)
+                            Program.Log($"[Mesh] Introducer mesh IP updated: {oldIntroducerMeshIP ?? "(none)"} → {newIntroducerMeshIP}");
+                    }
+                    else
+                    {
+                        // Server chose someone we can't locate (or null). Clear our cached
+                        // pointer so we don't keep probing a dead IP. Next heartbeat with
+                        // IsIntroducer=true will set it correctly.
+                        if (!string.IsNullOrEmpty(oldIntroducerMeshIP))
+                            Program.Log($"[Mesh] Could not locate new introducer's mesh IP — clearing cached introducer pointer (was {oldIntroducerMeshIP})");
+                        introducerMeshIP = null;
+                    }
+                }
+
+                lastReconnectDiscovery = DateTime.UtcNow;
+                if (string.IsNullOrEmpty(introducerMeshIP))
+                {
+                    // Keep missed-probes at threshold so next probe cycle retries. ProbeInterval
+                    // acts as natural backoff.
+                    introducerMissedProbes = IntroducerMissedProbeThreshold;
+                    introducerProbeAckReceived = false;
+                    Program.Log("[Mesh] No introducer resolved — will retry takeover on next probe cycle");
+                }
+                else
+                {
+                    introducerMissedProbes = 0;
+                    introducerProbeAckReceived = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"[Mesh] Failed to reconnect for introducer takeover: {ex.Message}");
+                try { reconnectedStream?.Dispose(); } catch { }
+                try { reconnectedTcpClient?.Dispose(); } catch { }
+                reconnectedTcpClient = null;
+                reconnectedStream = null;
+                introducerMissedProbes = 0; // Reset to retry later
+            }
+        }
+        else if (!string.IsNullOrEmpty(introducerMeshIP))
+        {
+            introducerProbeAckReceived = false;
+            try
+            {
+                var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
+                {
+                    RelayCapable = TunnelOptions.AllowRelayThrough,
+                    RelayCapacity = TunnelOptions.OwnRelayCapacity
+                };
+                byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
+                MeshSend(probeBytes, probeBytes.Length,
+                    new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
+            }
+            catch (Exception)
+            {
+                // Probe send failure typically means the route to the dead introducer has been
+                // pulled. The missed-probe counter will reach threshold and trigger takeover.
+            }
+        }
+
+        lastIntroducerProbe = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Primary loop's non-introducer probe: ping the introducer over mesh control. If it misses
+    /// enough acks, race a random delay then send a MeshJoinRequest over the existing mediation TCP
+    /// to bid for the introducer role. The server's choice (in the MeshJoinResponse handler)
+    /// settles split-brain.
+    /// </summary>
+    private void ProbeIntroducerHealth_PrimaryLoop()
+    {
+        // Deliberately don't gate on completedTunnelMeshIPs — RemoveDeadPeer strips the introducer
+        // from that set when MeshPeerLeave arrives, but introducerMeshIP stays set, and gating on
+        // the tunnel-completed set would freeze takeover after a graceful introducer disconnect.
+        if (isIntroducer || string.IsNullOrEmpty(introducerMeshIP) ||
+            detectedNatType == NATType.Symmetric ||
+            DateTime.UtcNow - lastIntroducerProbe <= introducerProbeInterval) return;
+
+        if (!introducerProbeAckReceived)
+        {
+            introducerMissedProbes++;
+            Program.Log($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
+        }
+        else
+        {
+            if (introducerMissedProbes > 0)
+                Program.Log($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
+            introducerMissedProbes = 0;
+        }
+
+        if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
+        {
+            // Random election delay: with multiple eligible peers, makes simultaneous takeover
+            // attempts statistically rare. During the wait, a heartbeat from a new introducer
+            // (handled in the listener) updates introducerMeshIP and we abort.
+            string electionTarget = introducerMeshIP;
+            int delayMs = new Random().Next(0, 5000);
+            Program.Log($"[Mesh] Introducer confirmed dead (primary loop) — election delay {delayMs}ms");
+            for (int slept = 0; slept < delayMs; slept += 100)
+            {
+                System.Threading.Thread.Sleep(100);
+                if (Program.ShutdownRequested || Program.DisconnectRequested) break;
+                if (introducerMeshIP != electionTarget)
+                {
+                    Program.Log("[Mesh] Primary-loop election aborted — another peer became introducer during delay");
+                    introducerMissedProbes = 0;
+                    introducerProbeAckReceived = true;
+                    break;
+                }
+            }
+            if (introducerMeshIP == electionTarget && !Program.ShutdownRequested && !Program.DisconnectRequested)
+            {
+                Program.Log("[Mesh] Election delay elapsed — sending MeshJoinRequest, awaiting server's choice");
+                introducerMissedProbes = 0;
+
+                // Send MeshJoinRequest. We do NOT claim isIntroducer=true here — the MeshJoinResponse
+                // handler does that only if the server picks us. Prevents split-brain when multiple
+                // eligible peers race.
+                try
+                {
+                    var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
+                    {
+                        NetworkID = TunnelOptions.NetworkID,
+                        PeerID = peerID.ToString(),
+                        NATType = detectedNatType,
+                        PrivateAddressString = meshIP,
+                        AuthToken = authToken
+                    };
+                    byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
+                    stream.Write(joinBytes, 0, joinBytes.Length);
+                    stream.Flush();
+                }
+                catch (Exception ex)
+                {
+                    Program.Log($"[Mesh] Failed to send takeover MeshJoinRequest: {ex.Message}");
+                }
+            }
+        }
+        else
+        {
+            introducerProbeAckReceived = false;
+            try
+            {
+                var probe = new MediationMessage(MediationMessageType.MeshHeartbeat)
+                {
+                    RelayCapable = TunnelOptions.AllowRelayThrough,
+                    RelayCapacity = TunnelOptions.OwnRelayCapacity
+                };
+                byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
+                MeshSend(probeBytes, probeBytes.Length,
+                    new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
+            }
+            catch (Exception)
+            {
+                // Probe send failure typically means the route to the dead introducer has been
+                // pulled. The missed-probe counter will reach threshold and trigger takeover.
+            }
+        }
+
+        lastIntroducerProbe = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// If a peer hasn't sent any heartbeat/ack in 5 minutes, assume it's dead and remove it locally.
+    /// Catches cases where the introducer's MeshPeerRemoved was lost on the UDP path.
+    /// No-op when this peer is the introducer (it's the one declaring deaths).
+    /// </summary>
+    private void RunLocalStalenessFallback()
+    {
+        if (isIntroducer) return;
+
+        var staleThreshold = TimeSpan.FromMinutes(5);
+        var now = DateTime.UtcNow;
+        var stalePeers = lastHeartbeatReceivedFrom
+            .Where(kvp => kvp.Key != meshIP && (now - kvp.Value) > staleThreshold)
+            .Select(kvp => kvp.Key)
+            .ToList();
+        foreach (var staleIP in stalePeers)
+        {
+            Program.Log($"[Mesh] Peer {staleIP} has been silent for >{staleThreshold.TotalMinutes}m — removing locally");
+            RemoveDeadPeer(staleIP);
+        }
     }
 
     /// <summary>
