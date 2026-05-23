@@ -784,708 +784,8 @@ public class MeshEngine
 
                     SendLatencyPingsAndHealthProbe();
 
-                    try
-                    {
-                        int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                        if (bytesRead == 0)
-                        {
-                            Program.Log("[Mesh] Mediation server closed connection");
-                            break;
-                        }
-                        tcpBuffer += Encoding.ASCII.GetString(buffer, 0, bytesRead);
-                    }
-                    catch (IOException) { } // read timeout — no data available this iteration
-
-                    // Process any complete JSON messages in the TCP buffer
-                    // (may contain leftover from early reads or newly received data)
-                    if (tcpBuffer.Length > 0 && tcpBuffer.Contains('{'))
-                    {
-                        // Handle multiple JSON objects in the buffer
-                        // Split by detecting JSON object boundaries (each starts with '{' and ends with '}')
-                        int jsonStartIndex = 0;
-                        while (jsonStartIndex < tcpBuffer.Length)
-                        {
-                            // Find the start of the next JSON object
-                            int jsonObjStart = tcpBuffer.IndexOf('{', jsonStartIndex);
-                            if (jsonObjStart == -1) break;
-
-                            // Find the matching closing brace by counting braces
-                            int braceCount = 0;
-                            int jsonObjEnd = -1;
-                            for (int i = jsonObjStart; i < tcpBuffer.Length; i++)
-                            {
-                                if (tcpBuffer[i] == '{') braceCount++;
-                                else if (tcpBuffer[i] == '}')
-                                {
-                                    braceCount--;
-                                    if (braceCount == 0)
-                                    {
-                                        jsonObjEnd = i;
-                                        break;
-                                    }
-                                }
-                            }
-
-                            if (jsonObjEnd == -1)
-                            {
-                                // Incomplete JSON — keep the remainder in tcpBuffer for next read
-                                tcpBuffer = tcpBuffer.Substring(jsonObjStart);
-                                jsonStartIndex = 0; // Signal that tcpBuffer is already trimmed
-                                break;
-                            }
-
-                            // Extract and parse this JSON object
-                            string jsonObject = tcpBuffer.Substring(jsonObjStart, jsonObjEnd - jsonObjStart + 1);
-
-                            MediationMessage msg;
-                            try
-                            {
-                                msg = JsonSerializer.Deserialize<MediationMessage>(jsonObject);
-                            }
-                            catch (Exception parseEx)
-                            {
-                                Program.Log($"[Mesh] Could not parse JSON object: {parseEx.Message}");
-                                jsonStartIndex = jsonObjEnd + 1;
-                                continue;
-                            }
-
-                            // Process this message
-                            if (msg.ID == MediationMessageType.ConnectionRequest)
-                            {
-                                Program.Log($"[Mesh] Received connection request! ConnectionID: {msg.ConnectionID}, Endpoint: {msg.EndpointString}");
-                                Program.Log($"[Mesh] Waiting for ConnectionBegin to establish tunnel...");
-                                // Don't create Tunnel yet - wait for ConnectionBegin with final endpoint info
-                            }
-                            else if (msg.ID == MediationMessageType.ConnectionBegin)
-                            {
-                                Program.Log($"[Mesh] *** ConnectionBegin received! ***");
-                                Program.Log($"[Mesh] ConnectionBegin: connID={msg.ConnectionID}, endpoint={msg.EndpointString}, NAT={msg.NATType}, meshIP={msg.PrivateAddressString}");
-
-                                // Store peer's mesh IP for later use in WireGuard key exchange
-                                if (!string.IsNullOrEmpty(msg.PrivateAddressString))
-                                {
-                                    peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
-                                    // Cache peer info so GetMeshState can display it.
-                                    // Always cache the EXTERNAL endpoint: if we ever become the introducer
-                                    // (or forward a MeshConnectionBegin), we must hand peers an address
-                                    // that works from outside this LAN. EndpointString may be LAN-substituted.
-                                    if (!string.IsNullOrEmpty(msg.PeerID))
-                                    {
-                                        string cacheEndpoint = !string.IsNullOrEmpty(msg.ExternalEndpointString)
-                                            ? msg.ExternalEndpointString
-                                            : msg.EndpointString;
-                                        peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType);
-                                    }
-
-                                    // Clean up any existing tunnel to the same mesh IP before creating a new one.
-                                    // Without this, old tunnels completing late overwrite the WireGuard peer's
-                                    // endpoint with a stale address, breaking mesh control traffic.
-                                    string cbMeshIP = msg.PrivateAddressString;
-                                    var oldConnIDs = peerMeshIPs
-                                        .Where(kvp => kvp.Value == cbMeshIP && kvp.Key != msg.ConnectionID)
-                                        .Select(kvp => kvp.Key).ToList();
-                                    foreach (var oldConnID in oldConnIDs)
-                                    {
-                                        Tunnel oldTunnel = null;
-                                        lock (meshLock)
-                                        {
-                                            if (activeConnectionTunnels.TryGetValue(oldConnID, out oldTunnel))
-                                                activeConnectionTunnels.Remove(oldConnID);
-                                        }
-                                        if (oldTunnel != null)
-                                        {
-                                            Program.Log($"[Mesh] Disposing old tunnel {oldConnID} for {cbMeshIP} (superseded by {msg.ConnectionID})");
-                                            try { oldTunnel.Dispose(); } catch { }
-                                        }
-                                        peerMeshIPs.Remove(oldConnID);
-                                    }
-                                    activePeerTunnels.Remove(cbMeshIP);
-                                    completedTunnelMeshIPs.Remove(cbMeshIP);
-                                    if (!string.IsNullOrEmpty(msg.PeerID))
-                                        activePeerTunnels.Remove(msg.PeerID);
-                                }
-
-                                // Check if we already have a tunnel for this ConnectionID
-                                if (activeConnectionTunnels.ContainsKey(msg.ConnectionID))
-                                {
-                                    Program.Log($"[Mesh] Tunnel {msg.ConnectionID} already exists - ignoring duplicate ConnectionBegin");
-                                }
-                                else
-                                {
-                                    // Create Tunnel instance for mesh peer connection
-                                    // The Tunnel will connect to mediation server which will recognize the ConnectionID
-                                    // and send ConnectionBegin immediately (server handles mesh connections specially)
-                                    pendingTunnelCount++;
-                                    var capturedConnectionID = msg.ConnectionID;
-                                    var capturedPeerIDForCleanup = msg.PeerID;
-                                    var capturedMeshIPForCleanup = msg.PrivateAddressString;
-                                    var peerTunnel = new Tunnel(
-                                        onConnectionFailure: () =>
-                                        {
-                                            Program.Log($"[Mesh] Tunnel {capturedConnectionID} failed permanently after all retries — cleaning up for future retry");
-                                            lock (meshLock)
-                                            {
-                                                activeConnectionTunnels.Remove(capturedConnectionID);
-                                                if (!string.IsNullOrEmpty(capturedPeerIDForCleanup))
-                                                    activePeerTunnels.Remove(capturedPeerIDForCleanup);
-                                                if (!string.IsNullOrEmpty(capturedMeshIPForCleanup))
-                                                    activePeerTunnels.Remove(capturedMeshIPForCleanup);
-                                            }
-                                            System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
-                                            System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
-                                        },
-                                        sharedUdpClient: udpClient,
-                                        meshPeerEndpoint: msg.EndpointString,
-                                        retryInPlace: true,
-                                        sharedClientID: peerID,
-                                        ownMeshIP: meshIP,
-                                        onConnectionComplete: () =>
-                                        {
-                                            Program.Log($"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
-                                            System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
-                                            System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
-                                            lock (meshLock)
-                                            {
-                                                if (peerMeshIPs.TryGetValue(capturedConnectionID, out string completedMeshIP) && !string.IsNullOrEmpty(completedMeshIP))
-                                                {
-                                                    completedTunnelMeshIPs.Add(completedMeshIP);
-                                                    if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
-                                                    {
-                                                        Program.Log($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
-                                                        foreach (var deferredMsg in deferred)
-                                                        {
-                                                            string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
-                                                                ? deferredMsg.IntroducerMeshIP : completedMeshIP;
-                                                            try
-                                                            {
-                                                                if (targetIP != completedMeshIP)
-                                                                    deferredMsg.IntroducerMeshIP = null;
-                                                                byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
-                                                                MeshSend(deferredBytes, deferredBytes.Length,
-                                                                    new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
-                                                                Program.Log($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
-                                                            }
-                                                            catch (Exception ex)
-                                                            {
-                                                                Program.Log($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
-                                                            }
-                                                        }
-                                                        deferredIntroductions.Remove(completedMeshIP);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    );
-
-                                    // Set WireGuard tunnel reference so the peer tunnel can forward traffic
-                                    peerTunnel.SetWireGuardTunnel(wireguardTunnel);
-
-                                    // Track this tunnel by ConnectionID
-                                    lock (meshLock) { activeConnectionTunnels[msg.ConnectionID] = peerTunnel; }
-
-                                    // Map the peer's mesh IP to this tunnel so we can check connection status
-                                    if (!string.IsNullOrEmpty(msg.PrivateAddressString))
-                                    {
-                                        activePeerTunnels[msg.PrivateAddressString] = peerTunnel;
-                                    }
-
-                                    // Remove from pending by PeerID (matches the key used in Add at ProcessDiscoveredPeers)
-                                    if (!string.IsNullOrEmpty(msg.PeerID))
-                                    {
-                                        pendingConnectionRequests.Remove(msg.PeerID);
-                                        connectionIDToPeerID[msg.ConnectionID] = msg.PeerID;
-                                        activePeerTunnels[msg.PeerID] = peerTunnel;
-                                    }
-
-
-                                    // Start the tunnel asynchronously.
-                                    // pendingTunnelCount is decremented by onConnectionComplete (success)
-                                    // or onConnectionFailure (failure) — NOT here — so the mediation
-                                    // disconnect only happens after WireGuard setup is fully done.
-                                    System.Threading.Tasks.Task.Run(() =>
-                                    {
-                                        try
-                                        {
-                                            peerTunnel.Start();
-                                            // Inject the ConnectionBegin directly — this preserves LAN endpoints
-                                            // for same-NAT peers (the mediation server already substituted them)
-                                            peerTunnel.InjectConnectionBegin(
-                                                msg.EndpointString,
-                                                msg.NATType,
-                                                detectedNatType,
-                                                msg.PrivateAddressString);
-                                        }
-                                        catch (Exception ex)
-                                        {
-                                            Program.Log($"[Mesh] Error starting tunnel {capturedConnectionID}: {ex.Message}");
-                                            System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
-                                        }
-                                    });
-                                }
-                            }
-                            else if (msg.ID == MediationMessageType.MeshJoinResponse)
-                            {
-                                if (!string.IsNullOrEmpty(msg.AuthToken))
-                                {
-                                    Console.Error.WriteLine($"[Mesh] Authentication failed on rediscovery: {msg.AuthToken}");
-                                }
-                                else
-                                {
-                                    // Server-authoritative role assignment: only become introducer if
-                                    // the server says so. Same response also tells non-introducers who
-                                    // the actual introducer is.
-                                    if (!string.IsNullOrEmpty(msg.IntroducerPeerID))
-                                    {
-                                        bool serverSaysWereIntroducer = msg.IntroducerPeerID == peerID.ToString();
-                                        if (serverSaysWereIntroducer && !isIntroducer)
-                                        {
-                                            Program.Log("[Mesh] Server confirmed us as new introducer (primary loop)");
-                                            isIntroducer = true;
-                                            introducerMeshIP = meshIP;
-                                        }
-                                        else if (!serverSaysWereIntroducer && isIntroducer)
-                                        {
-                                            Program.Log($"[Mesh] Server picked a different introducer ({msg.IntroducerPeerID}) — relinquishing role");
-                                            isIntroducer = false;
-
-                                            // Tear down all relay routes we were hosting as introducer.
-                                            // The new introducer doesn't know about them and won't be able
-                                            // to drive reselection, so just drop them and let the new
-                                            // introducer re-establish on demand.
-                                            string[] droppedAtRelinquish;
-                                            lock (hostedRelayLock) { droppedAtRelinquish = hostedRelays.ToArray(); hostedRelays.Clear(); }
-                                            foreach (var pk in droppedAtRelinquish)
-                                            {
-                                                var parts = pk.Split('|', 2);
-                                                if (parts.Length != 2) continue;
-                                                try
-                                                {
-                                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
-                                                    wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
-                                                }
-                                                catch { }
-                                            }
-                                            relayAssignments.Clear();
-                                            lastRelayReselect.Clear();
-                                            relayedPairs.Clear();
-                                            if (droppedAtRelinquish.Length > 0)
-                                                Program.Log($"[Mesh] Relinquished introducer: dropped {droppedAtRelinquish.Length} hosted relay pair(s)");
-                                        }
-                                        if (!serverSaysWereIntroducer && msg.Peers != null)
-                                        {
-                                            // Update introducerMeshIP to the server's choice.
-                                            foreach (var peerObj in msg.Peers)
-                                            {
-                                                var pe = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
-                                                string pid = pe.TryGetProperty("peerID", out var pidEl) ? pidEl.GetString() : null;
-                                                string mip = pe.TryGetProperty("meshIP", out var mipEl) ? mipEl.GetString() : null;
-                                                if (pid == msg.IntroducerPeerID && !string.IsNullOrEmpty(mip))
-                                                {
-                                                    if (introducerMeshIP != mip)
-                                                    {
-                                                        Program.Log($"[Mesh] Introducer updated to {mip} per server");
-                                                        introducerMeshIP = mip;
-                                                        introducerMissedProbes = 0;
-                                                        introducerProbeAckReceived = true;
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    if (msg.Peers != null && msg.Peers.Length > 0)
-                                    {
-                                        hasPeers = true;
-                                        ProcessDiscoveredPeers(msg.Peers);
-                                    }
-
-                                    // Reset discovery timer
-                                    lastPeerDiscovery = DateTime.UtcNow;
-                                }
-                            }
-                            else if (msg.ID == MediationMessageType.MeshPeerList)
-                            {
-                                Program.Log($"[Mesh] Updated peer list received: {msg.PeerCount} peers");
-
-                                // Process new peers that joined the network
-                                if (msg.Peers != null && msg.Peers.Length > 0)
-                                {
-                                    hasPeers = true;
-                                    ProcessDiscoveredPeers(msg.Peers);
-                                }
-                            }
-                            else if (msg.ID == MediationMessageType.ConnectionComplete)
-                            {
-                                Program.Log($"[Mesh] Received ConnectionComplete (routing to tunnel)");
-
-                                // Find all tunnels and notify them
-                                // We don't know which ConnectionID this is for from this message alone,
-                                // so we need to check all active tunnels
-                                // Actually, the message might not have ConnectionID, so notify all tunnels
-                                Tunnel[] tunnelSnapshot;
-                                lock (meshLock)
-                                {
-                                    tunnelSnapshot = new Tunnel[activeConnectionTunnels.Count];
-                                    activeConnectionTunnels.Values.CopyTo(tunnelSnapshot, 0);
-                                }
-                                foreach (var t in tunnelSnapshot)
-                                {
-                                    t.NotifyConnectionComplete();
-                                }
-                            }
-                            else if (msg.ID == MediationMessageType.ServerNotAvailable)
-                            {
-                                Program.Log($"[Mesh] ServerNotAvailable — target peer unavailable");
-                                // The mediation server couldn't establish this connection (target disconnected
-                                // or missing UDP info). Remove the pending request so it doesn't block disconnect.
-                                // We don't know which specific peer failed, but since this is a response to
-                                // our most recent ConnectionRequest, we can't easily map it. Instead, the
-                                // stale pending cleanup below will handle it after timeout.
-                            }
-                            else if (msg.ID == MediationMessageType.MeshIntroduceRequest)
-                            {
-                                // The mediation server has selected us as the introducer for a new peer.
-                                // Mark ourselves as the introducer so we never disconnect from the server.
-                                // Send MeshConnectionBegin to BOTH peers so they can hole-punch directly
-                                // without reconnecting to the mediation server.
-                                isIntroducer = true;
-                                Program.Log($"[Mesh] Selected as introducer for new peer {msg.PeerID}");
-
-                                // Cache the new peer's info for heartbeat repair.
-                                // Also clear completedTunnelMeshIPs — the peer is reconnecting
-                                // with fresh NAT traversal, so any old tunnel is stale. The new
-                                // ConnectionBegin that follows will create a fresh tunnel.
-                                // Clear any stale deferred messages — this MeshIntroduce supersedes them.
-                                if (!string.IsNullOrEmpty(msg.PrivateAddressString))
-                                {
-                                    peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType);
-                                    if (!string.IsNullOrEmpty(msg.LocalIP))
-                                        peerLanByMeshIP[msg.PrivateAddressString] = (msg.LocalIP, msg.LocalPort);
-                                    completedTunnelMeshIPs.Remove(msg.PrivateAddressString);
-                                    deferredIntroductions.Remove(msg.PrivateAddressString);
-                                }
-
-                                int introduced = 0;
-                                if (msg.OtherPeers != null)
-                                {
-                                    foreach (var peerObj in msg.OtherPeers)
-                                    {
-                                        var peerElement = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
-                                        string existingPeerMeshIP = peerElement.TryGetProperty("meshIP", out JsonElement mip) ? mip.GetString() : null;
-                                        string existingPeerEndpoint = peerElement.TryGetProperty("endpoint", out JsonElement epEl) ? epEl.GetString() : null;
-                                        int existingPeerNatType = peerElement.TryGetProperty("natType", out JsonElement ntEl) ? ntEl.GetInt32() : -1;
-                                        string existingPeerID = peerElement.TryGetProperty("peerID", out JsonElement pidEl) ? pidEl.GetString() : null;
-                                        string existingPeerLocalIP = peerElement.TryGetProperty("localIP", out JsonElement lipEl) ? lipEl.GetString() : null;
-                                        int existingPeerLocalPort = peerElement.TryGetProperty("localPort", out JsonElement lpEl) ? lpEl.GetInt32() : 0;
-
-                                        if (string.IsNullOrEmpty(existingPeerMeshIP))
-                                        {
-                                            Program.Log($"[Mesh] Skipping peer with no mesh IP in OtherPeers list");
-                                            continue;
-                                        }
-
-                                        // Cache existing peer's info for heartbeat repair
-                                        peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType);
-                                        if (!string.IsNullOrEmpty(existingPeerLocalIP))
-                                            peerLanByMeshIP[existingPeerMeshIP] = (existingPeerLocalIP, existingPeerLocalPort);
-
-                                        // Check if we have a WireGuard tunnel to this peer.
-                                        // OtherPeers includes all mesh members (even ones we never connected to).
-                                        // We can only send MeshConnectionBegin over WireGuard to peers we have tunnels with.
-                                        if (wireguardTunnel.GetPeer(IPAddress.Parse(existingPeerMeshIP)) == null)
-                                        {
-                                            Program.Log($"[Mesh] Skipping peer {existingPeerID} ({existingPeerMeshIP}) — no WireGuard tunnel to this peer");
-                                            continue;
-                                        }
-
-                                        // Clean up stale relay state if this pair was previously relayed
-                                        // (e.g., peer reconnected with a non-Symmetric NAT type)
-                                        if (!string.IsNullOrEmpty(msg.PrivateAddressString))
-                                        {
-                                            string sortA = string.Compare(existingPeerMeshIP, msg.PrivateAddressString, StringComparison.Ordinal) < 0
-                                                ? existingPeerMeshIP : msg.PrivateAddressString;
-                                            string sortB = sortA == existingPeerMeshIP ? msg.PrivateAddressString : existingPeerMeshIP;
-                                            string pairKey = $"{sortA}|{sortB}";
-                                            if (relayedPairs.Remove(pairKey))
-                                            {
-                                                Program.Log($"[Mesh] Removed stale relay pair {pairKey} (NAT types changed)");
-                                                // Remove relay routes on the introducer's WireGuard interface
-                                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
-                                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
-                                            }
-                                        }
-
-                                        // Same-NAT short-circuit: even two symmetric peers can reach each other
-                                        // LAN-direct if they share a public IP and both have LAN endpoints. Skip
-                                        // the symmetric-relay branch and let the normal hole-punch path below
-                                        // substitute LAN endpoints.
-                                        string msgPublicIP = msg.EndpointString?.Split(':')[0];
-                                        string exPublicIP = existingPeerEndpoint?.Split(':')[0];
-                                        bool sameLan = !string.IsNullOrEmpty(msgPublicIP) &&
-                                                       msgPublicIP == exPublicIP &&
-                                                       !string.IsNullOrEmpty(msg.LocalIP) &&
-                                                       !string.IsNullOrEmpty(existingPeerLocalIP);
-
-                                        // Symmetric ↔ symmetric: hole-punch infeasible across NATs — pick a relay.
-                                        // Exception: same-LAN pairs reach each other directly via local endpoints.
-                                        if (!sameLan && msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric)
-                                        {
-                                            string chosenRelay = PickRelay(existingPeerMeshIP, msg.PrivateAddressString) ?? (TunnelOptions.AllowRelayThrough ? meshIP : null);
-                                            if (string.IsNullOrEmpty(chosenRelay))
-                                            {
-                                                Program.Log($"[Mesh] No eligible relay for {existingPeerMeshIP} <-> {msg.PrivateAddressString} and self-relay disabled — skipping pair");
-                                                continue;
-                                            }
-                                            Program.Log($"[Mesh] Both {msg.PeerID} and {existingPeerID} are symmetric NAT — relay via {(chosenRelay == meshIP ? "self (introducer)" : chosenRelay)}");
-
-                                            string sortA = string.Compare(existingPeerMeshIP, msg.PrivateAddressString, StringComparison.Ordinal) < 0
-                                                ? existingPeerMeshIP : msg.PrivateAddressString;
-                                            string sortB = sortA == existingPeerMeshIP ? msg.PrivateAddressString : existingPeerMeshIP;
-                                            string pairKey = $"{sortA}|{sortB}";
-
-                                            // Release the prior relay if the picker chose someone different.
-                                            if (relayAssignments.TryGetValue(pairKey, out var priorRelay) && priorRelay != chosenRelay)
-                                            {
-                                                if (priorRelay == meshIP)
-                                                {
-                                                    try
-                                                    {
-                                                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
-                                                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
-                                                    }
-                                                    catch { }
-                                                    RemoveHostedRelay(pairKey);
-                                                }
-                                                else
-                                                {
-                                                    var release = new MediationMessage(MediationMessageType.MeshRelayAssignment)
-                                                    {
-                                                        PeerA = existingPeerMeshIP,
-                                                        PeerB = msg.PrivateAddressString,
-                                                        RelayMeshIP = priorRelay,
-                                                        Release = true
-                                                    };
-                                                    try { byte[] rb = Encoding.UTF8.GetBytes(release.Serialize()); MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(priorRelay), MeshControlPort)); } catch { }
-                                                }
-                                            }
-
-                                            relayAssignments[pairKey] = chosenRelay;
-
-                                            if (chosenRelay == meshIP)
-                                            {
-                                                wireguardTunnel.EnableForwarding();
-                                                AddHostedRelay(pairKey);
-                                            }
-                                            else
-                                            {
-                                                var assignment = new MediationMessage(MediationMessageType.MeshRelayAssignment)
-                                                {
-                                                    PeerA = existingPeerMeshIP,
-                                                    PeerB = msg.PrivateAddressString,
-                                                    RelayMeshIP = chosenRelay
-                                                };
-                                                try
-                                                {
-                                                    byte[] aBytes = Encoding.UTF8.GetBytes(assignment.Serialize());
-                                                    MeshSend(aBytes, aBytes.Length, new IPEndPoint(IPAddress.Parse(chosenRelay), MeshControlPort));
-                                                }
-                                                catch (Exception ex)
-                                                {
-                                                    Program.Log($"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex.Message}");
-                                                }
-                                            }
-
-                                            var relayToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
-                                            {
-                                                PeerID = msg.PeerID,
-                                                EndpointString = msg.EndpointString,
-                                                NATType = msg.NATType,
-                                                PrivateAddressString = msg.PrivateAddressString,
-                                                IsRelay = true,
-                                                IntroducerMeshIP = meshIP,
-                                                RelayMeshIP = chosenRelay
-                                            };
-                                            try
-                                            {
-                                                byte[] relayExBytes = Encoding.UTF8.GetBytes(relayToExisting.Serialize());
-                                                MeshSend(relayExBytes, relayExBytes.Length,
-                                                    new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                Program.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
-                                            }
-
-                                            if (!string.IsNullOrEmpty(msg.PrivateAddressString))
-                                            {
-                                                var relayToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
-                                                {
-                                                    PeerID = existingPeerID,
-                                                    EndpointString = existingPeerEndpoint,
-                                                    NATType = (NATType)existingPeerNatType,
-                                                    PrivateAddressString = existingPeerMeshIP,
-                                                    IsRelay = true,
-                                                    IntroducerMeshIP = meshIP,
-                                                    RelayMeshIP = chosenRelay
-                                                };
-
-                                                if (completedTunnelMeshIPs.Contains(msg.PrivateAddressString))
-                                                {
-                                                    try
-                                                    {
-                                                        byte[] relayNewBytes = Encoding.UTF8.GetBytes(relayToNew.Serialize());
-                                                        MeshSend(relayNewBytes, relayNewBytes.Length,
-                                                            new IPEndPoint(IPAddress.Parse(msg.PrivateAddressString), MeshControlPort));
-                                                    }
-                                                    catch (Exception ex)
-                                                    {
-                                                        Program.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
-                                                    }
-                                                }
-                                                else
-                                                {
-                                                    if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
-                                                        deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
-                                                    deferredIntroductions[msg.PrivateAddressString].Add(relayToNew);
-                                                }
-                                            }
-
-                                            relayedPairs.Add(pairKey);
-                                            lastRepairAttempt[pairKey] = DateTime.UtcNow;
-
-                                            introduced++;
-                                            continue;
-                                        }
-
-                                        // Detect same-NAT peers: if both share the same public IP, use LAN endpoints
-                                        // so they connect directly over the local network (NAT hairpinning is unreliable)
-                                        string newPeerEndpointForExisting = msg.EndpointString;
-                                        string existingPeerEndpointForNew = existingPeerEndpoint;
-
-                                        string newPeerPublicIP = msg.EndpointString?.Split(':')[0];
-                                        string existingPeerPublicIP = existingPeerEndpoint?.Split(':')[0];
-
-                                        if (newPeerPublicIP == existingPeerPublicIP &&
-                                            !string.IsNullOrEmpty(msg.LocalIP) && !string.IsNullOrEmpty(existingPeerLocalIP))
-                                        {
-                                            newPeerEndpointForExisting = $"{msg.LocalIP}:{msg.LocalPort}";
-                                            existingPeerEndpointForNew = $"{existingPeerLocalIP}:{existingPeerLocalPort}";
-                                            Program.Log($"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
-                                        }
-
-                                        // Build both MeshConnectionBegin messages.
-                                        // ExternalEndpointString always carries the external endpoint so the
-                                        // receiver caches something safe to forward to peers outside this LAN.
-                                        var connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
-                                        {
-                                            PeerID = msg.PeerID,              // New peer's ID
-                                            EndpointString = newPeerEndpointForExisting,  // New peer's endpoint (LAN if same-NAT)
-                                            ExternalEndpointString = msg.EndpointString,  // Always external
-                                            NATType = msg.NATType,              // New peer's NAT type
-                                            PrivateAddressString = msg.PrivateAddressString   // New peer's mesh IP
-                                        };
-
-                                        MediationMessage connBeginToNew = null;
-                                        if (!string.IsNullOrEmpty(msg.PrivateAddressString) && !string.IsNullOrEmpty(existingPeerEndpoint))
-                                        {
-                                            connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
-                                            {
-                                                PeerID = existingPeerID,           // Existing peer's ID
-                                                EndpointString = existingPeerEndpointForNew,  // Existing peer's endpoint (LAN if same-NAT)
-                                                ExternalEndpointString = existingPeerEndpoint, // Always external
-                                                NATType = (NATType)existingPeerNatType, // Existing peer's NAT type
-                                                PrivateAddressString = existingPeerMeshIP         // Existing peer's mesh IP
-                                            };
-                                        }
-
-                                        bool tunnelToNewReady = completedTunnelMeshIPs.Contains(msg.PrivateAddressString);
-
-                                        if (tunnelToNewReady)
-                                        {
-                                            // Tunnel to new peer is ready — send both sides simultaneously
-                                            // so hole-punching starts at the same time
-                                            try
-                                            {
-                                                byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
-                                                MeshSend(toExistingBytes, toExistingBytes.Length,
-                                                    new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
-                                                Program.Log($"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
-                                            }
-                                            catch (Exception ex)
-                                            {
-                                                Program.Log($"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
-                                            }
-
-                                            if (connBeginToNew != null)
-                                            {
-                                                try
-                                                {
-                                                    byte[] toNewBytes = Encoding.UTF8.GetBytes(connBeginToNew.Serialize());
-                                                    MeshSend(toNewBytes, toNewBytes.Length,
-                                                        new IPEndPoint(IPAddress.Parse(msg.PrivateAddressString), MeshControlPort));
-                                                    Program.Log($"[Mesh] Sent MeshConnectionBegin to new peer {msg.PrivateAddressString} (about existing peer {existingPeerMeshIP})");
-                                                }
-                                                catch (Exception ex)
-                                                {
-                                                    Program.Log($"[Mesh] Failed to send MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
-                                                }
-                                            }
-                                        }
-                                        else
-                                        {
-                                            // Tunnel to new peer not yet established — defer BOTH sides
-                                            // so hole-punching starts simultaneously when the tunnel is ready
-                                            if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
-                                                deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
-
-                                            // Defer the message to the existing peer (tagged with target mesh IP for routing)
-                                            connBeginToExisting.IntroducerMeshIP = existingPeerMeshIP; // Reuse field to store target
-                                            deferredIntroductions[msg.PrivateAddressString].Add(connBeginToExisting);
-
-                                            if (connBeginToNew != null)
-                                                deferredIntroductions[msg.PrivateAddressString].Add(connBeginToNew);
-
-                                            Program.Log($"[Mesh] Deferred MeshConnectionBegin for both peers (tunnel to {msg.PrivateAddressString} not yet established)");
-                                        }
-
-                                        introduced++;
-                                    }
-                                }
-
-                                // Acknowledge the mediation server regardless — it will clean up the pending record
-                                try
-                                {
-                                    var ack = new MediationMessage(MediationMessageType.MeshIntroduceAck)
-                                    {
-                                        PeerID = msg.PeerID
-                                    };
-                                    byte[] ackBuffer = Encoding.ASCII.GetBytes(ack.Serialize());
-                                    stream.Write(ackBuffer, 0, ackBuffer.Length);
-                                    stream.Flush();
-                                    int deferredCount = deferredIntroductions.TryGetValue(msg.PrivateAddressString ?? "", out var dList) ? dList.Count : 0;
-                                    Program.Log($"[Mesh] Sent MeshIntroduceAck for {msg.PeerID} ({introduced} introduced, {deferredCount} deferred, completedTunnels={completedTunnelMeshIPs.Count})");
-                                }
-                                catch (Exception ex)
-                                {
-                                    Program.Log($"[Mesh] MeshIntroduceAck write failed, connection lost: {ex.Message}");
-                                    tcpClient.Close();
-                                    break;
-                                }
-                            }
-
-                            // Move past this JSON object
-                            jsonStartIndex = jsonObjEnd + 1;
-                        } // End while loop for parsing multiple JSON objects
-
-                        // Clear consumed data from the buffer.
-                        // If the incomplete-JSON branch set tcpBuffer to the remainder, it's already correct.
-                        // Otherwise, clear everything up to jsonStartIndex.
-                        if (jsonStartIndex >= tcpBuffer.Length)
-                            tcpBuffer = "";
-                        else if (jsonStartIndex > 0)
-                            tcpBuffer = tcpBuffer.Substring(jsonStartIndex);
-                    }
+                    if (!ReadAndDispatchMediationMessages(ref tcpBuffer, ref hasPeers))
+                        break;
 
                     System.Threading.Thread.Sleep(100);
                 }
@@ -3311,6 +2611,675 @@ public class MeshEngine
 
         heartbeatAckDeadline = null;
         lastHeartbeat = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Handler for a ConnectionBegin message from the mediation server: cache peer info, tear down
+    /// any stale tunnel to the same mesh IP, and spin up a fresh Tunnel that hole-punches directly
+    /// to this peer.
+    /// </summary>
+    private void HandleConnectionBegin(MediationMessage msg)
+    {
+        Program.Log($"[Mesh] *** ConnectionBegin received! ***");
+        Program.Log($"[Mesh] ConnectionBegin: connID={msg.ConnectionID}, endpoint={msg.EndpointString}, NAT={msg.NATType}, meshIP={msg.PrivateAddressString}");
+
+        if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+        {
+            peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
+            // Always cache the EXTERNAL endpoint: if we ever become the introducer, we must hand
+            // peers an address that works from outside this LAN. EndpointString may be LAN-substituted.
+            if (!string.IsNullOrEmpty(msg.PeerID))
+            {
+                string cacheEndpoint = !string.IsNullOrEmpty(msg.ExternalEndpointString)
+                    ? msg.ExternalEndpointString
+                    : msg.EndpointString;
+                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType);
+            }
+
+            // Tear down any tunnel for the same mesh IP before creating a new one. Late-completing
+            // old tunnels would otherwise overwrite the WireGuard peer's endpoint with a stale address.
+            string cbMeshIP = msg.PrivateAddressString;
+            var oldConnIDs = peerMeshIPs
+                .Where(kvp => kvp.Value == cbMeshIP && kvp.Key != msg.ConnectionID)
+                .Select(kvp => kvp.Key).ToList();
+            foreach (var oldConnID in oldConnIDs)
+            {
+                Tunnel oldTunnel = null;
+                lock (meshLock)
+                {
+                    if (activeConnectionTunnels.TryGetValue(oldConnID, out oldTunnel))
+                        activeConnectionTunnels.Remove(oldConnID);
+                }
+                if (oldTunnel != null)
+                {
+                    Program.Log($"[Mesh] Disposing old tunnel {oldConnID} for {cbMeshIP} (superseded by {msg.ConnectionID})");
+                    try { oldTunnel.Dispose(); } catch { }
+                }
+                peerMeshIPs.Remove(oldConnID);
+            }
+            activePeerTunnels.Remove(cbMeshIP);
+            completedTunnelMeshIPs.Remove(cbMeshIP);
+            if (!string.IsNullOrEmpty(msg.PeerID))
+                activePeerTunnels.Remove(msg.PeerID);
+        }
+
+        if (activeConnectionTunnels.ContainsKey(msg.ConnectionID))
+        {
+            Program.Log($"[Mesh] Tunnel {msg.ConnectionID} already exists - ignoring duplicate ConnectionBegin");
+            return;
+        }
+
+        pendingTunnelCount++;
+        var capturedConnectionID = msg.ConnectionID;
+        var capturedPeerIDForCleanup = msg.PeerID;
+        var capturedMeshIPForCleanup = msg.PrivateAddressString;
+        var peerTunnel = new Tunnel(
+            onConnectionFailure: () =>
+            {
+                Program.Log($"[Mesh] Tunnel {capturedConnectionID} failed permanently after all retries — cleaning up for future retry");
+                lock (meshLock)
+                {
+                    activeConnectionTunnels.Remove(capturedConnectionID);
+                    if (!string.IsNullOrEmpty(capturedPeerIDForCleanup))
+                        activePeerTunnels.Remove(capturedPeerIDForCleanup);
+                    if (!string.IsNullOrEmpty(capturedMeshIPForCleanup))
+                        activePeerTunnels.Remove(capturedMeshIPForCleanup);
+                }
+                System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
+                System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
+            },
+            sharedUdpClient: udpClient,
+            meshPeerEndpoint: msg.EndpointString,
+            retryInPlace: true,
+            sharedClientID: peerID,
+            ownMeshIP: meshIP,
+            onConnectionComplete: () =>
+            {
+                Program.Log($"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
+                System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
+                System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
+                lock (meshLock)
+                {
+                    if (peerMeshIPs.TryGetValue(capturedConnectionID, out string completedMeshIP) && !string.IsNullOrEmpty(completedMeshIP))
+                    {
+                        completedTunnelMeshIPs.Add(completedMeshIP);
+                        if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
+                        {
+                            Program.Log($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
+                            foreach (var deferredMsg in deferred)
+                            {
+                                string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                    ? deferredMsg.IntroducerMeshIP : completedMeshIP;
+                                try
+                                {
+                                    if (targetIP != completedMeshIP)
+                                        deferredMsg.IntroducerMeshIP = null;
+                                    byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
+                                    MeshSend(deferredBytes, deferredBytes.Length,
+                                        new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
+                                    Program.Log($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                }
+                                catch (Exception ex)
+                                {
+                                    Program.Log($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
+                                }
+                            }
+                            deferredIntroductions.Remove(completedMeshIP);
+                        }
+                    }
+                }
+            }
+        );
+
+        peerTunnel.SetWireGuardTunnel(wireguardTunnel);
+        lock (meshLock) { activeConnectionTunnels[msg.ConnectionID] = peerTunnel; }
+        if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+            activePeerTunnels[msg.PrivateAddressString] = peerTunnel;
+        if (!string.IsNullOrEmpty(msg.PeerID))
+        {
+            pendingConnectionRequests.Remove(msg.PeerID);
+            connectionIDToPeerID[msg.ConnectionID] = msg.PeerID;
+            activePeerTunnels[msg.PeerID] = peerTunnel;
+        }
+
+        // Start the tunnel asynchronously. pendingTunnelCount is decremented by
+        // onConnectionComplete (success) or onConnectionFailure (failure) — not here —
+        // so the mediation disconnect only happens after WireGuard setup is fully done.
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                peerTunnel.Start();
+                // Inject ConnectionBegin directly — preserves LAN endpoints for same-NAT peers.
+                peerTunnel.InjectConnectionBegin(
+                    msg.EndpointString,
+                    msg.NATType,
+                    detectedNatType,
+                    msg.PrivateAddressString);
+            }
+            catch (Exception ex)
+            {
+                Program.Log($"[Mesh] Error starting tunnel {capturedConnectionID}: {ex.Message}");
+                System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Handler for a MeshJoinResponse: server-authoritative introducer-role assignment, plus
+    /// processing of any peers the server included in the response. Sets hasPeers=true if the
+    /// response includes other mesh members.
+    /// </summary>
+    private void HandleMeshJoinResponse(MediationMessage msg, ref bool hasPeers)
+    {
+        if (!string.IsNullOrEmpty(msg.AuthToken))
+        {
+            Console.Error.WriteLine($"[Mesh] Authentication failed on rediscovery: {msg.AuthToken}");
+            return;
+        }
+
+        // Server-authoritative role assignment.
+        if (!string.IsNullOrEmpty(msg.IntroducerPeerID))
+        {
+            bool serverSaysWereIntroducer = msg.IntroducerPeerID == peerID.ToString();
+            if (serverSaysWereIntroducer && !isIntroducer)
+            {
+                Program.Log("[Mesh] Server confirmed us as new introducer (primary loop)");
+                isIntroducer = true;
+                introducerMeshIP = meshIP;
+            }
+            else if (!serverSaysWereIntroducer && isIntroducer)
+            {
+                Program.Log($"[Mesh] Server picked a different introducer ({msg.IntroducerPeerID}) — relinquishing role");
+                isIntroducer = false;
+
+                // The new introducer doesn't know about relay routes we were hosting — drop them
+                // and let the new introducer re-establish on demand.
+                string[] droppedAtRelinquish;
+                lock (hostedRelayLock) { droppedAtRelinquish = hostedRelays.ToArray(); hostedRelays.Clear(); }
+                foreach (var pk in droppedAtRelinquish)
+                {
+                    var parts = pk.Split('|', 2);
+                    if (parts.Length != 2) continue;
+                    try
+                    {
+                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[0]));
+                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(parts[1]));
+                    }
+                    catch { }
+                }
+                relayAssignments.Clear();
+                lastRelayReselect.Clear();
+                relayedPairs.Clear();
+                if (droppedAtRelinquish.Length > 0)
+                    Program.Log($"[Mesh] Relinquished introducer: dropped {droppedAtRelinquish.Length} hosted relay pair(s)");
+            }
+            if (!serverSaysWereIntroducer && msg.Peers != null)
+            {
+                // Update introducerMeshIP to the server's choice.
+                foreach (var peerObj in msg.Peers)
+                {
+                    var pe = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
+                    string pid = pe.TryGetProperty("peerID", out var pidEl) ? pidEl.GetString() : null;
+                    string mip = pe.TryGetProperty("meshIP", out var mipEl) ? mipEl.GetString() : null;
+                    if (pid == msg.IntroducerPeerID && !string.IsNullOrEmpty(mip))
+                    {
+                        if (introducerMeshIP != mip)
+                        {
+                            Program.Log($"[Mesh] Introducer updated to {mip} per server");
+                            introducerMeshIP = mip;
+                            introducerMissedProbes = 0;
+                            introducerProbeAckReceived = true;
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (msg.Peers != null && msg.Peers.Length > 0)
+        {
+            hasPeers = true;
+            ProcessDiscoveredPeers(msg.Peers);
+        }
+
+        lastPeerDiscovery = DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Handler for a MeshIntroduceRequest: server has chosen this peer as the introducer for
+    /// a new joiner. For each existing peer in OtherPeers, dispatch MeshConnectionBegin messages
+    /// (with same-LAN and symmetric-relay handling), then send MeshIntroduceAck. Returns false
+    /// if the ack write fails (caller should break the loop — connection is dead).
+    /// </summary>
+    private bool HandleMeshIntroduceRequest(MediationMessage msg)
+    {
+        isIntroducer = true;
+        Program.Log($"[Mesh] Selected as introducer for new peer {msg.PeerID}");
+
+        // Cache the new peer's info. Clear completedTunnelMeshIPs (it's reconnecting with fresh
+        // NAT traversal) and any stale deferred messages.
+        if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+        {
+            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType);
+            if (!string.IsNullOrEmpty(msg.LocalIP))
+                peerLanByMeshIP[msg.PrivateAddressString] = (msg.LocalIP, msg.LocalPort);
+            completedTunnelMeshIPs.Remove(msg.PrivateAddressString);
+            deferredIntroductions.Remove(msg.PrivateAddressString);
+        }
+
+        int introduced = 0;
+        if (msg.OtherPeers != null)
+        {
+            foreach (var peerObj in msg.OtherPeers)
+            {
+                var peerElement = JsonSerializer.Deserialize<JsonElement>(peerObj.ToString());
+                string existingPeerMeshIP = peerElement.TryGetProperty("meshIP", out JsonElement mip) ? mip.GetString() : null;
+                string existingPeerEndpoint = peerElement.TryGetProperty("endpoint", out JsonElement epEl) ? epEl.GetString() : null;
+                int existingPeerNatType = peerElement.TryGetProperty("natType", out JsonElement ntEl) ? ntEl.GetInt32() : -1;
+                string existingPeerID = peerElement.TryGetProperty("peerID", out JsonElement pidEl) ? pidEl.GetString() : null;
+                string existingPeerLocalIP = peerElement.TryGetProperty("localIP", out JsonElement lipEl) ? lipEl.GetString() : null;
+                int existingPeerLocalPort = peerElement.TryGetProperty("localPort", out JsonElement lpEl) ? lpEl.GetInt32() : 0;
+
+                if (string.IsNullOrEmpty(existingPeerMeshIP))
+                {
+                    Program.Log($"[Mesh] Skipping peer with no mesh IP in OtherPeers list");
+                    continue;
+                }
+
+                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType);
+                if (!string.IsNullOrEmpty(existingPeerLocalIP))
+                    peerLanByMeshIP[existingPeerMeshIP] = (existingPeerLocalIP, existingPeerLocalPort);
+
+                // OtherPeers includes all mesh members; we can only send MeshConnectionBegin
+                // over WireGuard to peers we already have tunnels with.
+                if (wireguardTunnel.GetPeer(IPAddress.Parse(existingPeerMeshIP)) == null)
+                {
+                    Program.Log($"[Mesh] Skipping peer {existingPeerID} ({existingPeerMeshIP}) — no WireGuard tunnel to this peer");
+                    continue;
+                }
+
+                // Clean up stale relay state if the pair's NAT types changed.
+                if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+                {
+                    string sortA = string.Compare(existingPeerMeshIP, msg.PrivateAddressString, StringComparison.Ordinal) < 0
+                        ? existingPeerMeshIP : msg.PrivateAddressString;
+                    string sortB = sortA == existingPeerMeshIP ? msg.PrivateAddressString : existingPeerMeshIP;
+                    string pairKey = $"{sortA}|{sortB}";
+                    if (relayedPairs.Remove(pairKey))
+                    {
+                        Program.Log($"[Mesh] Removed stale relay pair {pairKey} (NAT types changed)");
+                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
+                        wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
+                    }
+                }
+
+                // Same-LAN short-circuit for symmetric pairs.
+                string msgPublicIP = msg.EndpointString?.Split(':')[0];
+                string exPublicIP = existingPeerEndpoint?.Split(':')[0];
+                bool sameLan = !string.IsNullOrEmpty(msgPublicIP) &&
+                               msgPublicIP == exPublicIP &&
+                               !string.IsNullOrEmpty(msg.LocalIP) &&
+                               !string.IsNullOrEmpty(existingPeerLocalIP);
+
+                if (!sameLan && msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric)
+                {
+                    string chosenRelay = PickRelay(existingPeerMeshIP, msg.PrivateAddressString) ?? (TunnelOptions.AllowRelayThrough ? meshIP : null);
+                    if (string.IsNullOrEmpty(chosenRelay))
+                    {
+                        Program.Log($"[Mesh] No eligible relay for {existingPeerMeshIP} <-> {msg.PrivateAddressString} and self-relay disabled — skipping pair");
+                        continue;
+                    }
+                    Program.Log($"[Mesh] Both {msg.PeerID} and {existingPeerID} are symmetric NAT — relay via {(chosenRelay == meshIP ? "self (introducer)" : chosenRelay)}");
+
+                    string sortA = string.Compare(existingPeerMeshIP, msg.PrivateAddressString, StringComparison.Ordinal) < 0
+                        ? existingPeerMeshIP : msg.PrivateAddressString;
+                    string sortB = sortA == existingPeerMeshIP ? msg.PrivateAddressString : existingPeerMeshIP;
+                    string pairKey = $"{sortA}|{sortB}";
+
+                    // Release the prior relay if the picker chose someone different.
+                    if (relayAssignments.TryGetValue(pairKey, out var priorRelay) && priorRelay != chosenRelay)
+                    {
+                        if (priorRelay == meshIP)
+                        {
+                            try
+                            {
+                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
+                                wireguardTunnel.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
+                            }
+                            catch { }
+                            RemoveHostedRelay(pairKey);
+                        }
+                        else
+                        {
+                            var release = new MediationMessage(MediationMessageType.MeshRelayAssignment)
+                            {
+                                PeerA = existingPeerMeshIP,
+                                PeerB = msg.PrivateAddressString,
+                                RelayMeshIP = priorRelay,
+                                Release = true
+                            };
+                            try { byte[] rb = Encoding.UTF8.GetBytes(release.Serialize()); MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(priorRelay), MeshControlPort)); } catch { }
+                        }
+                    }
+
+                    relayAssignments[pairKey] = chosenRelay;
+
+                    if (chosenRelay == meshIP)
+                    {
+                        wireguardTunnel.EnableForwarding();
+                        AddHostedRelay(pairKey);
+                    }
+                    else
+                    {
+                        var assignment = new MediationMessage(MediationMessageType.MeshRelayAssignment)
+                        {
+                            PeerA = existingPeerMeshIP,
+                            PeerB = msg.PrivateAddressString,
+                            RelayMeshIP = chosenRelay
+                        };
+                        try
+                        {
+                            byte[] aBytes = Encoding.UTF8.GetBytes(assignment.Serialize());
+                            MeshSend(aBytes, aBytes.Length, new IPEndPoint(IPAddress.Parse(chosenRelay), MeshControlPort));
+                        }
+                        catch (Exception ex)
+                        {
+                            Program.Log($"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex.Message}");
+                        }
+                    }
+
+                    var relayToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                    {
+                        PeerID = msg.PeerID,
+                        EndpointString = msg.EndpointString,
+                        NATType = msg.NATType,
+                        PrivateAddressString = msg.PrivateAddressString,
+                        IsRelay = true,
+                        IntroducerMeshIP = meshIP,
+                        RelayMeshIP = chosenRelay
+                    };
+                    try
+                    {
+                        byte[] relayExBytes = Encoding.UTF8.GetBytes(relayToExisting.Serialize());
+                        MeshSend(relayExBytes, relayExBytes.Length,
+                            new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                    }
+
+                    if (!string.IsNullOrEmpty(msg.PrivateAddressString))
+                    {
+                        var relayToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                        {
+                            PeerID = existingPeerID,
+                            EndpointString = existingPeerEndpoint,
+                            NATType = (NATType)existingPeerNatType,
+                            PrivateAddressString = existingPeerMeshIP,
+                            IsRelay = true,
+                            IntroducerMeshIP = meshIP,
+                            RelayMeshIP = chosenRelay
+                        };
+
+                        if (completedTunnelMeshIPs.Contains(msg.PrivateAddressString))
+                        {
+                            try
+                            {
+                                byte[] relayNewBytes = Encoding.UTF8.GetBytes(relayToNew.Serialize());
+                                MeshSend(relayNewBytes, relayNewBytes.Length,
+                                    new IPEndPoint(IPAddress.Parse(msg.PrivateAddressString), MeshControlPort));
+                            }
+                            catch (Exception ex)
+                            {
+                                Program.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
+                                deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
+                            deferredIntroductions[msg.PrivateAddressString].Add(relayToNew);
+                        }
+                    }
+
+                    relayedPairs.Add(pairKey);
+                    lastRepairAttempt[pairKey] = DateTime.UtcNow;
+
+                    introduced++;
+                    continue;
+                }
+
+                // Hole-punch path: if both share a public IP, use LAN endpoints; otherwise external.
+                string newPeerEndpointForExisting = msg.EndpointString;
+                string existingPeerEndpointForNew = existingPeerEndpoint;
+
+                string newPeerPublicIP = msg.EndpointString?.Split(':')[0];
+                string existingPeerPublicIP = existingPeerEndpoint?.Split(':')[0];
+
+                if (newPeerPublicIP == existingPeerPublicIP &&
+                    !string.IsNullOrEmpty(msg.LocalIP) && !string.IsNullOrEmpty(existingPeerLocalIP))
+                {
+                    newPeerEndpointForExisting = $"{msg.LocalIP}:{msg.LocalPort}";
+                    existingPeerEndpointForNew = $"{existingPeerLocalIP}:{existingPeerLocalPort}";
+                    Program.Log($"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
+                }
+
+                // ExternalEndpointString always carries the external endpoint so the receiver
+                // caches something safe to forward to peers outside this LAN.
+                var connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                {
+                    PeerID = msg.PeerID,
+                    EndpointString = newPeerEndpointForExisting,
+                    ExternalEndpointString = msg.EndpointString,
+                    NATType = msg.NATType,
+                    PrivateAddressString = msg.PrivateAddressString
+                };
+
+                MediationMessage connBeginToNew = null;
+                if (!string.IsNullOrEmpty(msg.PrivateAddressString) && !string.IsNullOrEmpty(existingPeerEndpoint))
+                {
+                    connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                    {
+                        PeerID = existingPeerID,
+                        EndpointString = existingPeerEndpointForNew,
+                        ExternalEndpointString = existingPeerEndpoint,
+                        NATType = (NATType)existingPeerNatType,
+                        PrivateAddressString = existingPeerMeshIP
+                    };
+                }
+
+                bool tunnelToNewReady = completedTunnelMeshIPs.Contains(msg.PrivateAddressString);
+
+                if (tunnelToNewReady)
+                {
+                    try
+                    {
+                        byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
+                        MeshSend(toExistingBytes, toExistingBytes.Length,
+                            new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
+                        Program.Log($"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
+                    }
+                    catch (Exception ex)
+                    {
+                        Program.Log($"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                    }
+
+                    if (connBeginToNew != null)
+                    {
+                        try
+                        {
+                            byte[] toNewBytes = Encoding.UTF8.GetBytes(connBeginToNew.Serialize());
+                            MeshSend(toNewBytes, toNewBytes.Length,
+                                new IPEndPoint(IPAddress.Parse(msg.PrivateAddressString), MeshControlPort));
+                            Program.Log($"[Mesh] Sent MeshConnectionBegin to new peer {msg.PrivateAddressString} (about existing peer {existingPeerMeshIP})");
+                        }
+                        catch (Exception ex)
+                        {
+                            Program.Log($"[Mesh] Failed to send MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
+                        }
+                    }
+                }
+                else
+                {
+                    // Defer BOTH sides until the tunnel to the new peer completes — so hole-punching
+                    // starts simultaneously on both ends.
+                    if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
+                        deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
+
+                    // Reuse IntroducerMeshIP field to tag the routing target for the existing peer.
+                    connBeginToExisting.IntroducerMeshIP = existingPeerMeshIP;
+                    deferredIntroductions[msg.PrivateAddressString].Add(connBeginToExisting);
+
+                    if (connBeginToNew != null)
+                        deferredIntroductions[msg.PrivateAddressString].Add(connBeginToNew);
+
+                    Program.Log($"[Mesh] Deferred MeshConnectionBegin for both peers (tunnel to {msg.PrivateAddressString} not yet established)");
+                }
+
+                introduced++;
+            }
+        }
+
+        // Acknowledge the mediation server regardless — it cleans up the pending record.
+        // If the ack write fails, the connection is dead and caller should break the loop.
+        try
+        {
+            var ack = new MediationMessage(MediationMessageType.MeshIntroduceAck) { PeerID = msg.PeerID };
+            byte[] ackBuffer = Encoding.ASCII.GetBytes(ack.Serialize());
+            stream.Write(ackBuffer, 0, ackBuffer.Length);
+            stream.Flush();
+            int deferredCount = deferredIntroductions.TryGetValue(msg.PrivateAddressString ?? "", out var dList) ? dList.Count : 0;
+            Program.Log($"[Mesh] Sent MeshIntroduceAck for {msg.PeerID} ({introduced} introduced, {deferredCount} deferred, completedTunnels={completedTunnelMeshIPs.Count})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Program.Log($"[Mesh] MeshIntroduceAck write failed, connection lost: {ex.Message}");
+            tcpClient.Close();
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// One iteration's worth of TCP read + JSON dispatch for the primary loop's mediation connection.
+    /// Reads from `stream` into `buffer`, accumulates partial messages in tcpBuffer, parses complete
+    /// JSON objects, and routes each MediationMessage to its handler. Returns false when the server
+    /// closed the connection — caller should break out of the primary loop.
+    /// </summary>
+    private bool ReadAndDispatchMediationMessages(ref string tcpBuffer, ref bool hasPeers)
+    {
+        try
+        {
+            int bytesRead = stream.Read(buffer, 0, buffer.Length);
+            if (bytesRead == 0)
+            {
+                Program.Log("[Mesh] Mediation server closed connection");
+                return false;
+            }
+            tcpBuffer += Encoding.ASCII.GetString(buffer, 0, bytesRead);
+        }
+        catch (IOException) { } // read timeout — no data available this iteration
+
+        // Process any complete JSON messages in the TCP buffer
+        if (tcpBuffer.Length == 0 || !tcpBuffer.Contains('{')) return true;
+
+        int jsonStartIndex = 0;
+        while (jsonStartIndex < tcpBuffer.Length)
+        {
+            int jsonObjStart = tcpBuffer.IndexOf('{', jsonStartIndex);
+            if (jsonObjStart == -1) break;
+
+            int braceCount = 0;
+            int jsonObjEnd = -1;
+            for (int i = jsonObjStart; i < tcpBuffer.Length; i++)
+            {
+                if (tcpBuffer[i] == '{') braceCount++;
+                else if (tcpBuffer[i] == '}')
+                {
+                    braceCount--;
+                    if (braceCount == 0) { jsonObjEnd = i; break; }
+                }
+            }
+
+            if (jsonObjEnd == -1)
+            {
+                // Incomplete JSON — keep the remainder in tcpBuffer for next read
+                tcpBuffer = tcpBuffer.Substring(jsonObjStart);
+                jsonStartIndex = 0; // signal tcpBuffer is already trimmed
+                break;
+            }
+
+            string jsonObject = tcpBuffer.Substring(jsonObjStart, jsonObjEnd - jsonObjStart + 1);
+
+            MediationMessage msg;
+            try
+            {
+                msg = JsonSerializer.Deserialize<MediationMessage>(jsonObject);
+            }
+            catch (Exception parseEx)
+            {
+                Program.Log($"[Mesh] Could not parse JSON object: {parseEx.Message}");
+                jsonStartIndex = jsonObjEnd + 1;
+                continue;
+            }
+
+            if (msg.ID == MediationMessageType.ConnectionRequest)
+            {
+                Program.Log($"[Mesh] Received connection request! ConnectionID: {msg.ConnectionID}, Endpoint: {msg.EndpointString}");
+                Program.Log($"[Mesh] Waiting for ConnectionBegin to establish tunnel...");
+            }
+            else if (msg.ID == MediationMessageType.ConnectionBegin)
+            {
+                HandleConnectionBegin(msg);
+            }
+            else if (msg.ID == MediationMessageType.MeshJoinResponse)
+            {
+                HandleMeshJoinResponse(msg, ref hasPeers);
+            }
+            else if (msg.ID == MediationMessageType.MeshPeerList)
+            {
+                Program.Log($"[Mesh] Updated peer list received: {msg.PeerCount} peers");
+                if (msg.Peers != null && msg.Peers.Length > 0)
+                {
+                    hasPeers = true;
+                    ProcessDiscoveredPeers(msg.Peers);
+                }
+            }
+            else if (msg.ID == MediationMessageType.ConnectionComplete)
+            {
+                Program.Log($"[Mesh] Received ConnectionComplete (routing to tunnel)");
+                Tunnel[] tunnelSnapshot;
+                lock (meshLock)
+                {
+                    tunnelSnapshot = new Tunnel[activeConnectionTunnels.Count];
+                    activeConnectionTunnels.Values.CopyTo(tunnelSnapshot, 0);
+                }
+                foreach (var t in tunnelSnapshot)
+                    t.NotifyConnectionComplete();
+            }
+            else if (msg.ID == MediationMessageType.ServerNotAvailable)
+            {
+                Program.Log($"[Mesh] ServerNotAvailable — target peer unavailable");
+                // Stale-pending cleanup handles the orphan ConnectionRequest after StaleTimeoutSeconds.
+            }
+            else if (msg.ID == MediationMessageType.MeshIntroduceRequest)
+            {
+                if (!HandleMeshIntroduceRequest(msg))
+                    return false; // ack write failed → connection lost
+            }
+
+            jsonStartIndex = jsonObjEnd + 1;
+        }
+
+        // Clear consumed data from the buffer.
+        if (jsonStartIndex >= tcpBuffer.Length)
+            tcpBuffer = "";
+        else if (jsonStartIndex > 0)
+            tcpBuffer = tcpBuffer.Substring(jsonStartIndex);
+
+        return true;
     }
 
     /// <summary>
