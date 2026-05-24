@@ -8,7 +8,7 @@ namespace NATTunnel;
 /// Constructed by the daemon's <see cref="Program.RunMeshMode"/> and handed to
 /// <see cref="MeshProtocolEngine"/> in place of direct static references.
 /// </summary>
-public sealed class DaemonContext : IMeshDaemonContext
+internal sealed class DaemonContext : IMeshDaemonContext
 {
     private MeshOptions options = MeshOptions.FromTunnelOptions();
 

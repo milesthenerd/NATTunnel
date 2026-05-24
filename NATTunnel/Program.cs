@@ -11,7 +11,7 @@ using System.Text.Json;
 
 namespace NATTunnel;
 
-public enum MeshConnectionState { Disconnected, Connecting, Connected, Disconnecting }
+internal enum MeshConnectionState { Disconnected, Connecting, Connected, Disconnecting }
 
 public static class Program
 {
@@ -21,7 +21,7 @@ public static class Program
     public static volatile bool ShutdownRequested;
 
     /// <summary>Current connection state, readable by GUI via HTTP.</summary>
-    public static volatile MeshConnectionState ConnectionState = MeshConnectionState.Disconnected;
+    internal static volatile MeshConnectionState ConnectionState = MeshConnectionState.Disconnected;
 
     /// <summary>Set to true by GUI to request disconnect (leave mesh but keep WireGuard adapter alive).</summary>
     public static volatile bool DisconnectRequested;

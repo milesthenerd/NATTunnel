@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 
 namespace NATTunnel;
 
-public class IPFragment
+internal class IPFragment
 {
     public byte[] Bytes;
     public byte[] ID;

@@ -8,7 +8,7 @@ namespace NATTunnel;
 /// <summary>
 ///Class for the messages sent to and received from the mediation server
 /// </summary>
-public class MediationMessage
+internal class MediationMessage
 {
     /// <summary>
     ///Message type ID
@@ -238,7 +238,7 @@ public class MediationMessage
 ///Different message types sent from the mediation server
 /// NOTE: Do not renumber existing values — the mediation server JS uses matching numbers.
 /// </summary>
-public enum MediationMessageType
+internal enum MediationMessageType
 {
     /// <summary>
     ///Successful TCP connection to the mediation server
@@ -398,7 +398,7 @@ public enum RelayCapacity
 }
 
 /// <summary>What kind of relay failure a peer observed before sending a health report.</summary>
-public enum RelayHealthObservation
+internal enum RelayHealthObservation
 {
     Other = 0,
     DownstreamFailed = 1,

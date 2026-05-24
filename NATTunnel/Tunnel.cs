@@ -15,7 +15,7 @@ using System.Collections;
 
 namespace NATTunnel;
 
-public class Tunnel : IDisposable
+internal class Tunnel : IDisposable
 {
     //TODO: entire class should get reviewed and eventually split up into smaller classes
 

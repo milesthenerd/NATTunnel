@@ -10,7 +10,7 @@ namespace NATTunnel;
 /// in the embedded library. Values reflected here MUST be reread on every reconnect cycle
 /// — the daemon refreshes its snapshot via <see cref="IMeshDaemonContext.ReloadConfig"/>.
 /// </summary>
-public sealed class MeshOptions
+internal sealed class MeshOptions
 {
     // ── Mediation ──
     public IPEndPoint MediationEndpoint { get; init; }

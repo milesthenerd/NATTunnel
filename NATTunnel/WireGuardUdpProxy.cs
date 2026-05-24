@@ -14,7 +14,7 @@ namespace NATTunnel;
 /// Inbound: Tunnel socket receives WireGuard packets → forwards to localhost:51820
 /// Outbound: Listens on multiple localhost ports (one per peer) → routes via tunnel socket
 /// </summary>
-public class WireGuardUdpProxy : IDisposable
+internal class WireGuardUdpProxy : IDisposable
 {
     private UdpClient tunnelSocket;  // The hole-punched socket (shared with Tunnel.cs)
     private readonly Dictionary<int, PeerProxyListener> peerListeners; // Port -> Listener mapping

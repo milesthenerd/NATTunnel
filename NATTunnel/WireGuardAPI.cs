@@ -12,7 +12,7 @@ namespace NATTunnel;
 /// Based on Wintun reference: https://git.zx2c4.com/wintun/about/
 /// </summary>
 [SupportedOSPlatform("windows")]
-public static class WireGuardAPI
+internal static class WireGuardAPI
 {
     // Constants
     private const uint WGDEVICE_HAS_PRIVATE_KEY = 0x00000001;

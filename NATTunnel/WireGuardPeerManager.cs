@@ -7,7 +7,7 @@ using System.IO;
 
 namespace NATTunnel;
 
-public class WireGuardPeerManager
+internal class WireGuardPeerManager
 {
     private readonly List<WireGuardPeer> peers = new();
     private readonly string configPath;

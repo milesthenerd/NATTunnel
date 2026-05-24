@@ -27,7 +27,7 @@ namespace NATTunnel.Embedded;
 /// Handshake initiator is decided by lexical peer-ID comparison: the side with the
 /// larger GUID string is initiator. This avoids both peers trying to send msg-1 at once.
 /// </summary>
-public sealed class MeshPeerProxy : IDisposable
+internal sealed class MeshPeerProxy : IDisposable
 {
     public const byte EnvelopeNoiseHandshake = 0x10;
     public const byte EnvelopeData = 0x01;

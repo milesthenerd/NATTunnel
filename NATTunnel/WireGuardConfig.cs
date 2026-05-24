@@ -4,7 +4,7 @@ using System.Text;
 
 namespace NATTunnel;
 
-public static class WireGuardConfig
+internal static class WireGuardConfig
 {
     public static bool GenerateConfig(string privateKey, string publicKey, string endpoint, int port, string allowedIPs, string interfaceName, string configPath)
     {

@@ -11,7 +11,7 @@ namespace NATTunnel;
 /// Based on: https://git.zx2c4.com/wireguard-nt/about/
 /// </summary>
 [SupportedOSPlatform("windows")]
-public static class WireGuardNTAPI
+internal static class WireGuardNTAPI
 {
     // Constants
     public const int WIREGUARD_KEY_LENGTH = 32;

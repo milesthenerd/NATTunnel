@@ -4,7 +4,7 @@ using System.Net;
 
 namespace NATTunnel;
 
-public class WireGuardPeer
+internal class WireGuardPeer
 {
     public string PublicKey { get; private set; }
     public IPEndPoint Endpoint { get; private set; }

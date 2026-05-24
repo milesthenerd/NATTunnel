@@ -8,7 +8,7 @@ namespace NATTunnel;
 /// Configuration options for NATTunnel mesh networking.
 /// Values are loaded from config.toml at startup.
 /// </summary>
-public static class TunnelOptions
+internal static class TunnelOptions
 {
     /// <summary>
     /// The public IP address and port of the mediation server.

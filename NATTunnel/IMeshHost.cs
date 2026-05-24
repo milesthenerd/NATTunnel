@@ -15,7 +15,7 @@ namespace NATTunnel;
 /// Signatures intentionally match WireGuardTunnel's existing methods so it can implement
 /// this interface without any wrapper layer.
 /// </summary>
-public interface IMeshHost
+internal interface IMeshHost
 {
     /// <summary>Assign this peer's mesh IP and (re)configure the underlying interface.</summary>
     void SetClientIPAndRestart(string assignedIpAddress, byte prefixLength = 24);

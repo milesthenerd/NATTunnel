@@ -1,7 +1,7 @@
 namespace NATTunnel;
 
 /// <summary>Platform abstraction for managing a WireGuard interface.</summary>
-public interface IWireGuardBackend
+internal interface IWireGuardBackend
 {
     /// <summary>Create or open the WireGuard interface. Must be called first.</summary>
     void CreateInterface(string interfaceName);
@@ -29,7 +29,7 @@ public interface IWireGuardBackend
 }
 
 /// <summary>Factory for the platform-appropriate <see cref="IWireGuardBackend"/>.</summary>
-public static class WireGuardBackend
+internal static class WireGuardBackend
 {
     private static IWireGuardBackend instance;
     private static readonly object initLock = new();

@@ -3,7 +3,7 @@ using System.Diagnostics;
 
 namespace NATTunnel;
 
-public static class WireGuardDynamic
+internal static class WireGuardDynamic
 {
     /// <summary>
     /// Dynamically adds a peer to a running WireGuard interface using wg set command

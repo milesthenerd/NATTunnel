@@ -8,7 +8,7 @@ using Microsoft.Win32;
 namespace NATTunnel;
 
 [SupportedOSPlatform("windows")]
-public class WireGuardService
+internal class WireGuardService
 {
     // Windows Service API
     [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]

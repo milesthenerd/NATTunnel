@@ -17,7 +17,7 @@ namespace NATTunnel;
 /// implementation that both the CLI daemon and the embedded library drive.
 /// One instance per Run() lifetime; replaces the giant RunMeshMode local-variable closure.
 /// </summary>
-public class MeshProtocolEngine
+internal class MeshProtocolEngine
 {
     // ── Constants ──
     public const int MeshControlPort = 51888;

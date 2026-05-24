@@ -12,7 +12,7 @@ namespace NATTunnel;
 /// This uses the official WireGuard kernel driver which handles all crypto automatically.
 /// </summary>
 [SupportedOSPlatform("windows")]
-public static class WireGuardNT
+internal static class WireGuardNT
 {
     [DllImport("wireguard.dll", EntryPoint = "WireGuardSetConfiguration", CallingConvention = CallingConvention.StdCall, SetLastError = true)]
     private static extern bool WireGuardSetConfiguration(IntPtr adapter, byte[] configData, uint dataLen);

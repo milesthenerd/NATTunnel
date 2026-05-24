@@ -17,7 +17,7 @@ namespace NATTunnel.Embedded;
 /// the shared UDP dispatcher calls <see cref="ForwardDataPacket"/>. Internal collections
 /// are concurrent-safe.
 /// </summary>
-public sealed class EmbeddedMeshHost : IMeshHost, IDisposable
+internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
 {
     /// <summary>Peer mesh-IP → proxy. Set when MeshProtocolEngine confirms a peer (via AddPeer-equivalent).</summary>
     private readonly ConcurrentDictionary<IPAddress, MeshPeerProxy> peersByMeshIP = new();

@@ -16,7 +16,7 @@ namespace NATTunnel;
 /// or <see cref="ConnectRequested"/> from a non-engine thread (GUI, /connect HTTP) is supported
 /// and how the daemon signals state transitions in to the engine.
 /// </summary>
-public interface IMeshDaemonContext
+internal interface IMeshDaemonContext
 {
     /// <summary>
     /// Logger sink. Implementations must be safe to call from any thread — MeshProtocolEngine logs from

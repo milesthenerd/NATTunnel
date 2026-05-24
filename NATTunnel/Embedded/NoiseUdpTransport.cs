@@ -21,7 +21,7 @@ namespace NATTunnel.Embedded;
 /// counter ≤ (highest - 64) are rejected as too-old; counters within the window must not have
 /// been seen before. This is the standard WireGuard anti-replay design.
 /// </summary>
-public sealed class NoiseUdpTransport : IDisposable
+internal sealed class NoiseUdpTransport : IDisposable
 {
     public const int CounterSize = 8;
     public const int NonceSize = 12;
