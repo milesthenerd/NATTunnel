@@ -3390,8 +3390,17 @@ internal class MeshProtocolEngine
     /// </summary>
     private void ProbeIntroducerHealth_MeshControlOnly()
     {
+        // Symmetric peers historically didn't probe in daemon mode because mesh-control flowed
+        // via WG-routed UDP — a failing tunnel was indistinguishable from a flaky one, and
+        // symmetric peers couldn't take over the introducer role without re-running hole-punch
+        // through mediation anyway. In embedded mode, mesh-control flows through the Noise
+        // tunnel (the same one carrying game data), so a missed probe is reliable evidence the
+        // peer is unreachable; and reconnecting to mediation for re-discovery is exactly what
+        // we want even if mediation later picks someone else as introducer. So: probe regardless
+        // of NAT type when the host isn't a daemon-style WireGuardTunnel.
+        bool isEmbedded = !(host is WireGuardTunnel);
         if (isIntroducer || reconnectedTcpClient != null ||
-            detectedNatType == NATType.Symmetric ||
+            (!isEmbedded && detectedNatType == NATType.Symmetric) ||
             DateTime.UtcNow - lastIntroducerProbe <= introducerProbeInterval) return;
 
         if (string.IsNullOrEmpty(introducerMeshIP))
@@ -3567,6 +3576,13 @@ internal class MeshProtocolEngine
                             context.Log($"[Mesh] Could not locate new introducer's mesh IP — clearing cached introducer pointer (was {oldIntroducerMeshIP})");
                         introducerMeshIP = null;
                     }
+
+                    // Drive tunnel establishment to surviving peers (including the new introducer)
+                    // over the reconnected mediation stream. Without this, introducerMeshIP is set
+                    // but no ConnectionRequest is ever sent, so mesh-control probes drop forever
+                    // ("no proxy registered") and the peer can't rejoin the network.
+                    if (joinResp.Peers != null && joinResp.Peers.Length > 0)
+                        ProcessDiscoveredPeers(joinResp.Peers, reconnectedStream);
                 }
 
                 lastReconnectDiscovery = DateTime.UtcNow;
@@ -3629,8 +3645,10 @@ internal class MeshProtocolEngine
         // Deliberately don't gate on completedTunnelMeshIPs — RemoveDeadPeer strips the introducer
         // from that set when MeshPeerLeave arrives, but introducerMeshIP stays set, and gating on
         // the tunnel-completed set would freeze takeover after a graceful introducer disconnect.
+        // Symmetric-NAT exclusion is daemon-only (see ProbeIntroducerHealth_MeshControlOnly for why).
+        bool isEmbedded = !(host is WireGuardTunnel);
         if (isIntroducer || string.IsNullOrEmpty(introducerMeshIP) ||
-            detectedNatType == NATType.Symmetric ||
+            (!isEmbedded && detectedNatType == NATType.Symmetric) ||
             DateTime.UtcNow - lastIntroducerProbe <= introducerProbeInterval) return;
 
         if (!introducerProbeAckReceived)
