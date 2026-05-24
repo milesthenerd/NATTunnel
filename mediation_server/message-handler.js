@@ -55,6 +55,9 @@ class MessageHandler {
             case MessageTypes.MeshIntroduceAck:
                 this.handleMeshIntroduceAck(message, socket);
                 break;
+            case MessageTypes.MeshPeerRemoved:
+                this.handleMeshPeerRemoved(message, socket);
+                break;
             default:
                 console.log(`[MessageHandler] Unknown message type: ${message.ID}`);
                 break;
@@ -825,6 +828,57 @@ class MessageHandler {
         if (this.pendingIntroductions.has(PeerID)) {
             this.pendingIntroductions.delete(PeerID);
         }
+    }
+
+    /**
+     * Handles MeshPeerRemoved sent by the introducer when it has declared a peer dead
+     * (missed heartbeats over the mesh tunnel). Drops the peer from meshMembers
+     * immediately so it stops appearing in future MeshJoinResponse rosters.
+     *
+     * Only the current introducer is authorized — a non-introducer claiming a peer is
+     * dead could be used to evict honest peers from the network.
+     */
+    handleMeshPeerRemoved(message, socket) {
+        const deadPeerID = message.PeerID;
+        const deadMeshIP = message.PrivateAddressString;
+        if (!deadPeerID && !deadMeshIP) return;
+
+        const sender = this.networkRegistry.findPeerBySocket(socket);
+        if (!sender) return;
+
+        // Locate the network containing this sender so we can check the introducer claim.
+        let senderNetworkID = null;
+        for (const [networkID, network] of this.networkRegistry.networks.entries()) {
+            if (network.has(sender.peerID)) {
+                senderNetworkID = networkID;
+                break;
+            }
+        }
+        if (!senderNetworkID) return;
+
+        const currentIntroducer = this.networkRegistry.getIntroducer(senderNetworkID);
+        if (currentIntroducer !== sender.peerID) {
+            console.log(`[MessageHandler] Ignoring MeshPeerRemoved from non-introducer ${sender.peerID} (current introducer: ${currentIntroducer})`);
+            return;
+        }
+
+        // Prefer peerID lookup; fall back to meshIP scan if only the IP was provided.
+        let targetPeerID = deadPeerID;
+        if (!targetPeerID && deadMeshIP) {
+            const members = this.networkRegistry.meshMembers.get(senderNetworkID);
+            if (members) {
+                for (const member of members.values()) {
+                    if (member.meshIP === deadMeshIP) {
+                        targetPeerID = member.peerID;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!targetPeerID) return;
+
+        console.log(`[MessageHandler] Introducer ${sender.peerID} declared peer ${targetPeerID} (${deadMeshIP || 'unknown IP'}) dead — removing from mesh members`);
+        this.networkRegistry.removeMeshMember(targetPeerID);
     }
 
     /**

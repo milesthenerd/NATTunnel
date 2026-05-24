@@ -462,11 +462,16 @@ internal class Tunnel : IDisposable
         }
         else
         {
-            // Both non-symmetric: standard hole punch
+            // Both non-symmetric: standard hole punch.
+            // In embedded mode we keep punching after the threshold is reached so the peer's
+            // restricted/port-restricted NAT sees our source and opens its inbound mapping —
+            // otherwise whichever side receives the first punch flips to connected, stops
+            // sending, and the other side never gets a packet through.
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = true };
             connectionAttempt.Elapsed += (source, e) =>
             {
-                if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
+                bool keepPunching = holePunchReceivedCount < HOLE_PUNCH_THRESHOLD || wireguardTunnel == null;
+                if (keepPunching)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);
                     // Don't set ConnectionID — introducer-relayed tunnels use mismatched IDs

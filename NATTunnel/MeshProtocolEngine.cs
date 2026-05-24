@@ -80,6 +80,11 @@ internal class MeshProtocolEngine
     private readonly ConcurrentDictionary<string, DateTime> peerLastPong = new();
     private readonly ConcurrentDictionary<string, long> pingSentTicks = new();
     private readonly ConcurrentDictionary<string, DateTime> lastHeartbeatReceivedFrom = new();
+    /// <summary>When each peer's tunnel reached completedTunnelMeshIPs. Used to grace-period
+    /// the heartbeat-repair logic — pings travel on a 5s timer, so peers can legitimately not
+    /// yet see each other in the first ~10s after a fresh tunnel, and firing repair there would
+    /// tear down a perfectly working connection.</summary>
+    private readonly ConcurrentDictionary<string, DateTime> tunnelCompletedAt = new();
     private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType)> peerInfoByMeshIP = new();
     /// <summary>LAN endpoint info parallel to peerInfoByMeshIP, used for same-LAN pair detection.</summary>
     private readonly ConcurrentDictionary<string, (string localIP, int localPort)> peerLanByMeshIP = new();
@@ -982,7 +987,10 @@ internal class MeshProtocolEngine
                                                         lock (meshLock)
                                                         {
                                                             if (peerMeshIPs.TryGetValue(capturedConnID, out string cMeshIP) && !string.IsNullOrEmpty(cMeshIP))
+                                                            {
                                                                 completedTunnelMeshIPs.Add(cMeshIP);
+                                                                tunnelCompletedAt[cMeshIP] = DateTime.UtcNow;
+                                                            }
                                                         }
                                                     }
                                                 );
@@ -1982,6 +1990,21 @@ internal class MeshProtocolEngine
 
         if ((alreadyTracked || wasRelayed) && !string.IsNullOrEmpty(remoteMeshIP))
         {
+            // Skip the teardown if the existing tunnel is demonstrably alive: a recent pong
+            // proves mesh-control is flowing. The introducer's repair MeshConnectionBegin can
+            // race with the latency-ping warm-up window (both peers connected, but neither has
+            // pinged the other yet, so the introducer thinks they're disconnected). Tearing
+            // down a working tunnel here used to drop active game traffic for ~5s while a
+            // fresh tunnel re-established.
+            var tunnelHealthyWindow = TimeSpan.FromSeconds(20);
+            bool tunnelHealthy = peerLastPong.TryGetValue(remoteMeshIP, out var lastPong) &&
+                                 DateTime.UtcNow - lastPong < tunnelHealthyWindow;
+            if (tunnelHealthy)
+            {
+                context.Log($"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel is healthy (last pong {(int)(DateTime.UtcNow - lastPong).TotalSeconds}s ago)");
+                return;
+            }
+
             // Clean up the old connection (direct or relay) to allow reconnect
             context.Log($"[Mesh] Peer {remotePeerID} ({remoteMeshIP}) being re-introduced — cleaning up old connection (relay={wasRelayed})");
             metricReconnects++;
@@ -2017,6 +2040,7 @@ internal class MeshProtocolEngine
                 context.Log($"[Mesh] Relay MeshConnectionBegin missing RelayMeshIP/IntroducerMeshIP — cannot set up relay route");
             }
             completedTunnelMeshIPs.Add(remoteMeshIP);
+            tunnelCompletedAt[remoteMeshIP] = DateTime.UtcNow;
             pendingConnectionRequests.Remove(remotePeerID);
             return;
         }
@@ -2056,6 +2080,7 @@ internal class MeshProtocolEngine
                     if (!string.IsNullOrEmpty(capturedMeshIP))
                     {
                         completedTunnelMeshIPs.Add(capturedMeshIP);
+                        tunnelCompletedAt[capturedMeshIP] = DateTime.UtcNow;
 
                         if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
                         {
@@ -2665,6 +2690,22 @@ internal class MeshProtocolEngine
                 }
                 catch { }
             }
+            // Notify mediation so the server can immediately drop the dead peer from its roster
+            // (otherwise it sits as connected=false for 5min and pollutes future MeshJoinResponse
+            // peer lists, driving stale "no completed tunnel" heartbeat retries on the introducer).
+            if (mediationClient != null && mediationClient.Connected && mediationStream != null)
+            {
+                try
+                {
+                    byte[] rmTcpBytes = Encoding.ASCII.GetBytes(removeMsg.Serialize());
+                    mediationStream.Write(rmTcpBytes, 0, rmTcpBytes.Length);
+                    mediationStream.Flush();
+                }
+                catch (Exception ex)
+                {
+                    context.Log($"[Mesh] Failed to notify mediation of dead peer {deadIP}: {ex.Message}");
+                }
+            }
             RemoveDeadPeer(deadIP);
         }
 
@@ -2801,6 +2842,7 @@ internal class MeshProtocolEngine
                     if (peerMeshIPs.TryGetValue(capturedConnectionID, out string completedMeshIP) && !string.IsNullOrEmpty(completedMeshIP))
                     {
                         completedTunnelMeshIPs.Add(completedMeshIP);
+                        tunnelCompletedAt[completedMeshIP] = DateTime.UtcNow;
                         if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
                         {
                             context.Log($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
@@ -3912,6 +3954,7 @@ internal class MeshProtocolEngine
         peerLanByMeshIP.TryRemove(deadMeshIP, out _);
         relayCandidates.TryRemove(deadMeshIP, out _);
         completedTunnelMeshIPs.Remove(deadMeshIP);
+        tunnelCompletedAt.TryRemove(deadMeshIP, out _);
         heartbeatMissCount.Remove(deadMeshIP);
         lastHeartbeatReceivedFrom.TryRemove(deadMeshIP, out _);
 
@@ -3922,12 +3965,24 @@ internal class MeshProtocolEngine
         }
         activePeerTunnels.Remove(deadMeshIP);
 
-        // Clean up peerMeshIPs entries pointing to this mesh IP
+        // Clean up peerMeshIPs entries pointing to this mesh IP. Dispose the Tunnel before
+        // forgetting it — otherwise its connectionAttempt timer and (for symmetric peers) 256
+        // probe sockets keep firing forever, and each re-introduce stacks another orphan onto
+        // the same target endpoint until the receiver drowns in stale hole-punch traffic.
         var meshIPKeys = peerMeshIPs.Where(kvp => kvp.Value == deadMeshIP).Select(kvp => kvp.Key).ToList();
         foreach (var key in meshIPKeys)
         {
             peerMeshIPs.Remove(key);
-            lock (meshLock) { activeConnectionTunnels.Remove(key); }
+            Tunnel orphan = null;
+            lock (meshLock)
+            {
+                if (activeConnectionTunnels.TryGetValue(key, out orphan))
+                    activeConnectionTunnels.Remove(key);
+            }
+            if (orphan != null)
+            {
+                try { orphan.Dispose(); } catch { }
+            }
         }
 
         // Clean up relayedPairs containing this mesh IP
@@ -4234,6 +4289,18 @@ internal class MeshProtocolEngine
 
                 if (!aReportsB || !bReportsA)
                 {
+                    // Grace period after tunnel establishment: latency pings travel on a 5s
+                    // timer, so two peers who just connected legitimately won't yet appear in
+                    // each other's MeshHeartbeatAck.ConnectedMeshIPs. Firing repair here would
+                    // tear down a working tunnel via the re-introduce path.
+                    var newPeerGrace = TimeSpan.FromSeconds(15);
+                    bool aTooNew = tunnelCompletedAt.TryGetValue(ipA, out var aAt) &&
+                                   DateTime.UtcNow - aAt < newPeerGrace;
+                    bool bTooNew = tunnelCompletedAt.TryGetValue(ipB, out var bAt) &&
+                                   DateTime.UtcNow - bAt < newPeerGrace;
+                    if (aTooNew || bTooNew)
+                        continue;
+
                     // Cooldown check
                     if (lastRepairAttempt.TryGetValue(pairKey, out var lastAttempt) &&
                         DateTime.UtcNow - lastAttempt < repairCooldown)

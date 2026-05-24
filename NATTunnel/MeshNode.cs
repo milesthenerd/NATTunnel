@@ -109,8 +109,13 @@ public class MeshNode : IDisposable
     public void Start()
     {
         // Resolve the mediation hostname to an IP for the MeshOptions snapshot. MeshProtocolEngine expects
-        // an IPEndPoint, so we do the DNS resolution here once.
-        var mediationIP = Dns.GetHostAddresses(mediationHost)[0];
+        // an IPEndPoint, so we do the DNS resolution here once. Force IPv4 — the shared UDP socket below
+        // binds IPAddress.Any (IPv4), and Send() to a v6 endpoint throws WSAEAFNOSUPPORT.
+        var mediationIP = Dns.GetHostAddresses(mediationHost)
+            .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+            ?? throw new InvalidOperationException(
+                $"MeshConfig.MediationEndpoint '{mediationHost}' has no IPv4 address. " +
+                "NATTunnel currently requires an IPv4-reachable mediation server.");
 
         // Embedded mode picks a random local UDP port for the mesh-control channel to avoid
         // colliding with a daemon on 51888 or another embedded process on the same machine.
