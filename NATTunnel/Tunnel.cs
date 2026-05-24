@@ -43,6 +43,15 @@ public class Tunnel : IDisposable
     /// </summary>
     public event Action<byte[]> DataPacketReceived;
 
+    /// <summary>
+    /// Embedded mode only. Fires when a 0x02-framed relay envelope arrives. Raised on the
+    /// tunnel that owns the source endpoint (i.e. the tunnel to the peer who's relaying
+    /// traffic through us). The host is expected to peel the envelope, look up the
+    /// destination peer's tunnel via its relay route table, and forward the inner packet.
+    /// </summary>
+    public event Action<byte[]> RelayEnvelopeReceived;
+
+
     private int maxConnectionTimeout = 15;
     private int symmetricConnectionTimeout = 60; // Symmetric NAT needs more time for random port spray
     private int connectionTimeout;
@@ -56,6 +65,14 @@ public class Tunnel : IDisposable
     private Guid clientID;
     private Action onConnectionFailure; // Callback for when connection fails completely
     private Action onConnectionComplete; // Callback for when connection is successfully established
+
+    /// <summary>
+    /// Fires alongside the internal onConnectionComplete callback when the tunnel transitions
+    /// to the "connected" state. Multi-subscriber event so external observers (e.g. embedded
+    /// mode's MeshPeerProxy waiting to start its Noise handshake) can react without needing
+    /// to inject themselves into MeshProtocolEngine's onConnectionComplete closure.
+    /// </summary>
+    public event Action ConnectionEstablished;
     private DateTime lastActivityTime; // Track last time this tunnel had any activity
     private long totalBytesReceived = 0; // Track total bytes received for activity monitoring
     private long totalBytesSent = 0; // Track total bytes sent for activity monitoring
@@ -521,6 +538,31 @@ public class Tunnel : IDisposable
             return;
         }
 
+        // Embedded mode — 0x02 is the relay envelope. The packet was sent to us because we're
+        // hosting a relay route for the destination peer in the envelope. Raise a separate
+        // event so the host (EmbeddedMeshHost) can peel the envelope and forward verbatim.
+        // We still gate on targetPeerIp matching the source — this filters out cross-talk.
+        if (wireguardTunnel == null && receiveBuffer.Length > 0 && receiveBuffer[0] == 0x02)
+        {
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
+            {
+                RelayEnvelopeReceived?.Invoke(receiveBuffer);
+            }
+            return;
+        }
+
+        // Embedded mode — 0x20 is the mesh-control envelope. Routes through DataPacketReceived
+        // alongside 0x01/0x10 so MeshPeerProxy's OnTunnelPacket switch dispatches it
+        // (HandleMeshControlMessage decrypts and reinjects into MeshProtocolEngine).
+        if (wireguardTunnel == null && receiveBuffer.Length > 0 && receiveBuffer[0] == 0x20)
+        {
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
+            {
+                DataPacketReceived?.Invoke(receiveBuffer);
+            }
+            return;
+        }
+
         string receivedString = Encoding.ASCII.GetString(receiveBuffer);
 
         MediationMessage receivedMessage;
@@ -566,8 +608,9 @@ public class Tunnel : IDisposable
                 // Embedded mode: keep the timer running so the symmetric peer continues
                 // sending hole-punches from the winning probe to the non-symmetric peer
                 // until the non-symmetric peer also flips to connected. Otherwise only
-                // a single hole-punch was sent (from one of 256 probes) and peer 2 likely
-                // missed it. The timer naturally stops on Dispose/Cleanup.
+                // a single hole-punch was sent (from one of 256 probes) and the peer
+                // likely missed it. The timer is stopped explicitly by the embedded
+                // layer once Noise XX completes end-to-end via StopHolePunching().
                 if (wireguardTunnel != null)
                 {
                     connectionAttempt.Enabled = false;
@@ -578,6 +621,7 @@ public class Tunnel : IDisposable
                 // WG mode defers this until after the public-key exchange below.
                 if (wireguardTunnel == null)
                 {
+                    ConnectionEstablished?.Invoke();
                     onConnectionComplete?.Invoke();
                 }
 
@@ -713,6 +757,7 @@ public class Tunnel : IDisposable
                                     // Pass our tunnel socket for proxy routing
                                     var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient);
                                     peerAddedSuccessfully = true;
+                                    ConnectionEstablished?.Invoke();
                                     onConnectionComplete?.Invoke();
 
                                     // Send OUR WireGuard public key back so the peer can add us too.
@@ -824,6 +869,19 @@ public class Tunnel : IDisposable
         if (!connected || targetPeerIp == null || targetPeerPort == 0)
             throw new InvalidOperationException("Tunnel is not connected yet.");
         udpClient.Send(data, data.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+    }
+
+    /// <summary>
+    /// Embedded-mode signal that the upper layer (MeshPeerProxy) is confident the peer is
+    /// fully reachable bidirectionally (e.g. its Noise handshake completed). Lets us stop
+    /// the per-second SymmetricHolePunchAttempt timer that was kept running post-hole-punch
+    /// to ensure the non-symmetric side received at least one of our 256 probes' packets.
+    /// Once Noise handshake completes, the peer has clearly received our packets — no need
+    /// to keep hammering it with hole-punches.
+    /// </summary>
+    public void StopHolePunching()
+    {
+        if (connectionAttempt != null) connectionAttempt.Enabled = false;
     }
 
     /// <summary>

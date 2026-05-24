@@ -360,7 +360,7 @@ public static class Program
             // Retries indefinitely on failure — WireGuard is already initialized above
             // and MUST NOT be recreated (native memory leak).
 
-            MeshNode engine = new MeshNode();
+            MeshProtocolEngine engine = new MeshProtocolEngine();
             engine.Run(wireguardTunnel, meshIP, udpClient, udpProxy, peerID);
 
         }

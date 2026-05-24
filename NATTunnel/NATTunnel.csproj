@@ -5,9 +5,11 @@
     <PackageReference Include="Noise.NET" Version="1.0.0" />
   </ItemGroup>
 
-  <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish. -->
+  <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish.
+       Pack="false" keeps it out of the NuGet — embedded consumers don't need it, and the daemon
+       distribution bundles it via the dist/ packaging scripts separately. -->
   <ItemGroup>
-    <Content Include="..\lib\win-x64\wireguard.dll">
+    <Content Include="..\lib\win-x64\wireguard.dll" Pack="false">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>wireguard.dll</Link>
     </Content>
@@ -19,5 +21,26 @@
     <!-- Windows-only call sites are gated at runtime by OperatingSystem.IsWindows(). -->
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
+
+  <!-- NuGet packaging metadata. Run `dotnet pack -c Release` to produce a .nupkg.        -->
+  <PropertyGroup>
+    <PackageId>NATTunnel</PackageId>
+    <Version>0.1.2</Version>
+    <Authors>NATTunnel contributors</Authors>
+    <Description>Embeddable peer-to-peer mesh networking library with NAT hole-punching, Noise XX end-to-end encryption, and userspace relay forwarding. Designed for games and other apps that need direct UDP peer connectivity without each peer running a server.</Description>
+    <PackageTags>mesh;networking;nat-traversal;hole-punching;p2p;udp;noise;game-networking</PackageTags>
+    <RepositoryUrl>https://github.com/milesthenerd/NATTunnel</RepositoryUrl>
+    <PackageLicenseFile>LICENCE</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- Bundle the LICENCE and README into the .nupkg so they show up on nuget.org. -->
+  <ItemGroup>
+    <None Include="..\LICENCE" Pack="true" PackagePath="\" />
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
 
 </Project>

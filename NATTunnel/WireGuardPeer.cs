@@ -56,6 +56,26 @@ public class WireGuardPeer
     }
 
     /// <summary>
+    /// Placeholder constructor for embedded-mode hosts that don't run WireGuard. Sets
+    /// PublicKey to a synthetic non-validatable value — MeshProtocolEngine protocol code only reads
+    /// it for logging in embedded mode. Do not call from daemon code paths.
+    /// </summary>
+    internal static WireGuardPeer ForEmbedded(IPEndPoint endpoint, IPAddress privateAddress, int connectionId)
+    {
+        var p = (WireGuardPeer)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(typeof(WireGuardPeer));
+        p.PublicKey = "<embedded-no-wireguard>";
+        p.Endpoint = endpoint;
+        p.PrivateAddress = privateAddress;
+        p.ConnectionId = connectionId;
+        p.IsPersistent = false;
+        p.ProxyPort = 0;
+        p.KeepAliveInterval = 5;
+        p.LastActivity = DateTime.UtcNow;
+        p.AllowedIPs = privateAddress != null ? $"{privateAddress}/32" : "";
+        return p;
+    }
+
+    /// <summary>
     /// Reset AllowedIPs back to just this peer's own private address.
     /// Called when relay routes through this peer are being removed.
     /// </summary>

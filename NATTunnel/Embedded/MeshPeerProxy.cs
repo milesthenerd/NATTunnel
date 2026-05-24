@@ -31,6 +31,15 @@ public sealed class MeshPeerProxy : IDisposable
 {
     public const byte EnvelopeNoiseHandshake = 0x10;
     public const byte EnvelopeData = 0x01;
+    /// <summary>Relay envelope. Format: [0x02] [4-byte src-mesh-IPv4] [4-byte dst-mesh-IPv4] [inner].</summary>
+    public const byte EnvelopeRelay = 0x02;
+    public const int RelayEnvelopeHeaderSize = 1 + 4 + 4;
+    /// <summary>
+    /// Mesh-control envelope: [0x20] [counter ‖ ChaCha20-Poly1305(plaintext-JSON)]. Carries
+    /// MeshProtocolEngine's heartbeats / MeshConnectionBegin / MeshRelayAssignment between embedded peers,
+    /// since mesh-IPs aren't OS-routable to port 51888 without a WireGuard interface.
+    /// </summary>
+    public const byte EnvelopeMeshControl = 0x20;
 
     // Buffer big enough for any Noise message; spec max is 65535.
     private const int MaxNoiseMessage = 65535;
@@ -41,6 +50,11 @@ public sealed class MeshPeerProxy : IDisposable
     private readonly byte[] staticPrivateKey;
     private readonly bool isInitiator;
     private readonly string peerLabel;
+    // Non-null when this proxy is in "relayed" mode: outbound bytes get wrapped with
+    // 0x02 ‖ 4-byte src-mesh-IP ‖ 4-byte dst-mesh-IP before being sent through tunnel
+    // (the gateway's tunnel, not a direct tunnel to the destination peer). Null for direct-mode.
+    private readonly byte[] relayDstMeshIPBytes;
+    private readonly byte[] relaySrcMeshIPBytes;
 
     private CancellationTokenSource cts;
     private HandshakeState handshakeState;
@@ -51,6 +65,11 @@ public sealed class MeshPeerProxy : IDisposable
     // Buffer for Noise handshake packets that arrive before Start() runs (peer may complete
     // its hole-punch and send msg-1 before we declare our tunnel connected). Flushed on Start().
     private readonly ConcurrentQueue<byte[]> earlyHandshakePackets = new();
+    // Buffer for outbound mesh-control packets queued before the Noise handshake completed.
+    // Drained from CompleteHandshake. Without this, MeshProtocolEngine silently loses every mesh-control
+    // packet sent during the ~1s gap between tunnel-connected and noise-complete (which is
+    // exactly when MeshProtocolEngine is most eager to send MeshConnectionBegin / MeshRelayAssignment).
+    private readonly ConcurrentQueue<byte[]> pendingMeshControl = new();
     // Cached last-sent handshake message for retransmit (UDP can lose msg-1/msg-2/msg-3).
     private byte[] lastSentHandshakeFrame;
     private Timer handshakeRetransmitTimer;
@@ -58,25 +77,68 @@ public sealed class MeshPeerProxy : IDisposable
     /// <summary>The loopback endpoint the host game sends to when talking to this peer.</summary>
     public IPEndPoint LoopbackEndpoint { get; }
 
+    /// <summary>
+    /// The Tunnel this proxy sends through. For a direct-mode proxy this is the peer's own
+    /// hole-punched tunnel; for a relayed-mode proxy this is the relay peer's tunnel (and
+    /// outbound bytes get wrapped with the 0x02 envelope before being sent).
+    /// </summary>
+    public Tunnel Tunnel => tunnel;
+
     /// <summary>Raised when Noise handshake completes and the proxy is ready to carry game data.</summary>
     public event Action HandshakeComplete;
 
     /// <summary>
+    /// Raised when a 0x20-framed mesh-control packet arrives and decrypts. Payload is the
+    /// plaintext JSON bytes that MeshProtocolEngine's mesh-control listener would normally read from
+    /// the meshControlClient UDP socket.
+    /// </summary>
+    public event Action<byte[]> MeshControlReceived;
+
+    /// <summary>
     /// Construct a proxy for one peer.
     /// </summary>
-    /// <param name="tunnel">Established Tunnel to the remote peer.</param>
+    /// <param name="tunnel">
+    /// Tunnel that carries this peer's traffic. For a direct peer this is the peer's own
+    /// hole-punched Tunnel. For a relayed peer this is the *gateway* peer's Tunnel, and
+    /// <paramref name="relayDestinationMeshIP"/> must be non-null.
+    /// </param>
     /// <param name="loopbackPort">Local loopback port the host game treats as the peer's address.</param>
     /// <param name="hostGamePort">Local loopback port the host game has bound to receive from this peer.</param>
     /// <param name="staticPrivateKey">This node's 32-byte Curve25519 static private key.</param>
     /// <param name="isInitiator">True if this side opens the handshake (lexically larger peer ID wins).</param>
     /// <param name="peerLabel">Short human label for logs (typically the remote peer's GUID).</param>
+    /// <param name="relayDestinationMeshIP">
+    /// For relayed-mode proxies: the destination peer's mesh IPv4 (4 bytes, network order).
+    /// Outbound data gets wrapped with 0x02 ‖ src-mesh-IP ‖ this ‖ inner before sending through
+    /// <paramref name="tunnel"/>. Null for direct-mode proxies.
+    /// </param>
+    /// <param name="ownMeshIP">
+    /// This node's own mesh IP. Required for relayed-mode proxies (placed in the envelope's
+    /// src-mesh-IP field so the destination can dispatch to the right inbound proxy). Ignored
+    /// for direct-mode proxies.
+    /// </param>
     public MeshPeerProxy(Tunnel tunnel, int loopbackPort, int hostGamePort,
-                         byte[] staticPrivateKey, bool isInitiator, string peerLabel)
+                         byte[] staticPrivateKey, bool isInitiator, string peerLabel,
+                         IPAddress relayDestinationMeshIP = null,
+                         IPAddress ownMeshIP = null)
     {
         this.tunnel = tunnel ?? throw new ArgumentNullException(nameof(tunnel));
         this.staticPrivateKey = staticPrivateKey ?? throw new ArgumentNullException(nameof(staticPrivateKey));
         this.isInitiator = isInitiator;
         this.peerLabel = peerLabel ?? "?";
+        // Cache the 4-byte big-endian form once so the hot send path doesn't reallocate.
+        this.relayDstMeshIPBytes = relayDestinationMeshIP?.GetAddressBytes();
+        if (this.relayDstMeshIPBytes != null && this.relayDstMeshIPBytes.Length != 4)
+            throw new ArgumentException("Relay destination mesh IP must be IPv4 (4 bytes).", nameof(relayDestinationMeshIP));
+        if (this.relayDstMeshIPBytes != null)
+        {
+            if (ownMeshIP == null)
+                throw new ArgumentException("ownMeshIP is required for relayed-mode proxies.", nameof(ownMeshIP));
+            this.relaySrcMeshIPBytes = ownMeshIP.GetAddressBytes();
+            if (this.relaySrcMeshIPBytes.Length != 4)
+                throw new ArgumentException("ownMeshIP must be IPv4 (4 bytes).", nameof(ownMeshIP));
+        }
+
         LoopbackEndpoint = new IPEndPoint(IPAddress.Loopback, loopbackPort);
         hostGameEndpoint = new IPEndPoint(IPAddress.Loopback, hostGamePort);
         loopbackSocket = new UdpClient(LoopbackEndpoint);
@@ -118,8 +180,29 @@ public sealed class MeshPeerProxy : IDisposable
     private void RetransmitHandshake()
     {
         if (handshakeDone || lastSentHandshakeFrame == null) return;
-        try { tunnel.SendDataPacket(lastSentHandshakeFrame); }
+        try { SendThroughTunnel(lastSentHandshakeFrame); }
         catch { /* tunnel may be gone */ }
+    }
+
+    /// <summary>
+    /// Send <paramref name="inner"/> through the underlying tunnel. For direct-mode proxies
+    /// the inner is forwarded verbatim. For relayed-mode proxies it is wrapped with the
+    /// 0x02 ‖ src-IP ‖ dst-IP envelope first.
+    /// </summary>
+    private void SendThroughTunnel(byte[] inner)
+    {
+        if (relayDstMeshIPBytes == null)
+        {
+            tunnel.SendDataPacket(inner);
+            return;
+        }
+
+        var framed = new byte[RelayEnvelopeHeaderSize + inner.Length];
+        framed[0] = EnvelopeRelay;
+        Buffer.BlockCopy(relaySrcMeshIPBytes, 0, framed, 1, 4);
+        Buffer.BlockCopy(relayDstMeshIPBytes, 0, framed, 5, 4);
+        Buffer.BlockCopy(inner, 0, framed, RelayEnvelopeHeaderSize, inner.Length);
+        tunnel.SendDataPacket(framed);
     }
 
     private void SendNoiseMessage(byte[] payload)
@@ -132,10 +215,21 @@ public sealed class MeshPeerProxy : IDisposable
         Buffer.BlockCopy(buf, 0, framed, 1, bytesWritten);
 
         lastSentHandshakeFrame = framed;
-        try { tunnel.SendDataPacket(framed); }
+        try { SendThroughTunnel(framed); }
         catch (Exception ex) { Console.Error.WriteLine($"[Noise/{peerLabel}] handshake send failed: {ex.Message}"); }
 
         if (t != null) CompleteHandshake(t);
+    }
+
+    /// <summary>
+    /// Deliver an inner packet (just the envelope-stripped bytes — already starts with 0x01
+    /// or 0x10) to this proxy as if it had arrived directly on its tunnel. Called by
+    /// EmbeddedMeshHost.ForwardRelayEnvelope on the destination node when a relay-forwarded
+    /// envelope arrives.
+    /// </summary>
+    public void DeliverRelayedInner(byte[] inner)
+    {
+        OnTunnelPacket(inner);
     }
 
     private void OnTunnelPacket(byte[] framed)
@@ -160,6 +254,78 @@ public sealed class MeshPeerProxy : IDisposable
             case EnvelopeData:
                 HandleDataMessage(framed.AsSpan(1));
                 break;
+            case EnvelopeMeshControl:
+                HandleMeshControlMessage(framed.AsSpan(1));
+                break;
+        }
+    }
+
+    private void HandleMeshControlMessage(ReadOnlySpan<byte> body)
+    {
+        if (!handshakeDone || transport == null) return;
+
+        var plaintextBuf = new byte[MaxNoiseMessage];
+        int read = transport.Decrypt(body, plaintextBuf);
+        if (read < 0)
+        {
+            // Silently drop. When multiple proxies share a tunnel (direct + relayed-via-this-peer),
+            // each one tries to decrypt every 0x20 packet that arrives. Only the proxy whose Noise
+            // keys match the source peer succeeds; the others fail. That's the design — failed
+            // decrypts here are expected noise, not errors.
+            return;
+        }
+        var plaintext = new byte[read];
+        Buffer.BlockCopy(plaintextBuf, 0, plaintext, 0, read);
+        try { MeshControlReceived?.Invoke(plaintext); }
+        catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] MeshControlReceived handler threw: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Encrypt the given mesh-control JSON bytes via this peer's Noise transport and send
+    /// them through the underlying tunnel with the 0x20 envelope. If the handshake hasn't
+    /// completed yet, the packet is queued and sent automatically when the handshake finishes.
+    /// Returns true unconditionally — the caller (MeshProtocolEngine) doesn't have retry logic and would
+    /// otherwise lose mesh-control packets during the ~1s tunnel-connected-but-noise-not-done
+    /// window. (That window is exactly when MeshProtocolEngine is most eager to send MeshConnectionBegin
+    /// and MeshRelayAssignment to a freshly-connected peer.)
+    /// </summary>
+    public bool SendMeshControl(byte[] plaintext, int length)
+    {
+        if (!handshakeDone || transport == null)
+        {
+            // Queue a defensive copy — caller may reuse its buffer.
+            var copy = new byte[length];
+            Buffer.BlockCopy(plaintext, 0, copy, 0, length);
+            pendingMeshControl.Enqueue(copy);
+            return true;
+        }
+        return TryEncryptAndSendMeshControl(plaintext.AsSpan(0, length));
+    }
+
+    private bool TryEncryptAndSendMeshControl(ReadOnlySpan<byte> plaintext)
+    {
+        // Layout: [0x20] [counter (8)] [ciphertext (length)] [Poly1305 tag (16)]
+        var framed = new byte[1 + NoiseUdpTransport.CounterSize + plaintext.Length + NoiseUdpTransport.TagSize];
+        framed[0] = EnvelopeMeshControl;
+
+        int written;
+        lock (sendLock)
+        {
+            if (transport == null) return false;
+            written = transport.Encrypt(plaintext, framed.AsSpan(1));
+        }
+        if (written != framed.Length - 1) return false;
+
+        try { SendThroughTunnel(framed); }
+        catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] mesh-control send failed: {ex.Message}"); return false; }
+        return true;
+    }
+
+    private void DrainPendingMeshControl()
+    {
+        while (pendingMeshControl.TryDequeue(out var queued))
+        {
+            TryEncryptAndSendMeshControl(queued);
         }
     }
 
@@ -200,6 +366,23 @@ public sealed class MeshPeerProxy : IDisposable
 
         // Now safe to start carrying game payloads.
         _ = Task.Run(() => LoopbackReceiveLoop(cts.Token));
+
+        // Flush any mesh-control packets queued during the tunnel-connected-but-noise-not-done
+        // window. MeshProtocolEngine often sends MeshConnectionBegin / MeshRelayAssignment as soon as the
+        // tunnel reports connected, but Noise isn't ready yet so those packets piled up here.
+        DrainPendingMeshControl();
+
+        // Noise completing end-to-end means the peer is reachable bidirectionally — no longer
+        // need the per-second SymmetricHolePunchAttempt timer that was kept running post-hole-punch
+        // to ensure the non-symmetric side got at least one of our probes' packets. Stop it now
+        // so we're not spamming the peer with hole-punches forever.
+        // (Skip on relayed-mode proxies — they don't own the gateway's tunnel and shouldn't
+        // disable hole-punching for an unrelated direct connection.)
+        if (relayDstMeshIPBytes == null)
+        {
+            try { tunnel.StopHolePunching(); } catch { }
+        }
+
         HandshakeComplete?.Invoke();
     }
 
@@ -251,7 +434,7 @@ public sealed class MeshPeerProxy : IDisposable
                     continue;
                 }
 
-                try { tunnel.SendDataPacket(framed); }
+                try { SendThroughTunnel(framed); }
                 catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] tunnel send failed: {ex.Message}"); }
             }
         }

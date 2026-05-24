@@ -4,11 +4,11 @@ using System.Net;
 namespace NATTunnel;
 
 /// <summary>
-/// Bridge between the mesh-protocol core (MeshNode) and whatever real networking the
+/// Bridge between the mesh-protocol core (MeshProtocolEngine) and whatever real networking the
 /// host has wired up (today: a WireGuard interface managed by WireGuardTunnel; eventually:
 /// a userspace loopback-proxy for embedded library use).
 ///
-/// MeshNode never touches WireGuard directly — it goes through this interface so the
+/// MeshProtocolEngine never touches WireGuard directly — it goes through this interface so the
 /// same protocol logic can drive either the daemon's kernel WireGuard or an embedded
 /// userspace transport.
 ///
@@ -57,7 +57,30 @@ public interface IMeshHost
 
     /// <summary>
     /// Host-specific setup for a newly created Tunnel. Daemon mode wires the WireGuardTunnel
-    /// reference into the Tunnel so it can perform WG key exchange; embedded mode does nothing.
+    /// reference into the Tunnel so it can perform WG key exchange. Embedded mode uses this
+    /// hook to create a <see cref="Embedded.MeshPeerProxy"/> for the new peer and register
+    /// it for data-path dispatch.
     /// </summary>
-    void ConfigureNewTunnel(Tunnel tunnel);
+    /// <param name="tunnel">The Tunnel that's just been created and registered with the engine.</param>
+    /// <param name="remotePeerID">Remote peer's GUID string (used by embedded mode's Noise initiator-decision logic). May be empty for reconnect-side tunnels where the peer ID isn't yet known.</param>
+    /// <param name="remoteMeshIP">Remote peer's mesh IP. May be empty for early-binding tunnels.</param>
+    void ConfigureNewTunnel(Tunnel tunnel, string remotePeerID, string remoteMeshIP);
+
+    /// <summary>
+    /// Fired after <see cref="AddRelayRoute"/> succeeds. Carries the full peer identity so the
+    /// host can do follow-up work that AddRelayRoute's IP-only signature lacks context for.
+    /// Embedded hosts use this to construct a relayed MeshPeerProxy + start its Noise handshake.
+    /// Daemon hosts can ignore it.
+    /// </summary>
+    void OnRelayPeerEstablished(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP);
+
+    /// <summary>
+    /// Attempt to send a mesh-control packet (heartbeat, MeshConnectionBegin, MeshRelayAssignment, etc.)
+    /// to the peer identified by <paramref name="destinationMeshIP"/>. Returns true if the host
+    /// took responsibility for delivery (and MeshProtocolEngine should NOT fall back to its native path);
+    /// false to let MeshProtocolEngine send via its own meshControlClient (the daemon-mode WG-routed path).
+    /// Embedded hosts return true after encrypting + tunneling via the destination's MeshPeerProxy.
+    /// Daemon hosts return false — MeshProtocolEngine's existing UDP-to-mesh-IP send path handles it.
+    /// </summary>
+    bool SendMeshControl(IPAddress destinationMeshIP, byte[] data, int length);
 }

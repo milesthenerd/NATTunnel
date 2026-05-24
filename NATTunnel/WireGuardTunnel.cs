@@ -901,10 +901,27 @@ namespace NATTunnel
             GetUdpProxy()?.ForwardToWireGuard(data, sourceEndpoint);
         }
 
-        public void ConfigureNewTunnel(Tunnel tunnel)
+        public void ConfigureNewTunnel(Tunnel tunnel, string remotePeerID, string remoteMeshIP)
         {
             // Daemon mode: wire this WireGuardTunnel into the Tunnel so it can do WG key exchange.
+            // Daemon ignores remotePeerID / remoteMeshIP — WG identity comes from the public key
+            // exchange, not the mesh-protocol peer ID. They're here for the embedded mode hook.
+            _ = remotePeerID;
+            _ = remoteMeshIP;
             tunnel.SetWireGuardTunnel(this);
+        }
+
+        public void OnRelayPeerEstablished(string remotePeerID, System.Net.IPAddress remoteMeshIP, System.Net.IPAddress gatewayMeshIP)
+        {
+            // Daemon mode: WG kernel routing handles relayed traffic transparently. No-op here.
+            _ = remotePeerID; _ = remoteMeshIP; _ = gatewayMeshIP;
+        }
+
+        public bool SendMeshControl(System.Net.IPAddress destinationMeshIP, byte[] data, int length)
+        {
+            // Daemon: defer to MeshProtocolEngine's existing meshControlClient.Send path (returns false).
+            _ = destinationMeshIP; _ = data; _ = length;
+            return false;
         }
         public int GetPeerCount() => peerManager.GetPeerCount();
         public string GetConfigPath() => configFilePath;
