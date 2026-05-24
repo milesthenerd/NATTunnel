@@ -2123,6 +2123,7 @@ public class MeshProtocolEngine
     private void PerformGracefulShutdown()
     {
         context.Log("[Mesh] Graceful shutdown initiated");
+        int recipientCount = 0;
         try
         {
             var leaveMsg = new MediationMessage(MediationMessageType.MeshPeerLeave)
@@ -2138,18 +2139,30 @@ public class MeshProtocolEngine
                 {
                     MeshSend(leaveBytes, leaveBytes.Length,
                         new IPEndPoint(peer.PrivateAddress, MeshControlPort));
+                    recipientCount++;
                 }
                 catch (Exception ex)
                 {
                     context.Log($"[Mesh] Failed to send MeshPeerLeave to {peer.PrivateAddress}: {ex.Message}");
                 }
             }
-            context.Log($"[Mesh] Sent MeshPeerLeave to {allPeers.Count()} peer(s)");
+            context.Log($"[Mesh] Sent MeshPeerLeave to {recipientCount} peer(s)");
         }
         catch (Exception ex)
         {
             context.Log($"[Mesh] Error sending graceful shutdown message: {ex.Message}");
         }
+
+        // Brief drain delay before Run() returns and the finally block tears down sockets.
+        // Without this, MeshPeerLeave packets sit in the kernel send queue when the socket
+        // closes and get dropped — peers never learn we left, and their PeerDisconnected
+        // event doesn't fire until the heartbeat-miss threshold (~75s with defaults).
+        // Skip the delay when there were no recipients (no point waiting).
+        if (recipientCount > 0)
+        {
+            try { System.Threading.Thread.Sleep(500); } catch { }
+        }
+
         context.ShutdownRequested = true;
     }
 
@@ -2610,16 +2623,21 @@ public class MeshProtocolEngine
                 context.Log($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{peerDeadThreshold})");
                 if (heartbeatMissCount[ip] >= peerDeadThreshold)
                 {
-                    // Symmetric NAT hole-punching can take longer than the heartbeat window —
-                    // don't declare dead if a tunnel attempt is still in flight.
+                    // Symmetric NAT hole-punching can take longer than the heartbeat window,
+                    // so defer declaring a peer dead if its tunnel attempt is still in flight.
+                    // BUT only defer while the tunnel hasn't completed yet. Once a peer is in
+                    // completedTunnelMeshIPs, missed heartbeats mean the peer disappeared —
+                    // not that hole-punching is slow. Without this distinction, the dead peer's
+                    // stale activePeerTunnels entry would keep the defer guard alive forever
+                    // (the only place that entry gets cleared is RemoveDeadPeer itself).
                     string peerPID = peerInfoByMeshIP.TryGetValue(ip, out var pi) ? pi.peerID : null;
                     bool hasPendingTunnel = (!string.IsNullOrEmpty(peerPID) && activePeerTunnels.ContainsKey(peerPID)) ||
                                             activePeerTunnels.ContainsKey(ip) ||
                                             (!string.IsNullOrEmpty(peerPID) && pendingConnectionRequests.ContainsKey(peerPID));
-                    if (hasPendingTunnel)
+                    bool tunnelEverCompleted = completedTunnelMeshIPs.Contains(ip);
+                    if (hasPendingTunnel && !tunnelEverCompleted)
                     {
-                        context.Log($"[Mesh] Peer {ip} would be dead but has pending tunnel — deferring removal");
-                        heartbeatMissCount[ip] = 0;
+                        context.Log($"[Mesh] Peer {ip} would be dead but tunnel still establishing — deferring removal");
                         continue;
                     }
                     deadPeers.Add(ip);

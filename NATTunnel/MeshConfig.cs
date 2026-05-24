@@ -66,9 +66,21 @@ public class MeshConfig
 
     /// <summary>
     /// How often this node sends heartbeats to the introducer (and the introducer sends to peers).
-    /// 15s default. Lower = faster peer-down detection at the cost of more traffic.
+    /// 5s default for embedded mode (game-like latency-sensitive use cases). Combined with
+    /// <see cref="DeadPeerThreshold"/> this controls peer-down detection time:
+    /// <c>HeartbeatInterval × DeadPeerThreshold</c> seconds before a hard-killed peer is declared
+    /// dead and <see cref="MeshNode.PeerDisconnected"/> fires. Lower = faster detection at the
+    /// cost of more traffic.
     /// </summary>
-    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(15);
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Number of consecutive missed heartbeat acks before a peer is declared dead.
+    /// 3 by default — combined with the 5s default <see cref="HeartbeatInterval"/> this gives
+    /// ~15s detection latency for a hard-killed peer. Graceful disconnects (via Dispose) are
+    /// detected almost immediately via the MeshPeerLeave message.
+    /// </summary>
+    public int DeadPeerThreshold { get; set; } = 3;
 
     /// <summary>
     /// Inclusive start of the loopback port range the library allocates from when binding a
@@ -95,6 +107,8 @@ public class MeshConfig
         if (HostGamePort <= 0 || HostGamePort > 65535) throw new ArgumentException("MeshConfig.HostGamePort must be a valid UDP port.");
         if (PersistentStaticPrivateKey != null && PersistentStaticPrivateKey.Length != 32)
             throw new ArgumentException("MeshConfig.PersistentStaticPrivateKey must be 32 bytes (Curve25519 private key).");
+        if (HeartbeatInterval <= TimeSpan.Zero) throw new ArgumentException("MeshConfig.HeartbeatInterval must be positive.");
+        if (DeadPeerThreshold < 1) throw new ArgumentException("MeshConfig.DeadPeerThreshold must be at least 1.");
         if (LoopbackPortRangeStart < 1 || LoopbackPortRangeStart > 65535)
             throw new ArgumentException("MeshConfig.LoopbackPortRangeStart out of range.");
         if (LoopbackPortRangeEnd < LoopbackPortRangeStart || LoopbackPortRangeEnd > 65535)

@@ -127,7 +127,7 @@ public class MeshNode : IDisposable
             MeshSubnet = "10.5",
             HeartbeatIntervalSeconds = (int)config.HeartbeatInterval.TotalSeconds,
             ProbeIntervalSeconds = 10,
-            DeadThreshold = 5,
+            DeadThreshold = config.DeadPeerThreshold,
             RepairCooldownSeconds = 15,
             GracePeriodSecondsNonSymmetric = 30,
             GracePeriodSecondsSymmetric = 5,
