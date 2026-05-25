@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using NATTunnel.Embedded;
@@ -342,6 +346,165 @@ public class MeshNode : IDisposable
             try { PeerDisconnected?.Invoke(removed); }
             catch (Exception ex) { Console.Error.WriteLine($"[Embedded] PeerDisconnected handler threw: {ex.Message}"); }
         }
+    }
+
+    /// <summary>
+    /// Pre-flight probe: opens a transient TCP+TLS+UDP session to the mediation server, runs the
+    /// NAT-type detection handshake, and returns the result without joining a network. Lets host
+    /// apps preview the user's connectivity (e.g. warn about Symmetric NAT) before constructing
+    /// a full <see cref="MeshNode"/>.
+    ///
+    /// All sockets opened by the probe are closed before the method returns. Safe to call
+    /// multiple times. Throws <see cref="ArgumentException"/> for malformed endpoint syntax;
+    /// other failures (DNS, TCP, TLS, UDP test timeout) populate
+    /// <see cref="NetworkProbeResult.ErrorMessage"/> instead of throwing.
+    /// </summary>
+    /// <param name="mediationEndpoint">"host:port" string, matching <see cref="MeshConfig.MediationEndpoint"/>.</param>
+    /// <param name="cancellationToken">Cancels the probe; the result's ErrorMessage will reflect cancellation.</param>
+    public static async Task<NetworkProbeResult> ProbeNetworkAsync(
+        string mediationEndpoint,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(mediationEndpoint))
+            throw new ArgumentException("mediationEndpoint is required.", nameof(mediationEndpoint));
+
+        int colon = mediationEndpoint.LastIndexOf(':');
+        if (colon < 0)
+            throw new ArgumentException("mediationEndpoint must be 'host:port'.", nameof(mediationEndpoint));
+        string host = mediationEndpoint.Substring(0, colon);
+        if (!int.TryParse(mediationEndpoint.Substring(colon + 1), out int port) || port <= 0 || port > 65535)
+            throw new ArgumentException("mediationEndpoint port must be a valid TCP port.", nameof(mediationEndpoint));
+
+        // Same IPv4-only resolve trick as Start() — the UDP socket below binds IPv4, so a v6
+        // mediation endpoint would fail with WSAEAFNOSUPPORT on Send.
+        IPAddress mediationIP;
+        try
+        {
+            mediationIP = (await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+        }
+        catch (Exception ex)
+        {
+            return new NetworkProbeResult { NatType = NATType.Unknown, ErrorMessage = $"DNS resolution failed: {ex.Message}" };
+        }
+        if (mediationIP == null)
+            return new NetworkProbeResult { NatType = NATType.Unknown, ErrorMessage = $"Mediation endpoint '{host}' has no IPv4 address." };
+
+        var localIP = Tunnel.GetLanIPAddress();
+
+        TcpClient tcp = null;
+        SslStream tls = null;
+        UdpClient udp = null;
+        try
+        {
+            tcp = new TcpClient();
+            // 5s TCP connect budget — mediation should respond promptly; longer waits suggest a routing problem.
+            using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                connectCts.CancelAfter(TimeSpan.FromSeconds(5));
+                await tcp.ConnectAsync(mediationIP, port, connectCts.Token).ConfigureAwait(false);
+            }
+
+            tls = new SslStream(tcp.GetStream(), false, (sender, cert, chain, errors) => true);
+            await tls.AuthenticateAsClientAsync(mediationIP.ToString()).ConfigureAwait(false);
+            tls.ReadTimeout = 5000;
+
+            udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
+            int localUdpPort = ((IPEndPoint)udp.Client.LocalEndPoint).Port;
+
+            // Read first message ("Connected").
+            string buffer = "";
+            byte[] readBuf = new byte[4096];
+
+            async Task<MediationMessage> ReadOneAsync()
+            {
+                while (true)
+                {
+                    var (m, rest) = TryExtractJson(buffer);
+                    if (m != null) { buffer = rest; return m; }
+                    int n = await tls.ReadAsync(readBuf.AsMemory(0, readBuf.Length), cancellationToken).ConfigureAwait(false);
+                    if (n == 0) throw new IOException("Mediation server closed the connection.");
+                    buffer += Encoding.ASCII.GetString(readBuf, 0, n);
+                }
+            }
+
+            await ReadOneAsync().ConfigureAwait(false); // Connected
+
+            // Send NATTypeRequest.
+            var natReq = new MediationMessage(MediationMessageType.NATTypeRequest)
+            {
+                LocalPort = localUdpPort,
+                LocalIP = localIP?.ToString(),
+                ClientID = Guid.NewGuid()
+            };
+            byte[] natBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
+            await tls.WriteAsync(natBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
+
+            var natTestBegin = await ReadOneAsync().ConfigureAwait(false);
+            if (natTestBegin.ID == MediationMessageType.NATTestBegin)
+            {
+                var natTest = new MediationMessage(MediationMessageType.NATTest) { ClientID = natReq.ClientID };
+                byte[] testBytes = Encoding.ASCII.GetBytes(natTest.Serialize());
+                udp.Send(testBytes, testBytes.Length, new IPEndPoint(mediationIP, natTestBegin.NATTestPortOne));
+                udp.Send(testBytes, testBytes.Length, new IPEndPoint(mediationIP, natTestBegin.NATTestPortTwo));
+            }
+
+            var natResp = await ReadOneAsync().ConfigureAwait(false);
+            if (natResp.ID != MediationMessageType.NATTypeResponse)
+                return new NetworkProbeResult
+                {
+                    MediationReachable = true,
+                    NatType = NATType.Unknown,
+                    LocalIP = localIP,
+                    ErrorMessage = $"Mediation server returned unexpected message ID {(int)natResp.ID} instead of NATTypeResponse."
+                };
+
+            return new NetworkProbeResult
+            {
+                MediationReachable = true,
+                NatType = natResp.NATType,
+                LocalIP = localIP,
+                LikelyNeedsRelay = natResp.NATType == NATType.Symmetric
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            return new NetworkProbeResult { NatType = NATType.Unknown, LocalIP = localIP, ErrorMessage = "Probe cancelled or timed out." };
+        }
+        catch (Exception ex)
+        {
+            return new NetworkProbeResult { NatType = NATType.Unknown, LocalIP = localIP, ErrorMessage = ex.Message };
+        }
+        finally
+        {
+            try { udp?.Dispose(); } catch { }
+            try { tls?.Dispose(); } catch { }
+            try { tcp?.Dispose(); } catch { }
+        }
+    }
+
+    // Minimal JSON splitter mirroring MeshProtocolEngine.ExtractFirstJson — kept local so the
+    // probe is self-contained and doesn't depend on the engine's internal helpers.
+    private static (MediationMessage msg, string remainder) TryExtractJson(string data)
+    {
+        int start = data.IndexOf('{');
+        if (start == -1) return (null, data);
+        int braces = 0;
+        for (int i = start; i < data.Length; i++)
+        {
+            if (data[i] == '{') braces++;
+            else if (data[i] == '}')
+            {
+                braces--;
+                if (braces == 0)
+                {
+                    string jsonObj = data.Substring(start, i - start + 1);
+                    string rest = data.Substring(i + 1);
+                    return (JsonSerializer.Deserialize<MediationMessage>(jsonObj), rest);
+                }
+            }
+        }
+        return (null, data);
     }
 
     private static int PickRandomFreeUdpPort()
