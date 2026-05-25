@@ -385,7 +385,14 @@ internal enum MediationMessageType
     /// <summary>Chosen relay → introducer: confirms or rejects the assignment.</summary>
     MeshRelayAssignmentAck, // 36
     /// <summary>Relayed peer → introducer: reports that the current relay is degraded.</summary>
-    MeshRelayHealthReport   // 37
+    MeshRelayHealthReport,  // 37
+    /// <summary>
+    /// Peer → mediation server: announce a mesh IP change after collision reassignment.
+    /// Sent only when SHA256(peerID)-derived mesh IP collided with an existing peer in the
+    /// network and the client picked a new one. Carries the new mesh IP in PrivateAddressString.
+    /// Server updates its meshMembers record without re-running introducer election.
+    /// </summary>
+    MeshIPReassign          // 38
     // Note: Latency ping/pong uses binary 0xFF-prefixed packets, not JSON message types
 }
 

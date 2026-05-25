@@ -58,6 +58,9 @@ class MessageHandler {
             case MessageTypes.MeshPeerRemoved:
                 this.handleMeshPeerRemoved(message, socket);
                 break;
+            case MessageTypes.MeshIPReassign:
+                this.handleMeshIPReassign(message, socket);
+                break;
             default:
                 console.log(`[MessageHandler] Unknown message type: ${message.ID}`);
                 break;
@@ -754,9 +757,13 @@ class MessageHandler {
             const peersToIntroduce = meshMembers.filter(p => p.peerID !== introducer.peerID);
 
             // Build the response peer list: use active peers, but ensure the introducer
-            // is included even if it was only found via meshMembers
+            // is included even if it was only found via meshMembers. Skip when the introducer
+            // IS the joining peer itself (self-election path): the client recognizes self-introducer
+            // by IntroducerPeerID matching its own peerID, and inserting a self-entry into Peers
+            // makes the client's collision check see its own mesh IP as "taken" and reassign.
             let responsePeers = [...otherPeers];
-            if (!responsePeers.find(p => p.peerID === introducer.peerID)) {
+            if (introducer.peerID !== PeerID &&
+                !responsePeers.find(p => p.peerID === introducer.peerID)) {
                 responsePeers.push({
                     peerID: introducer.peerID,
                     endpoint: introducer.endpoint,
@@ -838,6 +845,37 @@ class MessageHandler {
      * Only the current introducer is authorized — a non-introducer claiming a peer is
      * dead could be used to evict honest peers from the network.
      */
+    /**
+     * Handles MeshIPReassign sent by a peer after it detected a mesh-IP collision in its
+     * MeshJoinResponse and locally reassigned to a new IP. Updates the stored meshIP for that
+     * peer so subsequent MeshJoinResponse rosters carry the corrected value. Without this,
+     * other peers receive the original (now-stale) mesh IP and can't reach the reassigned peer.
+     */
+    handleMeshIPReassign(message, socket) {
+        const newMeshIP = message.PrivateAddressString;
+        if (!newMeshIP) return;
+
+        const sender = this.networkRegistry.findPeerBySocket(socket);
+        if (!sender) return;
+
+        // Locate the network containing this sender.
+        let senderNetworkID = null;
+        for (const [networkID, network] of this.networkRegistry.networks.entries()) {
+            if (network.has(sender.peerID)) {
+                senderNetworkID = networkID;
+                break;
+            }
+        }
+        if (!senderNetworkID) return;
+
+        const members = this.networkRegistry.meshMembers.get(senderNetworkID);
+        const network = this.networkRegistry.networks.get(senderNetworkID);
+        const oldMeshIP = sender.meshIP;
+        if (members && members.has(sender.peerID)) members.get(sender.peerID).meshIP = newMeshIP;
+        if (network && network.has(sender.peerID)) network.get(sender.peerID).meshIP = newMeshIP;
+        console.log(`[MessageHandler] Peer ${sender.peerID} reassigned mesh IP: ${oldMeshIP} -> ${newMeshIP}`);
+    }
+
     handleMeshPeerRemoved(message, socket) {
         const deadPeerID = message.PeerID;
         const deadMeshIP = message.PrivateAddressString;

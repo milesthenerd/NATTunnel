@@ -424,6 +424,27 @@ internal class MeshProtocolEngine
                     {
                         context.Log($"[Mesh] WARNING: Mesh IP collision detected ({originalMeshIP} already taken). Reassigning to {meshIP}.");
                         host.SetClientIPAndRestart(meshIP, 16);
+
+                        // Notify the mediation server of the reassignment. Without this the server
+                        // keeps serving our original (colliding) mesh IP to other peers, who can't
+                        // then reach us. Suppress send failures here — initial join already succeeded
+                        // and a transient TCP hiccup shouldn't abort startup; if it persists, future
+                        // reconnects will re-send PrivateAddressString in their MeshJoinRequest.
+                        try
+                        {
+                            var reassign = new MediationMessage(MediationMessageType.MeshIPReassign)
+                            {
+                                PeerID = peerID.ToString(),
+                                PrivateAddressString = meshIP
+                            };
+                            byte[] reassignBytes = Encoding.ASCII.GetBytes(reassign.Serialize());
+                            stream.Write(reassignBytes, 0, reassignBytes.Length);
+                            stream.Flush();
+                        }
+                        catch (Exception ex)
+                        {
+                            context.Log($"[Mesh] Failed to notify mediation of mesh IP reassignment: {ex.Message}");
+                        }
                     }
                     else
                     {

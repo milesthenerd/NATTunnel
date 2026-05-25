@@ -45,7 +45,11 @@ const MessageTypes = {
     MeshHeartbeat: 31,           // Sent by introducer to each peer over WireGuard: check reachable peers
     MeshHeartbeatAck: 32,        // Response to MeshHeartbeat: list of reachable mesh IPs
     MeshPeerRemoved: 33,         // Sent by introducer to all peers when a peer is declared dead
-    MeshPeerLeave: 34            // Sent by a peer to all connected peers when shutting down gracefully
+    MeshPeerLeave: 34,           // Sent by a peer to all connected peers when shutting down gracefully
+    MeshRelayAssignment: 35,     // Introducer -> endpoints + chosen relay
+    MeshRelayAssignmentAck: 36,  // Chosen relay -> introducer
+    MeshRelayHealthReport: 37,   // Relayed peer -> introducer: relay degraded
+    MeshIPReassign: 38           // Peer -> server: mesh IP changed (collision reassignment)
 };
 
 // Client status types
