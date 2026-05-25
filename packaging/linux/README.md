@@ -12,14 +12,14 @@ Build scripts for `.deb` (Debian/Ubuntu) and `.rpm` (Fedora/RHEL) packages bundl
 
 ## Build prerequisites
 
-On a build machine (Linux, with .NET 10 SDK):
+On a build machine (Linux, with .NET 9 SDK):
 
 ```bash
 dotnet publish NATTunnelCLI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
 dotnet publish NATTunnelGUI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
 ```
 
-The packagers consume both publish dirs and bundle them under `/usr/lib/nattunnel/` and `/usr/lib/nattunnel-gui/`. Framework-dependent publish keeps the package small, the `dotnet-runtime-10.0` package supplies the runtime.
+The packagers consume both publish dirs and bundle them under `/usr/lib/nattunnel/` and `/usr/lib/nattunnel-gui/`. Framework-dependent publish keeps the package small, the `dotnet-runtime-9.0` package supplies the runtime.
 
 ## Build `.deb`
 

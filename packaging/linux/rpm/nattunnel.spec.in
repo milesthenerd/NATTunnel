@@ -1,8 +1,8 @@
 Name:           nattunnel
 Version:        @VERSION@
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Mesh VPN daemon and GUI with NAT hole-punching
-License:        CC0
+License:        MIT
 URL:            https://github.com/milesthenerd/NATTunnel
 BuildArch:      x86_64
 
@@ -12,9 +12,8 @@ Requires:       libX11
 Requires:       libICE
 Requires:       libSM
 Requires:       fontconfig
-Requires:       dotnet-runtime-10.0
+Requires:       dotnet-runtime-9.0
 
-# .NET runtime is bundled (self-contained publish), so we don't depend on system dotnet.
 # Disable automatic dependency extraction — it tries to pin glibc versions from the bundled
 # native shims and ends up wrong.
 AutoReqProv:    no
@@ -54,5 +53,8 @@ if [ $1 -eq 0 ]; then
 fi
 
 %changelog
+* Thu May 15 2026 NATTunnel maintainers (milesthenerd) - @VERSION@-2
+- Update deps and license
+
 * Thu May 15 2026 NATTunnel maintainers (milesthenerd) - @VERSION@-1
 - Initial RPM package.

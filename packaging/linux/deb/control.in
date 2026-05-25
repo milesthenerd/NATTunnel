@@ -3,7 +3,7 @@ Version: @VERSION@
 Section: net
 Priority: optional
 Architecture: amd64
-Depends: wireguard-tools, iproute2, libx11-6, libice6, libsm6, libfontconfig1, dotnet-runtime-10.0
+Depends: wireguard-tools, iproute2, libx11-6, libice6, libsm6, libfontconfig1, dotnet-runtime-9.0
 Maintainer: NATTunnel contributors
 Homepage: https://github.com/milesthenerd/NATTunnel
 Description: Mesh VPN daemon and GUI with NAT hole-punching
