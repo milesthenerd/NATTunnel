@@ -214,10 +214,15 @@ public class MeshNode : IDisposable
         // on this tunnel get peeled + forwarded. This is what makes us act as a relay.
         tunnel.RelayEnvelopeReceived += host.ForwardRelayEnvelope;
 
-        int loopbackPort = Interlocked.Increment(ref nextLoopbackPort) - 1;
         bool isInitiator = string.Compare(peerID.ToString(), remotePeerID, StringComparison.Ordinal) > 0;
-        var proxy = new MeshPeerProxy(tunnel, loopbackPort, config.HostGamePort,
-                                       staticKeyPair.PrivateKey, isInitiator, remotePeerID);
+        var proxy = TryBuildProxyWithFreePort(p => new MeshPeerProxy(
+            tunnel, p, config.HostGamePort,
+            staticKeyPair.PrivateKey, isInitiator, remotePeerID));
+        if (proxy == null)
+        {
+            Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping connection.");
+            return;
+        }
 
         var connected = new MeshPeer(remotePeerID, tunnel, proxy);
         connectedPeers[remotePeerID] = connected;
@@ -290,15 +295,19 @@ public class MeshNode : IDisposable
             return;
         }
 
-        int loopbackPort = Interlocked.Increment(ref nextLoopbackPort) - 1;
         bool isInitiator = string.Compare(peerID.ToString(), remotePeerID, StringComparison.Ordinal) > 0;
-        var proxy = new MeshPeerProxy(
+        var proxy = TryBuildProxyWithFreePort(p => new MeshPeerProxy(
             gatewayProxy.Tunnel,
-            loopbackPort, config.HostGamePort,
+            p, config.HostGamePort,
             staticKeyPair.PrivateKey, isInitiator,
             $"{remotePeerID}@relay",
             relayDestinationMeshIP: remoteMeshIP,
-            ownMeshIP: host.OwnMeshIP);
+            ownMeshIP: host.OwnMeshIP));
+        if (proxy == null)
+        {
+            Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for relayed {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping relay route.");
+            return;
+        }
 
         var connected = new MeshPeer(remotePeerID, gatewayProxy.Tunnel, proxy);
         connectedPeers[remotePeerID] = connected;
@@ -505,6 +514,40 @@ public class MeshNode : IDisposable
             }
         }
         return (null, data);
+    }
+
+    /// <summary>
+    /// Construct a <see cref="MeshPeerProxy"/> by walking the configured loopback port range
+    /// until the bind succeeds. The proxy ctor binds the loopback socket eagerly, so a port
+    /// conflict (another MeshNode in the same process, or another process on the machine using
+    /// the same port) throws SocketException — we catch and try the next port.
+    /// </summary>
+    /// <returns>The constructed proxy, or null if no port in the range was free.</returns>
+    private MeshPeerProxy TryBuildProxyWithFreePort(Func<int, MeshPeerProxy> factory)
+    {
+        int start = config.LoopbackPortRangeStart;
+        int end = config.LoopbackPortRangeEnd;
+        int rangeSize = end - start + 1;
+        for (int i = 0; i < rangeSize; i++)
+        {
+            int candidate = Interlocked.Increment(ref nextLoopbackPort) - 1;
+            if (candidate > end)
+            {
+                // Wrap to the start; nextLoopbackPort is reset so subsequent allocations don't
+                // exceed the range.
+                Interlocked.Exchange(ref nextLoopbackPort, start + 1);
+                candidate = start;
+            }
+            try
+            {
+                return factory(candidate);
+            }
+            catch (SocketException)
+            {
+                // Port in use — try the next one.
+            }
+        }
+        return null;
     }
 
     private static int PickRandomFreeUdpPort()
