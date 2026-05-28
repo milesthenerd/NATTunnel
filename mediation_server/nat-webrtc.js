@@ -162,6 +162,36 @@ function handleConfig(req, res) {
     jsonResponse(res, 200, { iceServers });
 }
 
+// Return false if address is not a public IPv4 address. This filters
+// loopback (127/8), link-local (169.254/16), RFC 1918 private (10/8, 172.16/12,
+// 192.168/16), RFC 6598 CGNAT (100.64/10), and 0/8.
+//
+// We need to filter as STUN-reported srflx candidates can carry an inner
+// private address on CGNAT where the carrier-side address is in 100.64/10 or 10/8
+// US mobile carriers (notably T-Mobile and Verizon) allocate these /8 blocks
+// for internal CGNAT use as well
+const CARRIER_SQUAT_FIRST_OCTETS = new Set([
+    21, 22, 25, 26, 28, 29, 30, 33, 55,
+]);
+
+function isPublicIPv4(addr) {
+    if (!addr) return false;
+    if (addr.includes('.local')) return false; // mDNS-obfuscated host candidate
+    const parts = addr.split('.');
+    if (parts.length !== 4) return false;
+    const [a, b] = parts.map((n) => parseInt(n, 10));
+    if (Number.isNaN(a) || Number.isNaN(b)) return false;
+    if (a === 0 || a === 127) return false;                            // this-network, loopback
+    if (a === 10) return false;                                        // RFC 1918
+    if (a === 172 && b >= 16 && b <= 31) return false;                 // RFC 1918
+    if (a === 192 && b === 168) return false;                          // RFC 1918
+    if (a === 169 && b === 254) return false;                          // link-local
+    if (a === 100 && b >= 64 && b <= 127) return false;                // RFC 6598 CGNAT
+    if (a >= 224) return false;                                        // multicast + reserved
+    if (CARRIER_SQUAT_FIRST_OCTETS.has(a)) return false;               // CGNAT internal
+    return true;
+}
+
 // Walk werift's check list and classify based on the nominated pair's remote
 // candidate type. See header comment for the full mapping table.
 function finalizeVerdict(session) {
@@ -180,12 +210,9 @@ function finalizeVerdict(session) {
         for (const pair of conn.checkList) {
             const remote = pair.remoteCandidate;
             if (remote) {
-                // Prefer non-host candidates for the publicIP display field.
-                // Browsers obfuscate host candidates as <uuid>.local mDNS
-                // hostnames (privacy feature); reporting one of those as the
-                // user's external IP is misleading (especially on mobile). 
-                // srflx/prflx/relay candidates carry real public IPs.
-                if (!publicAddress && remote.type !== 'host') {
+                // For the publicIP display field, accept only candidates whose
+                // host is a publicly-routable IPv4.
+                if (!publicAddress && isPublicIPv4(remote.host)) {
                     publicAddress = remote.host;
                 }
                 if (remote.type === 'srflx' && !advertisedSrflx) advertisedSrflx = remote;
