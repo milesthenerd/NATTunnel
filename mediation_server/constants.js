@@ -73,6 +73,20 @@ const Config = {
     // Override paths with TLS_CERT_PATH / TLS_KEY_PATH env vars to use your own CA-signed certificate.
     TLS_CERT_PATH: process.env.TLS_CERT_PATH || path.join(__dirname, 'cert.pem'),
     TLS_KEY_PATH:  process.env.TLS_KEY_PATH  || path.join(__dirname, 'key.pem'),
+
+    // Browser-facing NAT test (web-nat-test). Opt-in: NAT_TEST_ENABLED=1 to
+    // enable. Requires coturn running on the same host plus an nginx
+    // reverse-proxy fronting the HTTP signaling endpoint. See
+    // DEPLOY-NAT-WEBRTC.md for the full setup.
+    NAT_TEST_ENABLED: process.env.NAT_TEST_ENABLED === '1',
+    NAT_TEST_HTTP_PORT: Number(process.env.NAT_TEST_HTTP_PORT) || 6515,
+    NAT_TEST_STUN_URL: process.env.NAT_TEST_STUN_URL || 'stun:sync.milesthenerd.net:3478',
+    NAT_TEST_TURN_URL: process.env.NAT_TEST_TURN_URL || 'turn:sync.milesthenerd.net:3478',
+    NAT_TEST_TURN_USER: process.env.NAT_TEST_TURN_USER || 'nattunnel',
+    NAT_TEST_TURN_PASS: process.env.NAT_TEST_TURN_PASS || '',
+    NAT_TEST_ICE_PORT_MIN: Number(process.env.NAT_TEST_ICE_PORT_MIN) || 6520,
+    NAT_TEST_ICE_PORT_MAX: Number(process.env.NAT_TEST_ICE_PORT_MAX) || 6540,
+    NAT_TEST_DEBUG: process.env.NAT_TEST_DEBUG === '1',
 };
 
 module.exports = {

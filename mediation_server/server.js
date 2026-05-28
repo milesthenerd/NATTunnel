@@ -1,11 +1,16 @@
 const udp = require('dgram');
 const tcp = require('net');
 const tls = require('tls');
+const http = require('http');
 const fs = require('fs');
 const { execSync } = require('child_process');
 const { Config, MessageTypes } = require('./constants');
 const ConnectionManager = require('./connection-manager');
 const MessageHandler = require('./message-handler');
+// Browser-facing NAT test (web-nat-test) is opt-in via Config.NAT_TEST_ENABLED.
+// Operators who don't want to bother with coturn + nginx can leave it disabled;
+// the mediation server runs perfectly with just its TCP+UDP protocol surface.
+const natWebRTC = Config.NAT_TEST_ENABLED ? require('./nat-webrtc') : null;
 
 class NATServer {
     constructor() {
@@ -35,7 +40,39 @@ class NATServer {
         this.initializeTCPServer();
         this.initializeUDPServer();
         this.initializeNATTestServers();
+        if (Config.NAT_TEST_ENABLED) this.initializeHTTPSignalingServer();
         this.startTimeoutCheck();
+    }
+
+    initializeHTTPSignalingServer() {
+        this.httpSignalingServer = http.createServer((req, res) => {
+            if (req.method === 'OPTIONS') return natWebRTC.handleCors(res);
+
+            if (req.method === 'GET' && req.url === '/nat-test/config') {
+                return natWebRTC.handleConfig(req, res);
+            }
+
+            if (req.method === 'POST' && req.url === '/nat-test/offer') {
+                return natWebRTC.handleOffer(req, res);
+            }
+
+            // /nat-test/verdict/<sessionId>
+            const verdictMatch = req.url && req.url.match(/^\/nat-test\/verdict\/([a-f0-9]+)$/);
+            if (req.method === 'GET' && verdictMatch) {
+                return natWebRTC.handleVerdict(req, res, verdictMatch[1]);
+            }
+
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('not found');
+        });
+
+        // Localhost-only bind — nginx fronts this with TLS termination.
+        this.httpSignalingServer.listen(Config.NAT_TEST_HTTP_PORT, '127.0.0.1', () => {
+            console.log(`[NAT-webrtc] HTTP signaling listening on 127.0.0.1:${Config.NAT_TEST_HTTP_PORT}`);
+        });
+        this.httpSignalingServer.on('error', (err) => {
+            console.error('[NAT-webrtc] HTTP signaling server error:', err);
+        });
     }
 
     ensureTLSCert() {
