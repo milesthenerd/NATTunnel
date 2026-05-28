@@ -172,7 +172,7 @@ function finalizeVerdict(session) {
 
     let nominatedPair = null;
     let advertisedSrflx = null;
-    let observedRemoteAddress = null;
+    let publicAddress = null;
 
     for (const transport of transports) {
         const conn = transport.connection;
@@ -180,17 +180,24 @@ function finalizeVerdict(session) {
         for (const pair of conn.checkList) {
             const remote = pair.remoteCandidate;
             if (remote) {
-                if (!observedRemoteAddress) observedRemoteAddress = remote.host;
+                // Prefer non-host candidates for the publicIP display field.
+                // Browsers obfuscate host candidates as <uuid>.local mDNS
+                // hostnames (privacy feature); reporting one of those as the
+                // user's external IP is misleading (especially on mobile). 
+                // srflx/prflx/relay candidates carry real public IPs.
+                if (!publicAddress && remote.type !== 'host') {
+                    publicAddress = remote.host;
+                }
                 if (remote.type === 'srflx' && !advertisedSrflx) advertisedSrflx = remote;
             }
             if (pair.state !== CandidatePairState.SUCCEEDED) continue;
             if (!nominatedPair && pair.nominated) nominatedPair = pair;
             else if (!nominatedPair) nominatedPair = pair;
         }
-        if (nominatedPair && advertisedSrflx) break;
+        if (nominatedPair && advertisedSrflx && publicAddress) break;
     }
 
-    if (observedRemoteAddress) session.publicIP = observedRemoteAddress;
+    if (publicAddress) session.publicIP = publicAddress;
     if (!nominatedPair || !nominatedPair.remoteCandidate) return;
 
     const remote = nominatedPair.remoteCandidate;
