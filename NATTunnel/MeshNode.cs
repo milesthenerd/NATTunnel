@@ -459,12 +459,21 @@ public class MeshNode : IDisposable
         if (string.IsNullOrWhiteSpace(mediationEndpoint))
             throw new ArgumentException("mediationEndpoint is required.", nameof(mediationEndpoint));
 
+        // A bare "host" (no ':port') defaults to 6510, matching the MeshNode ctor's behavior.
         int colon = mediationEndpoint.LastIndexOf(':');
+        string host;
+        int port;
         if (colon < 0)
-            throw new ArgumentException("mediationEndpoint must be 'host:port'.", nameof(mediationEndpoint));
-        string host = mediationEndpoint.Substring(0, colon);
-        if (!int.TryParse(mediationEndpoint.Substring(colon + 1), out int port) || port <= 0 || port > 65535)
-            throw new ArgumentException("mediationEndpoint port must be a valid TCP port.", nameof(mediationEndpoint));
+        {
+            host = mediationEndpoint;
+            port = 6510;
+        }
+        else
+        {
+            host = mediationEndpoint.Substring(0, colon);
+            if (!int.TryParse(mediationEndpoint.Substring(colon + 1), out port) || port <= 0 || port > 65535)
+                throw new ArgumentException("mediationEndpoint port must be a valid TCP port.", nameof(mediationEndpoint));
+        }
 
         // Same IPv4-only resolve trick as Start() — the UDP socket below binds IPv4, so a v6
         // mediation endpoint would fail with WSAEAFNOSUPPORT on Send.
