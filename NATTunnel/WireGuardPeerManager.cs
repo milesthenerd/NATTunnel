@@ -339,11 +339,11 @@ internal class WireGuardPeerManager
 
                     if (process.ExitCode != 0)
                     {
-                        Program.Log($"Failed to apply WireGuard config: {error}");
+                        Program.Log(LogLevel.Error, $"Failed to apply WireGuard config: {error}");
                     }
                     else
                     {
-                        Program.Log($"Applied WireGuard configuration with {peers.Count} peer(s)");
+                        Program.Log(LogLevel.Debug, $"Applied WireGuard configuration with {peers.Count} peer(s)");
                     }
                 }
             }
@@ -357,7 +357,7 @@ internal class WireGuardPeerManager
         }
         catch (Exception ex)
         {
-            Program.Log($"Error applying WireGuard configuration: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Error applying WireGuard configuration: {ex.Message}");
         }
     }
 

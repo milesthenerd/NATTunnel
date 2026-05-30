@@ -40,12 +40,12 @@ internal static class WireGuardConfig
             }
 
             File.WriteAllText(configPath, config.ToString());
-            Program.Log($"Generated WireGuard config at: {configPath}");
+            Program.Log(LogLevel.Debug, $"Generated WireGuard config at: {configPath}");
             return true;
         }
         catch (Exception ex)
         {
-            Program.Log($"Failed to generate WireGuard config: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Failed to generate WireGuard config: {ex.Message}");
             return false;
         }
     }
@@ -107,7 +107,7 @@ internal static class WireGuardConfig
         }
         catch (Exception ex)
         {
-            Program.Log($"Failed to generate WireGuard keys: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Failed to generate WireGuard keys: {ex.Message}");
             throw;
         }
     }
@@ -135,12 +135,12 @@ internal static class WireGuardConfig
             }
 
             File.WriteAllText(configPath, config.ToString());
-            Program.Log($"Generated WireGuard interface config at: {configPath}");
+            Program.Log(LogLevel.Debug, $"Generated WireGuard interface config at: {configPath}");
             return true;
         }
         catch (Exception ex)
         {
-            Program.Log($"Failed to generate WireGuard config: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Failed to generate WireGuard config: {ex.Message}");
             return false;
         }
     }
@@ -213,12 +213,12 @@ internal static class WireGuardConfig
                 throw new Exception($"Failed to derive public key from private key. wg error: {errorOutput}");
             }
 
-            Program.Log($"Derived public key from config: {configPath}");
+            Program.Log(LogLevel.Debug, $"Derived public key from config: {configPath}");
             return publicKey;
         }
         catch (Exception ex)
         {
-            Program.Log($"Error deriving public key from config: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Error deriving public key from config: {ex.Message}");
             throw;
         }
     }

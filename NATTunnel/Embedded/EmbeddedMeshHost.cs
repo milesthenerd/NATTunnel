@@ -77,7 +77,7 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
         // MeshPeerProxy. Idempotent — duplicate fires shouldn't re-create the proxy
         // (NATTunnel.MeshNode guards on its own peer dictionary).
         try { RelayedPeerAdded?.Invoke(remotePeerID, remoteMeshIP, gatewayMeshIP); }
-        catch (Exception ex) { Console.Error.WriteLine($"[EmbeddedMeshHost] RelayedPeerAdded handler threw: {ex.Message}"); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[EmbeddedMeshHost] RelayedPeerAdded handler threw: {ex.Message}"); }
     }
 
     public bool SendMeshControl(IPAddress destinationMeshIP, byte[] data, int length)
@@ -90,7 +90,7 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
         }
         else
         {
-            Console.Error.WriteLine($"[EmbeddedMeshHost] SendMeshControl to {destinationMeshIP}: no proxy registered (dropping packet).");
+            Program.Log(LogLevel.Warning, $"[EmbeddedMeshHost] SendMeshControl to {destinationMeshIP}: no proxy registered (dropping packet).");
         }
         return true;
     }
@@ -153,7 +153,7 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
             if (peersByMeshIP.TryRemove(meshIP, out var proxy))
             {
                 try { PeerRemoved?.Invoke(meshIP, proxy); }
-                catch (Exception ex) { Console.Error.WriteLine($"[EmbeddedMeshHost] PeerRemoved handler threw: {ex.Message}"); }
+                catch (Exception ex) { Program.Log(LogLevel.Error, $"[EmbeddedMeshHost] PeerRemoved handler threw: {ex.Message}"); }
                 try { proxy.Dispose(); } catch { }
             }
         }
@@ -166,7 +166,7 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
             if (peersByMeshIP.TryRemove(kv.Key, out var proxy))
             {
                 try { PeerRemoved?.Invoke(kv.Key, proxy); }
-                catch (Exception ex) { Console.Error.WriteLine($"[EmbeddedMeshHost] PeerRemoved handler threw: {ex.Message}"); }
+                catch (Exception ex) { Program.Log(LogLevel.Error, $"[EmbeddedMeshHost] PeerRemoved handler threw: {ex.Message}"); }
                 try { proxy.Dispose(); } catch { }
             }
         }
@@ -222,7 +222,7 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
             }
             else
             {
-                Console.Error.WriteLine($"[EmbeddedMeshHost] Relay packet from {srcMeshIP} has no local proxy; dropping.");
+                Program.Log(LogLevel.Warning, $"[EmbeddedMeshHost] Relay packet from {srcMeshIP} has no local proxy; dropping.");
             }
             return;
         }
@@ -230,11 +230,11 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
         // Case 2: we're the relay. Forward verbatim through dst's tunnel.
         if (!peersByMeshIP.TryGetValue(dstMeshIP, out var dstProxy))
         {
-            Console.Error.WriteLine($"[EmbeddedMeshHost] Relay: no tunnel to dst={dstMeshIP}; dropping.");
+            Program.Log(LogLevel.Warning, $"[EmbeddedMeshHost] Relay: no tunnel to dst={dstMeshIP}; dropping.");
             return;
         }
         try { dstProxy.Tunnel.SendDataPacket(envelope); }
-        catch (Exception ex) { Console.Error.WriteLine($"[EmbeddedMeshHost] Relay forward to {dstMeshIP} failed: {ex.Message}"); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[EmbeddedMeshHost] Relay forward to {dstMeshIP} failed: {ex.Message}"); }
     }
 
     /// <summary>

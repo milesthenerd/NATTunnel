@@ -93,11 +93,29 @@ public class MeshConfig
     public int LoopbackPortRangeEnd { get; set; } = 65535;
 
     /// <summary>
-    /// Optional logger callback. Receives one line of engine output per call (timestamp /
-    /// category / message; the caller decides routing — Console, file, in-game console, etc.).
-    /// Null (the default) routes to <see cref="Console.WriteLine"/>.
+    /// Optional logger callback that receives both the severity and the message. Preferred
+    /// over <see cref="Logger"/> because the host can route by level. Null (the default)
+    /// falls through to <see cref="Logger"/>; if both are null, the library prints to
+    /// <see cref="Console.WriteLine"/>.
+    /// </summary>
+    public Action<LogLevel, string> LeveledLogger { get; set; }
+
+    /// <summary>
+    /// Optional plain-string logger callback. Receives one line of engine output per call
+    /// (timestamp / level tag / message; the caller decides routing). Kept for
+    /// callers that don't want to deal with the level enum. Use <see cref="LeveledLogger"/>
+    /// for structured filtering.
     /// </summary>
     public Action<string> Logger { get; set; }
+
+    /// <summary>
+    /// Minimum severity the library emits. Anything below this is dropped before reaching
+    /// the configured logger callback. Default is <see cref="LogLevel.Info"/> — major
+    /// lifecycle events plus warnings and errors. Set to <see cref="LogLevel.Debug"/> for
+    /// verbose protocol traces, or <see cref="LogLevel.Warning"/> / <see cref="LogLevel.Error"/>
+    /// to make the library silent on the happy path.
+    /// </summary>
+    public LogLevel MinLogLevel { get; set; } = LogLevel.Info;
 
     internal void Validate()
     {

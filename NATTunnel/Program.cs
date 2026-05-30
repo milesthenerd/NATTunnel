@@ -48,9 +48,29 @@ public static class Program
         UptimeSeconds = 0,
     };
 
-    public static void Log(string message)
+    /// <summary>
+    /// Optional sink that intercepts all <see cref="Log(string)"/> and
+    /// <see cref="Log(LogLevel, string)"/> calls. When set (typically by the embedded
+    /// library at <c>MeshNode</c> construction), the default Console + rolling-buffer
+    /// behavior is bypassed entirely — the sink owns delivery. When null (the daemon's
+    /// default), the original behavior is used.
+    /// </summary>
+    internal static Action<LogLevel, string> LogSink;
+
+    public static void Log(string message) => Log(LogLevel.Info, message);
+
+    public static void Log(LogLevel level, string message)
     {
-        string line = $"[{DateTime.UtcNow:HH:mm:ss}] {message}";
+        var sink = LogSink;
+        if (sink != null)
+        {
+            try { sink(level, message); }
+            catch { /* host sink threw — swallow to keep engine running */ }
+            return;
+        }
+
+        // Daemon default: console + rolling buffer for the GUI's /logs endpoint.
+        string line = $"[{DateTime.UtcNow:HH:mm:ss}] [{level}] {message}";
         Console.WriteLine(line);
         long seq = System.Threading.Interlocked.Increment(ref logSeq);
         RecentLogs.Enqueue((seq, line));
@@ -177,7 +197,9 @@ public static class Program
                             {
                                 var snapshot = new ConfigSnapshot
                                 {
-                                    MediationEndpoint = TunnelOptions.MediationEndpoint?.ToString(),
+                                    // Send the original host:port string the user entered, not the
+                                    // resolved IPEndPoint.
+                                    MediationEndpoint = TunnelOptions.MediationEndpointString,
                                     NetworkID = TunnelOptions.NetworkID,
                                     NetworkSecret = TunnelOptions.NetworkSecret,
                                     MeshSubnet = TunnelOptions.MeshSubnet,
@@ -231,6 +253,9 @@ public static class Program
                                     if (snapshot.RelayReselectCooldownSeconds > 0) TunnelOptions.RelayReselectCooldownSeconds = snapshot.RelayReselectCooldownSeconds;
                                     if (snapshot.RelayLoadFactorMs > 0) TunnelOptions.RelayLoadFactorMs = snapshot.RelayLoadFactorMs;
                                     if (snapshot.RelayReselectMinImprovement > 0) TunnelOptions.RelayReselectMinImprovement = snapshot.RelayReselectMinImprovement;
+
+                                    if (!string.IsNullOrEmpty(snapshot.MediationEndpoint))
+                                        TunnelOptions.MediationEndpointString = snapshot.MediationEndpoint;
 
                                     Config.SaveAllSettings(
                                         snapshot.MediationEndpoint ?? "",

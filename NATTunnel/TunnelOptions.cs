@@ -11,10 +11,16 @@ namespace NATTunnel;
 internal static class TunnelOptions
 {
     /// <summary>
-    /// The public IP address and port of the mediation server.
+    /// The public IP address and port of the mediation server, resolved at config load.
     /// The mediation server coordinates NAT traversal and hole punching between peers.
     /// </summary>
-    public static IPEndPoint MediationEndpoint = new IPEndPoint(IPAddress.Parse("150.136.166.80"), 6510);
+    public static IPEndPoint MediationEndpoint = new IPEndPoint(IPAddress.Parse("150.136.173.157"), 6510);
+
+    /// <summary>
+    /// The original <c>host:port</c> string the user supplied for the mediation endpoint
+    /// (a DNS hostname or an IPv4 literal).
+    /// </summary>
+    public static string MediationEndpointString = "sync.milesthenerd.net:6510";
 
     /// <summary>
     /// Default port number

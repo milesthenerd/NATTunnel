@@ -216,7 +216,7 @@ internal sealed class MeshPeerProxy : IDisposable
 
         lastSentHandshakeFrame = framed;
         try { SendThroughTunnel(framed); }
-        catch (Exception ex) { Console.Error.WriteLine($"[Noise/{peerLabel}] handshake send failed: {ex.Message}"); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake send failed: {ex.Message}"); }
 
         if (t != null) CompleteHandshake(t);
     }
@@ -277,7 +277,7 @@ internal sealed class MeshPeerProxy : IDisposable
         var plaintext = new byte[read];
         Buffer.BlockCopy(plaintextBuf, 0, plaintext, 0, read);
         try { MeshControlReceived?.Invoke(plaintext); }
-        catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] MeshControlReceived handler threw: {ex.Message}"); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] MeshControlReceived handler threw: {ex.Message}"); }
     }
 
     /// <summary>
@@ -317,7 +317,7 @@ internal sealed class MeshPeerProxy : IDisposable
         if (written != framed.Length - 1) return false;
 
         try { SendThroughTunnel(framed); }
-        catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] mesh-control send failed: {ex.Message}"); return false; }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] mesh-control send failed: {ex.Message}"); return false; }
         return true;
     }
 
@@ -347,7 +347,7 @@ internal sealed class MeshPeerProxy : IDisposable
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[Noise/{peerLabel}] handshake read failed: {ex.Message}");
+            Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake read failed: {ex.Message}");
         }
     }
 
@@ -362,7 +362,7 @@ internal sealed class MeshPeerProxy : IDisposable
         handshakeRetransmitTimer = null;
         handshakeState?.Dispose();
         handshakeState = null;
-        Console.WriteLine($"[Noise/{peerLabel}] handshake complete ({(isInitiator ? "initiator" : "responder")})");
+        Program.Log(LogLevel.Info, $"[Noise/{peerLabel}] handshake complete ({(isInitiator ? "initiator" : "responder")})");
 
         // Now safe to start carrying game payloads.
         _ = Task.Run(() => LoopbackReceiveLoop(cts.Token));
@@ -402,7 +402,7 @@ internal sealed class MeshPeerProxy : IDisposable
         }
 
         try { loopbackSocket.Send(plaintextBuf, read, hostGameEndpoint); }
-        catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] deliver-to-host failed: {ex.Message}"); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] deliver-to-host failed: {ex.Message}"); }
     }
 
     private async Task LoopbackReceiveLoop(CancellationToken token)
@@ -430,17 +430,17 @@ internal sealed class MeshPeerProxy : IDisposable
 
                 if (written != framed.Length - 1)
                 {
-                    Console.Error.WriteLine($"[Noise/{peerLabel}] unexpected ciphertext size {written} vs {framed.Length - 1}");
+                    Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] unexpected ciphertext size {written} vs {framed.Length - 1}");
                     continue;
                 }
 
                 try { SendThroughTunnel(framed); }
-                catch (Exception ex) { Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] tunnel send failed: {ex.Message}"); }
+                catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] tunnel send failed: {ex.Message}"); }
             }
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine($"[MeshPeerProxy/{peerLabel}] loopback loop crashed: {ex.Message}");
+            Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] loopback loop crashed: {ex.Message}");
         }
     }
 

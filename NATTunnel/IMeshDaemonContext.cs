@@ -3,6 +3,24 @@ using System;
 namespace NATTunnel;
 
 /// <summary>
+/// Severity classification for log messages emitted by <see cref="MeshProtocolEngine"/>
+/// and its supporting code. Host applications filter via <see cref="MeshConfig.MinLogLevel"/>;
+/// the default (<see cref="Info"/>) keeps the library at low-noise narration plus warnings
+/// and errors. Set to <see cref="Debug"/> when diagnosing protocol-level issues.
+/// </summary>
+public enum LogLevel
+{
+    /// <summary>Verbose protocol traces: heartbeat ticks, probe outcomes, per-packet detail.</summary>
+    Debug = 0,
+    /// <summary>Major lifecycle transitions: joined network, peer connected, role changes.</summary>
+    Info = 1,
+    /// <summary>Recoverable problems: handshake retries, dropped peers, repair attempts.</summary>
+    Warning = 2,
+    /// <summary>Failures that prevent forward progress on a connection or session.</summary>
+    Error = 3,
+}
+
+/// <summary>
 /// The seam that lets <see cref="MeshProtocolEngine"/> avoid hard-coding references to
 /// daemon-wide statics like <see cref="Program"/> and <see cref="TunnelOptions"/>.
 ///
@@ -19,10 +37,18 @@ namespace NATTunnel;
 internal interface IMeshDaemonContext
 {
     /// <summary>
-    /// Logger sink. Implementations must be safe to call from any thread — MeshProtocolEngine logs from
-    /// background tasks (UDP listener, tunnel callbacks) as well as the main loop.
+    /// Logger sink with severity classification. Implementations must be safe to call from
+    /// any thread — MeshProtocolEngine logs from background tasks (UDP listener, tunnel
+    /// callbacks) as well as the main loop. Implementations are expected to filter on the
+    /// host's configured minimum level before delivering to the user.
     /// </summary>
-    void Log(string message);
+    void Log(LogLevel level, string message);
+
+    /// <summary>
+    /// Convenience overload defaulting to <see cref="LogLevel.Info"/>. Used by transitional
+    /// callsites; new code should call the explicit-level overload.
+    /// </summary>
+    void Log(string message) => Log(LogLevel.Info, message);
 
     // ── Lifecycle signals (read by engine; written by host or GUI) ──
 

@@ -12,7 +12,15 @@ internal sealed class DaemonContext : IMeshDaemonContext
 {
     private MeshOptions options = MeshOptions.FromTunnelOptions();
 
-    public void Log(string message) => Program.Log(message);
+    public void Log(LogLevel level, string message)
+    {
+        // Forward to Program.Log's leveled overload so the sink does the formatting
+        // exactly once. Earlier this method pre-tagged with [{level}] and called the
+        // string overload, which caused the tag to appear twice in console output.
+        Program.Log(level, message);
+    }
+
+    public void Log(string message) => Program.Log(LogLevel.Info, message);
 
     public bool ShutdownRequested
     {

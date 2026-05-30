@@ -14,16 +14,24 @@ namespace NATTunnel.Embedded;
 ///     idle-wait (embedded callers expect Start() to mean "start immediately").
 ///   - <see cref="ReloadConfig"/> is a no-op (no config file in embedded mode).
 ///   - <see cref="RegisterMeshStateProvider"/> is a no-op (no HTTP endpoint to wire it to).
-///   - <see cref="Log"/> routes to the caller-supplied logger callback (if any), or Console as fallback.
+///   - <see cref="Log"/> filters by <paramref name="minLevel"/> and routes survivors to the
+///     caller-supplied logger callback, or Console as fallback.
 /// </summary>
 internal sealed class EmbeddedContext : IMeshDaemonContext
 {
-    private readonly Action<string> logger;
+    private readonly Action<LogLevel, string> levelLogger;
+    private readonly Action<string> stringLogger;
+    private readonly LogLevel minLevel;
 
-    public EmbeddedContext(MeshOptions options, Action<string> logger = null)
+    public EmbeddedContext(MeshOptions options,
+                           Action<LogLevel, string> levelLogger = null,
+                           Action<string> stringLogger = null,
+                           LogLevel minLevel = LogLevel.Info)
     {
         Options = options;
-        this.logger = logger;
+        this.levelLogger = levelLogger;
+        this.stringLogger = stringLogger;
+        this.minLevel = minLevel;
         // Embedded callers expect Start() to begin connecting immediately, regardless of the
         // AutoConnect option. Set ConnectRequested so the outer loop doesn't idle on first run.
         ConnectRequested = true;
@@ -31,19 +39,34 @@ internal sealed class EmbeddedContext : IMeshDaemonContext
 
     private readonly object logLock = new();
 
-    public void Log(string message)
+    public void Log(LogLevel level, string message)
     {
-        string line = $"[{DateTime.UtcNow:HH:mm:ss}] {message}";
-        if (logger != null)
+        if (level < minLevel) return;
+
+        // Preferred path: structured callback that gets the level.
+        if (levelLogger != null)
         {
-            try { logger(line); }
+            try { levelLogger(level, message); }
             catch { /* host's logger threw — swallow to avoid corrupting engine state */ }
             return;
         }
-        // Fallback when no logger was supplied: Console.WriteLine under a lock so interleaved
-        // engine threads don't garble each other's output.
+
+        // Back-compat path: caller registered a plain Action<string>. We prepend the level
+        // tag so they can still grep by severity.
+        string line = $"[{DateTime.UtcNow:HH:mm:ss}] [{level}] {message}";
+        if (stringLogger != null)
+        {
+            try { stringLogger(line); }
+            catch { }
+            return;
+        }
+
+        // No caller-supplied sink: fall back to Console under a lock so interleaved engine
+        // threads don't garble each other's output.
         lock (logLock) { Console.WriteLine(line); }
     }
+
+    public void Log(string message) => Log(LogLevel.Info, message);
 
     public bool ShutdownRequested { get; set; }
     public bool DisconnectRequested { get; set; }

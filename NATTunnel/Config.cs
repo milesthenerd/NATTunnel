@@ -105,7 +105,7 @@ public static class Config
             if (!string.IsNullOrEmpty(secretValue))
                 configLog = configLog.Replace(secretValue, "********");
         }
-        Program.Log(configLog);
+        Program.Log(LogLevel.Debug, configLog);
 
         // Ensure config has all new timeout/interval fields with defaults if missing
         EnsureConfigFieldsExist();
@@ -133,6 +133,8 @@ public static class Config
 
             //Try to parse mediationEndpoint with DNS lookup
             TunnelOptions.MediationEndpoint = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
+            // Preserve the original host:port string
+            TunnelOptions.MediationEndpointString = endpointString;
         }
         catch
         {
@@ -149,10 +151,10 @@ public static class Config
             {
                 networkID = GenerateNetworkID();
                 SetConfigValue(NetworkID, $"\"{networkID}\"");
-                Program.Log($"[Config] No {NetworkID} found — generated and saved: {networkID}");
+                Program.Log(LogLevel.Debug, $"[Config] No {NetworkID} found — generated and saved: {networkID}");
             }
             TunnelOptions.NetworkID = networkID;
-            Program.Log($"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
+            Program.Log(LogLevel.Debug, $"[Config] Mesh networking enabled for network: {TunnelOptions.NetworkID}");
         }
         catch (Exception e)
         {
@@ -168,10 +170,10 @@ public static class Config
             {
                 networkSecret = GenerateNetworkSecret();
                 SetConfigValue(NetworkSecret, $"\"{networkSecret}\"");
-                Program.Log($"[Config] No {NetworkSecret} found — generated and saved a random secret");
+                Program.Log(LogLevel.Debug, $"[Config] No {NetworkSecret} found — generated and saved a random secret");
             }
             TunnelOptions.NetworkSecret = networkSecret;
-            Program.Log($"[Config] Network secret loaded");
+            Program.Log(LogLevel.Debug, $"[Config] Network secret loaded");
         }
         catch (Exception e)
         {
@@ -188,13 +190,13 @@ public static class Config
                 if (Guid.TryParse(peerIDString, out Guid parsedPeerID))
                 {
                     TunnelOptions.PeerID = parsedPeerID;
-                    Program.Log($"[Config] Loaded persistent peer ID: {parsedPeerID}");
+                    Program.Log(LogLevel.Debug, $"[Config] Loaded persistent peer ID: {parsedPeerID}");
                 }
             }
         }
         catch (Exception e)
         {
-            Program.Log($"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
+            Program.Log(LogLevel.Error, $"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
         }
 
         // Parse optional timeout and interval settings
@@ -388,7 +390,7 @@ public static class Config
     public static void CreateNewConfig()
     {
         String defaultConfigString = $@"#{MediationEndpoint}: The public IP and port of the matchmaking/holepunching server you want to connect to
-{MediationEndpoint} = ""{TunnelOptions.MediationEndpoint}""
+{MediationEndpoint} = ""{TunnelOptions.MediationEndpointString}""
 
 #{NetworkID}: The network identifier for mesh networking. Peers with the same networkID can discover and connect to each other.
 {NetworkID} = """"
@@ -442,10 +444,10 @@ public static class Config
             return true;
 
         if (!doesFileExist)
-            Program.Log("Unable to find config.toml");
-        Program.Log("Creating default mesh networking config...");
+            Program.Log(LogLevel.Error, "Unable to find config.toml");
+        Program.Log(LogLevel.Debug, "Creating default mesh networking config...");
         CreateNewConfig();
-        Program.Log("Config created. Please edit config.toml to set your networkID, then restart.");
+        Program.Log(LogLevel.Debug, "Config created. Please edit config.toml to set your networkID, then restart.");
         return true;
     }
 
@@ -505,18 +507,18 @@ public static class Config
                 {
                     int intValue = (int)longValue;
                     setValue(intValue);
-                    Program.Log($"[Config] Loaded {key}: {intValue}");
+                    Program.Log(LogLevel.Debug, $"[Config] Loaded {key}: {intValue}");
                 }
                 else if (value is int intValue2)
                 {
                     setValue(intValue2);
-                    Program.Log($"[Config] Loaded {key}: {intValue2}");
+                    Program.Log(LogLevel.Debug, $"[Config] Loaded {key}: {intValue2}");
                 }
             }
         }
         catch (Exception e)
         {
-            Program.Log($"[Config] Warning: Failed to parse {key}: {e.Message}");
+            Program.Log(LogLevel.Error, $"[Config] Warning: Failed to parse {key}: {e.Message}");
         }
     }
 
@@ -577,7 +579,7 @@ public static class Config
         if (modified)
         {
             File.WriteAllLines(configPath, lines);
-            Program.Log("[Config] Added missing timeout/interval fields to config.toml with defaults");
+            Program.Log(LogLevel.Debug, "[Config] Added missing timeout/interval fields to config.toml with defaults");
         }
     }
 }

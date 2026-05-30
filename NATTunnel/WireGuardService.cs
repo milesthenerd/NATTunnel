@@ -76,22 +76,22 @@ internal class WireGuardService
             string serviceName = "WireGuardTunnel$NATTunnel";
             string displayName = "WireGuardTunnel$NATTunnel";
 
-            Program.Log($"Service name: {serviceName}");
-            Program.Log($"Display name: {displayName}");
+            Program.Log(LogLevel.Debug, $"Service name: {serviceName}");
+            Program.Log(LogLevel.Debug, $"Display name: {displayName}");
 
             // Get full path to executable
             string exePath = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
-            Program.Log($"Executable path: {exePath}");
-            Program.Log($"Executable exists: {System.IO.File.Exists(exePath)}");
-            Program.Log($"Config path: {configPath}");
-            Program.Log($"Config exists: {System.IO.File.Exists(configPath)}");
+            Program.Log(LogLevel.Debug, $"Executable path: {exePath}");
+            Program.Log(LogLevel.Debug, $"Executable exists: {System.IO.File.Exists(exePath)}");
+            Program.Log(LogLevel.Debug, $"Config path: {configPath}");
+            Program.Log(LogLevel.Debug, $"Config exists: {System.IO.File.Exists(configPath)}");
 
             // Format binary path for service installation
             // Pass the config file path and server mode flag as per WireGuard spec
             // Format: program.exe /service "config_path" [server|client]
             string modeArg = interfaceName.Contains("server") ? "server" : "client";
             string binaryPath = $"\"{exePath}\" /service \"{configPath}\" {modeArg}";
-            Program.Log($"Binary path: {binaryPath}");
+            Program.Log(LogLevel.Debug, $"Binary path: {binaryPath}");
 
             // Validate the binary path is not too long (Windows has limits)
             if (binaryPath.Length > 2048)
@@ -107,7 +107,7 @@ internal class WireGuardService
 
             // Before attempting to create, properly delete any existing service with this name
             // Use sc.exe which handles the Windows API correctly
-            Program.Log("Checking for and removing any existing service via sc.exe...");
+            Program.Log(LogLevel.Debug, "Checking for and removing any existing service via sc.exe...");
             try
             {
                 // First, stop the service if it's running
@@ -127,7 +127,7 @@ internal class WireGuardService
                     string output = process.StandardOutput.ReadToEnd();
                     string error = process.StandardError.ReadToEnd();
                     if (!string.IsNullOrEmpty(output) && !output.Contains("does not exist"))
-                        Program.Log($"SC stop output: {output.Trim()}");
+                        Program.Log(LogLevel.Debug, $"SC stop output: {output.Trim()}");
                 }
 
                 // Wait a moment after stopping
@@ -150,14 +150,14 @@ internal class WireGuardService
                     string output = process.StandardOutput.ReadToEnd();
                     string error = process.StandardError.ReadToEnd();
                     if (!string.IsNullOrEmpty(output) && !output.Contains("does not exist"))
-                        Program.Log($"SC delete output: {output.Trim()}");
+                        Program.Log(LogLevel.Debug, $"SC delete output: {output.Trim()}");
                 }
 
                 System.Threading.Thread.Sleep(1500); // Wait for cleanup to complete
             }
             catch (Exception ex)
             {
-                Program.Log($"SC.exe cleanup warning: {ex.Message}");
+                Program.Log(LogLevel.Warning, $"SC.exe cleanup warning: {ex.Message}");
             }
 
             // Open Service Control Manager
@@ -170,13 +170,13 @@ internal class WireGuardService
             try
             {
                 // Check if service already exists and remove it first
-                Program.Log($"Checking if service already exists...");
+                Program.Log(LogLevel.Debug, $"Checking if service already exists...");
 
                 // First try OpenServiceW
                 IntPtr existingServiceHandle = OpenServiceW(scmHandle, serviceName, SERVICE_ALL_ACCESS);
                 if (existingServiceHandle != IntPtr.Zero)
                 {
-                    Program.Log($"Service already exists: {serviceName}. Removing old service...");
+                    Program.Log(LogLevel.Debug, $"Service already exists: {serviceName}. Removing old service...");
                     CloseServiceHandle(existingServiceHandle);
 
                     // Try to uninstall the old service with retry logic
@@ -187,7 +187,7 @@ internal class WireGuardService
                         uninstallSuccess = UninstallService(interfaceName);
                         if (!uninstallSuccess)
                         {
-                            Program.Log($"Attempt to uninstall service failed, retrying... ({uninstallRetries - 1} attempts remaining)");
+                            Program.Log(LogLevel.Error, $"Attempt to uninstall service failed, retrying... ({uninstallRetries - 1} attempts remaining)");
                             System.Threading.Thread.Sleep(1500); // Wait longer between retries
                             uninstallRetries--;
                         }
@@ -195,7 +195,7 @@ internal class WireGuardService
 
                     if (!uninstallSuccess)
                     {
-                        Program.Log($"Warning: Could not uninstall old service after retries, but continuing...");
+                        Program.Log(LogLevel.Error, $"Warning: Could not uninstall old service after retries, but continuing...");
                     }
 
                     // Wait longer for service to be fully removed from registry
@@ -205,7 +205,7 @@ internal class WireGuardService
                     existingServiceHandle = OpenServiceW(scmHandle, serviceName, SERVICE_ALL_ACCESS);
                     if (existingServiceHandle != IntPtr.Zero)
                     {
-                        Program.Log($"Warning: Service still exists after uninstall. It may be pending deletion or requires reboot.");
+                        Program.Log(LogLevel.Warning, $"Warning: Service still exists after uninstall. It may be pending deletion or requires reboot.");
                         CloseServiceHandle(existingServiceHandle);
                         System.Threading.Thread.Sleep(3000); // Give Windows significant time
                     }
@@ -216,7 +216,7 @@ internal class WireGuardService
                     int openError = Marshal.GetLastWin32Error();
                     if (openError != 1060) // If it's not "service doesn't exist"
                     {
-                        Program.Log($"OpenServiceW returned error {openError} (not 1060), service may still exist");
+                        Program.Log(LogLevel.Error, $"OpenServiceW returned error {openError} (not 1060), service may still exist");
 
                         // Try registry check
                         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -227,12 +227,12 @@ internal class WireGuardService
                                 {
                                     if (key != null)
                                     {
-                                        Program.Log($"Service {serviceName} exists in registry - attempting delete...");
+                                        Program.Log(LogLevel.Debug, $"Service {serviceName} exists in registry - attempting delete...");
                                         // Try to force delete via UninstallService
                                         int regRetries = 3;
                                         while (regRetries > 0 && !UninstallService(interfaceName))
                                         {
-                                            Program.Log($"Registry delete attempt {4 - regRetries} failed, retrying...");
+                                            Program.Log(LogLevel.Error, $"Registry delete attempt {4 - regRetries} failed, retrying...");
                                             System.Threading.Thread.Sleep(2000);
                                             regRetries--;
                                         }
@@ -242,7 +242,7 @@ internal class WireGuardService
                             }
                             catch (Exception ex)
                             {
-                                Program.Log($"Registry check warning: {ex.Message}");
+                                Program.Log(LogLevel.Warning, $"Registry check warning: {ex.Message}");
                             }
                         }
                     }
@@ -250,10 +250,10 @@ internal class WireGuardService
 
                 // Create the service
                 IntPtr serviceHandle = IntPtr.Zero;
-                Program.Log("Calling CreateServiceW...");
+                Program.Log(LogLevel.Debug, "Calling CreateServiceW...");
 
                 // Test: Try creating service without arguments first to diagnose Error 1073
-                Program.Log("First attempt: Creating service with full binary path...");
+                Program.Log(LogLevel.Debug, "First attempt: Creating service with full binary path...");
 
                 // Dependencies: WireGuard service depends on Nsi and TcpIp for proper interface creation
                 // Format: null-terminated multi-string "Nsi\0TcpIp\0"
@@ -280,9 +280,9 @@ internal class WireGuardService
                     int errorCode = Marshal.GetLastWin32Error();
                     if (errorCode == 1073) // ERROR_INVALID_NAME
                     {
-                        Program.Log("Got Error 1073 - trying with just executable path (no arguments)...");
+                        Program.Log(LogLevel.Error, "Got Error 1073 - trying with just executable path (no arguments)...");
                         string exeOnlyPath = $"\"{exePath}\"";
-                        Program.Log($"Trying binary path: {exeOnlyPath}");
+                        Program.Log(LogLevel.Debug, $"Trying binary path: {exeOnlyPath}");
 
                         success = CreateServiceW(
                             scmHandle,
@@ -304,11 +304,11 @@ internal class WireGuardService
                 if (!success)
                 {
                     int errorCode = Marshal.GetLastWin32Error();
-                    Program.Log($"CreateServiceW failed with error: {errorCode}");
+                    Program.Log(LogLevel.Error, $"CreateServiceW failed with error: {errorCode}");
                     throw new Exception($"Failed to create service (Error: {errorCode})");
                 }
 
-                Program.Log("Service created successfully");
+                Program.Log(LogLevel.Debug, "Service created successfully");
 
                 // Wait for service to be fully registered (Windows needs significant time for SCM update)
                 // The $ character may require extra time
@@ -333,7 +333,7 @@ internal class WireGuardService
                         int errorCode = Marshal.GetLastWin32Error();
                         if (retries > 1)
                         {
-                            Program.Log($"Failed to open service (Error: {errorCode}), retrying... ({retries - 1} attempts remaining)");
+                            Program.Log(LogLevel.Error, $"Failed to open service (Error: {errorCode}), retrying... ({retries - 1} attempts remaining)");
                             System.Threading.Thread.Sleep(1500); // Wait 1.5 seconds between retries
                         }
                         retries--;
@@ -357,7 +357,7 @@ internal class WireGuardService
                     scmHandle = OpenSCManagerW(null, null, SC_MANAGER_ALL_ACCESS);
                     if (scmHandle == IntPtr.Zero)
                     {
-                        Program.Log("Warning: Could not reopen Service Control Manager for SID configuration");
+                        Program.Log(LogLevel.Error, "Warning: Could not reopen Service Control Manager for SID configuration");
                     }
                     else
                     {
@@ -375,13 +375,13 @@ internal class WireGuardService
                                 success = ChangeServiceConfig2W(serviceHandle, SERVICE_CONFIG_SERVICE_SID_INFO, sidInfoPtr);
                                 if (success)
                                 {
-                                    Program.Log("Service SID configured successfully");
+                                    Program.Log(LogLevel.Debug, "Service SID configured successfully");
                                     break;
                                 }
                                 else
                                 {
                                     int errorCode = Marshal.GetLastWin32Error();
-                                    Program.Log($"Failed to set service SID (Error: {errorCode}), attempt {4 - sidRetries}");
+                                    Program.Log(LogLevel.Error, $"Failed to set service SID (Error: {errorCode}), attempt {4 - sidRetries}");
                                     if (sidRetries > 1)
                                     {
                                         System.Threading.Thread.Sleep(200);
@@ -392,7 +392,7 @@ internal class WireGuardService
 
                             if (!success)
                             {
-                                Program.Log("Warning: Could not set service SID via API, trying registry approach...");
+                                Program.Log(LogLevel.Error, "Warning: Could not set service SID via API, trying registry approach...");
                                 // Fallback: try setting via registry directly
                                 if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                                 {
@@ -405,13 +405,13 @@ internal class WireGuardService
                                             {
                                                 // Set the service SID type via registry
                                                 key.SetValue("ServiceSidType", SERVICE_SID_TYPE_UNRESTRICTED, RegistryValueKind.DWord);
-                                                Program.Log("Service SID configured successfully via registry");
+                                                Program.Log(LogLevel.Debug, "Service SID configured successfully via registry");
                                             }
                                         }
                                     }
                                     catch (Exception ex)
                                     {
-                                        Program.Log($"Warning: Registry approach also failed: {ex.Message}");
+                                        Program.Log(LogLevel.Error, $"Warning: Registry approach also failed: {ex.Message}");
                                     }
                                 }
                             }
@@ -431,7 +431,7 @@ internal class WireGuardService
                     CloseServiceHandle(serviceHandle);
                 }
 
-                Program.Log($"Successfully installed service: {serviceName}");
+                Program.Log(LogLevel.Debug, $"Successfully installed service: {serviceName}");
                 return true;
             }
             finally
@@ -441,7 +441,7 @@ internal class WireGuardService
         }
         catch (Exception ex)
         {
-            Program.Log($"Failed to install service: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Failed to install service: {ex.Message}");
             return false;
         }
     }
@@ -454,14 +454,14 @@ internal class WireGuardService
             // Use $ in service name per WireGuard spec
             string serviceName = "WireGuardTunnel$NATTunnel";
 
-            Program.Log($"Attempting to uninstall service: {serviceName}");
+            Program.Log(LogLevel.Debug, $"Attempting to uninstall service: {serviceName}");
 
             // Open Service Control Manager
             IntPtr scmHandle = OpenSCManagerW(null, null, SC_MANAGER_ALL_ACCESS);
             if (scmHandle == IntPtr.Zero)
             {
                 int errorCode = Marshal.GetLastWin32Error();
-                Program.Log($"Failed to open Service Control Manager (Error: {errorCode})");
+                Program.Log(LogLevel.Error, $"Failed to open Service Control Manager (Error: {errorCode})");
                 return false;
             }
 
@@ -474,10 +474,10 @@ internal class WireGuardService
                     int errorCode = Marshal.GetLastWin32Error();
                     if (errorCode == 1060) // ERROR_SERVICE_DOES_NOT_EXIST
                     {
-                        Program.Log($"Service {serviceName} does not exist (already deleted)");
+                        Program.Log(LogLevel.Debug, $"Service {serviceName} does not exist (already deleted)");
                         return true;
                     }
-                    Program.Log($"Failed to open service (Error: {errorCode})");
+                    Program.Log(LogLevel.Error, $"Failed to open service (Error: {errorCode})");
                     return false;
                 }
 
@@ -487,17 +487,17 @@ internal class WireGuardService
                     if (!DeleteService(serviceHandle))
                     {
                         int errorCode = Marshal.GetLastWin32Error();
-                        Program.Log($"Failed to delete service (Error: {errorCode})");
+                        Program.Log(LogLevel.Error, $"Failed to delete service (Error: {errorCode})");
                         // Error 1072 means service is marked for deletion, which is okay
                         if (errorCode == 1072) // ERROR_SERVICE_MARKED_FOR_DELETE
                         {
-                            Program.Log($"Service is marked for deletion (will be removed on next reboot)");
+                            Program.Log(LogLevel.Debug, $"Service is marked for deletion (will be removed on next reboot)");
                             return true;
                         }
                         return false;
                     }
 
-                    Program.Log($"Successfully uninstalled service: {serviceName}");
+                    Program.Log(LogLevel.Debug, $"Successfully uninstalled service: {serviceName}");
                     return true;
                 }
                 finally
@@ -512,7 +512,7 @@ internal class WireGuardService
         }
         catch (Exception ex)
         {
-            Program.Log($"Error uninstalling service: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Error uninstalling service: {ex.Message}");
             return false;
         }
     }
@@ -529,7 +529,7 @@ internal class WireGuardService
         try
         {
             string regPath = $@"SYSTEM\CurrentControlSet\Services\{serviceName}\Parameters";
-            Program.Log($"Storing config path in registry: {regPath}");
+            Program.Log(LogLevel.Debug, $"Storing config path in registry: {regPath}");
 
             // Try to create or open the Parameters subkey
             using (RegistryKey key = Registry.LocalMachine.CreateSubKey(regPath))
@@ -537,21 +537,21 @@ internal class WireGuardService
                 if (key != null)
                 {
                     key.SetValue("ConfigPath", configPath, RegistryValueKind.String);
-                    Program.Log($"Stored config path in registry: {configPath}");
+                    Program.Log(LogLevel.Debug, $"Stored config path in registry: {configPath}");
                 }
                 else
                 {
-                    Program.Log("Warning: Could not create service Parameters registry key");
+                    Program.Log(LogLevel.Error, "Warning: Could not create service Parameters registry key");
                 }
             }
         }
         catch (UnauthorizedAccessException ex)
         {
-            Program.Log($"Warning: Access denied writing to registry - {ex.Message}");
+            Program.Log(LogLevel.Warning, $"Warning: Access denied writing to registry - {ex.Message}");
         }
         catch (Exception ex)
         {
-            Program.Log($"Warning: Failed to store config path in registry: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Warning: Failed to store config path in registry: {ex.Message}");
         }
     }
 
@@ -574,7 +574,7 @@ internal class WireGuardService
                     object value = key.GetValue("ConfigPath");
                     if (value != null && value is string configPath)
                     {
-                        Program.Log($"Retrieved config path from registry: {configPath}");
+                        Program.Log(LogLevel.Debug, $"Retrieved config path from registry: {configPath}");
                         return configPath;
                     }
                 }
@@ -588,7 +588,7 @@ internal class WireGuardService
                     object value = key.GetValue("ConfigPath");
                     if (value != null && value is string configPath)
                     {
-                        Program.Log($"Retrieved config path from service registry: {configPath}");
+                        Program.Log(LogLevel.Debug, $"Retrieved config path from service registry: {configPath}");
                         return configPath;
                     }
                 }
@@ -596,7 +596,7 @@ internal class WireGuardService
         }
         catch (Exception ex)
         {
-            Program.Log($"Warning: Failed to retrieve config path from registry: {ex.Message}");
+            Program.Log(LogLevel.Error, $"Warning: Failed to retrieve config path from registry: {ex.Message}");
         }
         return null;
     }

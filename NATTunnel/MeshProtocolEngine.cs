@@ -224,7 +224,7 @@ internal class MeshProtocolEngine
         try
         {
             meshControlClient = new UdpClient(meshControlPort);
-            context.Log($"[Mesh] Mesh control listening on UDP port {meshControlPort}");
+            context.Log(LogLevel.Info, $"[Mesh] Mesh control listening on UDP port {meshControlPort}");
         }
         catch (SocketException ex)
         {
@@ -258,7 +258,7 @@ internal class MeshProtocolEngine
                 {
                     isFirstIteration = false;
                     context.ConnectionState = MeshConnectionState.Disconnected;
-                    context.Log("[Mesh] Idle (autoConnect=false). Waiting for /connect request...");
+                    context.Log(LogLevel.Info, "[Mesh] Idle (autoConnect=false). Waiting for /connect request...");
                     while (!context.ShutdownRequested && !context.ConnectRequested)
                         System.Threading.Thread.Sleep(100);
                     context.ConnectRequested = false;
@@ -296,7 +296,7 @@ internal class MeshProtocolEngine
                                         : null);
                                 sslStream.AuthenticateAsClient(endpoint.Address.ToString());
                                 stream = sslStream;
-                                context.Log($"[Mesh] TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                                context.Log(LogLevel.Info, $"[Mesh] TLS handshake complete (protocol: {sslStream.SslProtocol})");
                             }
                             else
                             {
@@ -318,12 +318,12 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex) when (!context.ShutdownRequested)
                         {
-                            context.Log($"[Mesh] Mediation handshake failed: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Mediation handshake failed: {ex.Message}");
                             try { tcpClient?.Dispose(); } catch { }
                             tcpClient = null;
                             stream = null;
                             earlyTcpRemainder = "";
-                            context.Log($"[Mesh] Retrying in {handshakeDelay}s (attempt {attempt})...");
+                            context.Log(LogLevel.Debug, $"[Mesh] Retrying in {handshakeDelay}s (attempt {attempt})...");
                             // Sleep in short intervals so DisconnectRequested is checked promptly
                             for (int ms = 0; ms < handshakeDelay * 1000 && !context.DisconnectRequested && !context.ShutdownRequested; ms += 100)
                                 System.Threading.Thread.Sleep(100);
@@ -339,7 +339,7 @@ internal class MeshProtocolEngine
                     context.ConnectionState = MeshConnectionState.Disconnected;
                     try { tcpClient?.Dispose(); } catch { }
                     tcpClient = null; stream = null;
-                    context.Log("[Mesh] Disconnected during handshake — waiting for reconnect");
+                    context.Log(LogLevel.Debug, "[Mesh] Disconnected during handshake — waiting for reconnect");
                     while (!context.ShutdownRequested && !context.ConnectRequested)
                         System.Threading.Thread.Sleep(100);
                     context.ConnectRequested = false;
@@ -394,10 +394,10 @@ internal class MeshProtocolEngine
                             pid == joinResponse.IntroducerPeerID && !string.IsNullOrEmpty(mip))
                         {
                             introducerMeshIP = mip;
-                            context.Log($"[Mesh] Introducer mesh IP: {introducerMeshIP} (peer {pid})");
+                            context.Log(LogLevel.Info, $"[Mesh] Introducer mesh IP: {introducerMeshIP} (peer {pid})");
                         }
                     }
-                    context.Log($"[Mesh] Cached {peerInfoByMeshIP.Count} peer(s) from initial join response");
+                    context.Log(LogLevel.Debug, $"[Mesh] Cached {peerInfoByMeshIP.Count} peer(s) from initial join response");
                 }
 
                 // Detect mesh IP collision with an existing peer and reassign if needed.
@@ -422,7 +422,7 @@ internal class MeshProtocolEngine
                     }
                     if (resolved)
                     {
-                        context.Log($"[Mesh] WARNING: Mesh IP collision detected ({originalMeshIP} already taken). Reassigning to {meshIP}.");
+                        context.Log(LogLevel.Warning, $"[Mesh] WARNING: Mesh IP collision detected ({originalMeshIP} already taken). Reassigning to {meshIP}.");
                         host.SetClientIPAndRestart(meshIP, 16);
 
                         // Notify the mediation server of the reassignment. Without this the server
@@ -443,12 +443,12 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Failed to notify mediation of mesh IP reassignment: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to notify mediation of mesh IP reassignment: {ex.Message}");
                         }
                     }
                     else
                     {
-                        context.Log($"[Mesh] WARNING: Mesh IP collision detected ({originalMeshIP} already taken) and no free slot found in hash offsets. Keeping original IP — connectivity may be impaired.");
+                        context.Log(LogLevel.Warning, $"[Mesh] WARNING: Mesh IP collision detected ({originalMeshIP} already taken) and no free slot found in hash offsets. Keeping original IP — connectivity may be impaired.");
                     }
                 }
 
@@ -459,12 +459,12 @@ internal class MeshProtocolEngine
                 }
                 else
                 {
-                    context.Log("[Mesh] No other peers in network yet - waiting for others to join...");
+                    context.Log(LogLevel.Debug, "[Mesh] No other peers in network yet - waiting for others to join...");
                 }
 
                 // Keep connection alive and listen for ConnectionBegin messages
-                context.Log("[Mesh] Mesh networking active. Waiting for connections...");
-                context.Log("[Mesh] Press Ctrl+C to exit.");
+                context.Log(LogLevel.Info, "[Mesh] Mesh networking active. Waiting for connections...");
+                context.Log(LogLevel.Info, "[Mesh] Press Ctrl+C to exit.");
 
                 // Set to true when the server designates us as the introducer (via MeshIntroduceRequest
                 // or via IntroducerPeerID in MeshJoinResponse). Introducers must keep the mediation
@@ -477,7 +477,7 @@ internal class MeshProtocolEngine
                     joinResponse.IntroducerPeerID == peerID.ToString())
                 {
                     isIntroducer = true;
-                    context.Log("[Mesh] Server designated us as the introducer in join response");
+                    context.Log(LogLevel.Info, "[Mesh] Server designated us as the introducer in join response");
                 }
                 else if (detectedNatType != NATType.Symmetric && joinResponse.Peers != null)
                 {
@@ -497,7 +497,7 @@ internal class MeshProtocolEngine
                     if (!otherNonSymmetricExists)
                     {
                         isIntroducer = true;
-                        context.Log("[Mesh] We're the only non-symmetric peer — staying connected as potential introducer");
+                        context.Log(LogLevel.Info, "[Mesh] We're the only non-symmetric peer — staying connected as potential introducer");
                     }
                 }
 
@@ -530,7 +530,7 @@ internal class MeshProtocolEngine
                     System.Threading.Tasks.Task.Run(() =>
                     {
                         IPEndPoint ep = new IPEndPoint(IPAddress.Any, 0);
-                        context.Log("[Mesh] Shared UDP dispatcher started");
+                        context.Log(LogLevel.Debug, "[Mesh] Shared UDP dispatcher started");
                         while (true)
                         {
                             try
@@ -580,7 +580,7 @@ internal class MeshProtocolEngine
                                         }
                                         catch (Exception ex)
                                         {
-                                            context.Log($"[Mesh] Error dispatching packet to tunnel: {ex.Message}");
+                                            context.Log(LogLevel.Error, $"[Mesh] Error dispatching packet to tunnel: {ex.Message}");
                                         }
                                     }
                                 }
@@ -596,7 +596,7 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex)
                             {
-                                context.Log($"[Mesh] UDP dispatcher error: {ex.Message}");
+                                context.Log(LogLevel.Error, $"[Mesh] UDP dispatcher error: {ex.Message}");
                             }
                         }
                     });
@@ -662,17 +662,17 @@ internal class MeshProtocolEngine
                         {
                             int gracePeriod = detectedNatType != NATType.Symmetric ? context.Options.GracePeriodSecondsNonSymmetric : context.Options.GracePeriodSecondsSymmetric;
                             disconnectAfter = DateTime.UtcNow.AddSeconds(gracePeriod);
-                            context.Log($"[Mesh] All initial connections established — grace period started ({gracePeriod}s)");
+                            context.Log(LogLevel.Debug, $"[Mesh] All initial connections established — grace period started ({gracePeriod}s)");
                         }
                         else if (!readyToDisconnect && disconnectAfter != null)
                         {
                             // New connection arrived during grace period — reset timer
                             disconnectAfter = null;
-                            context.Log("[Mesh] New connection activity — grace period reset");
+                            context.Log(LogLevel.Debug, "[Mesh] New connection activity — grace period reset");
                         }
                         else if (readyToDisconnect && disconnectAfter != null && DateTime.UtcNow > disconnectAfter.Value)
                         {
-                            context.Log("[Mesh] Grace period elapsed — disconnecting from mediation server");
+                            context.Log(LogLevel.Warning, "[Mesh] Grace period elapsed — disconnecting from mediation server");
                             tcpClient.Close();
                             break;
                         }
@@ -682,9 +682,9 @@ internal class MeshProtocolEngine
                     if (!tcpClient.Connected)
                     {
                         if (isIntroducer)
-                            context.Log("[Mesh] Mediation server connection lost — introducer role ended");
+                            context.Log(LogLevel.Warning, "[Mesh] Mediation server connection lost — introducer role ended");
                         else
-                            context.Log("[Mesh] TCP connection to mediation server lost during setup");
+                            context.Log(LogLevel.Debug, "[Mesh] TCP connection to mediation server lost during setup");
                         break;
                     }
 
@@ -702,7 +702,7 @@ internal class MeshProtocolEngine
                         foreach (var staleID in staleRequests)
                         {
                             pendingConnectionRequests.Remove(staleID);
-                            context.Log($"[Mesh] Removed stale pending connection request for {staleID} (no response in {staleTimeout.TotalSeconds}s)");
+                            context.Log(LogLevel.Warning, $"[Mesh] Removed stale pending connection request for {staleID} (no response in {staleTimeout.TotalSeconds}s)");
                         }
                     }
 
@@ -719,7 +719,7 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Keep-alive write failed, connection lost: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Keep-alive write failed, connection lost: {ex.Message}");
                             break;
                         }
                     }
@@ -730,7 +730,7 @@ internal class MeshProtocolEngine
                         pendingConnectionRequests.Count == 0 && pendingTunnelCount == 0 &&
                         DateTime.UtcNow - lastPeerDiscovery > peerDiscoveryInterval)
                     {
-                        context.Log("[Mesh] No active peers — sending periodic discovery request");
+                        context.Log(LogLevel.Debug, "[Mesh] No active peers — sending periodic discovery request");
                         try
                         {
                             var discoveryRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
@@ -749,7 +749,7 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Discovery write failed, connection lost: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Discovery write failed, connection lost: {ex.Message}");
                             break;
                         }
                     }
@@ -770,13 +770,13 @@ internal class MeshProtocolEngine
                         introducerRetryCount++;
                         if (introducerRetryCount > MaxIntroducerRetries)
                         {
-                            context.Log($"[Mesh] Introducer connection failed after {MaxIntroducerRetries} retries — disconnecting to force fresh mediation reconnection");
+                            context.Log(LogLevel.Error, $"[Mesh] Introducer connection failed after {MaxIntroducerRetries} retries — disconnecting to force fresh mediation reconnection");
                             introducerRetryCount = 0;
                             try { tcpClient.Close(); } catch { }
                             break; // Break to mesh-control-only loop; isolation detection will reconnect
                         }
 
-                        context.Log($"[Mesh] Retrying connection to introducer {joinResponse.IntroducerPeerID} (attempt {introducerRetryCount}/{MaxIntroducerRetries})");
+                        context.Log(LogLevel.Debug, $"[Mesh] Retrying connection to introducer {joinResponse.IntroducerPeerID} (attempt {introducerRetryCount}/{MaxIntroducerRetries})");
                         try
                         {
                             var retryReq = new MediationMessage(MediationMessageType.ConnectionRequest)
@@ -791,7 +791,7 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Introducer retry write failed: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Introducer retry write failed: {ex.Message}");
                             break;
                         }
                     }
@@ -803,7 +803,7 @@ internal class MeshProtocolEngine
                     {
                         if (introducerRetryCount > 0)
                         {
-                            context.Log($"[Mesh] Introducer connection restored after {introducerRetryCount} retries");
+                            context.Log(LogLevel.Info, $"[Mesh] Introducer connection restored after {introducerRetryCount} retries");
                             introducerRetryCount = 0;
                         }
                     }
@@ -840,7 +840,7 @@ internal class MeshProtocolEngine
                 else
                 {
 
-                    context.Log("[Mesh] Entering mesh-control-only mode (fully disconnected from mediation server)");
+                    context.Log(LogLevel.Info, "[Mesh] Entering mesh-control-only mode (fully disconnected from mediation server)");
 
                     // Relay health check: periodically verify relay gateway peers are still alive.
                     // If a relay gateway's WireGuard peer has had no activity for this duration,
@@ -906,7 +906,7 @@ internal class MeshProtocolEngine
                                             }
                                             else if (parsedMsg.Peers != null && parsedMsg.Peers.Length > 0)
                                             {
-                                                context.Log($"[Mesh] Reconnect discovery: found {parsedMsg.Peers.Length} peer(s)");
+                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect discovery: found {parsedMsg.Peers.Length} peer(s)");
                                                 // Cache peer info for heartbeat repair (NAT type, endpoint, etc.)
                                                 // Without this, the failover introducer can't detect symmetric peers
                                                 // and falls back to direct hole-punching instead of relay mode.
@@ -920,7 +920,7 @@ internal class MeshProtocolEngine
                                                     if (!string.IsNullOrEmpty(mip2))
                                                     {
                                                         peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2);
-                                                        context.Log($"[Mesh] Cached peer info: {mip2} = NAT:{(NATType)nt2}, endpoint:{ep2}");
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Cached peer info: {mip2} = NAT:{(NATType)nt2}, endpoint:{ep2}");
                                                     }
                                                 }
                                                 ProcessDiscoveredPeers(parsedMsg.Peers, reconnectedStreamLocal);
@@ -928,7 +928,7 @@ internal class MeshProtocolEngine
                                         }
                                         else if (parsedMsg.ID == MediationMessageType.ConnectionBegin)
                                         {
-                                            context.Log($"[Mesh] Reconnect: received ConnectionBegin for connection {parsedMsg.ConnectionID}");
+                                            context.Log(LogLevel.Debug, $"[Mesh] Reconnect: received ConnectionBegin for connection {parsedMsg.ConnectionID}");
                                             // Store peer's mesh IP
                                             if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
                                             {
@@ -964,7 +964,7 @@ internal class MeshProtocolEngine
                                                     }
                                                     if (oldTunnel != null)
                                                     {
-                                                        context.Log($"[Mesh] Reconnect: disposing old tunnel {oldConnID} for {reconMeshIP} (superseded by {parsedMsg.ConnectionID})");
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect: disposing old tunnel {oldConnID} for {reconMeshIP} (superseded by {parsedMsg.ConnectionID})");
                                                         try { oldTunnel.Dispose(); } catch { }
                                                     }
                                                     peerMeshIPs.Remove(oldConnID);
@@ -1002,7 +1002,7 @@ internal class MeshProtocolEngine
                                                     ownMeshIP: meshIP,
                                                     onConnectionComplete: () =>
                                                     {
-                                                        context.Log($"[Mesh] Reconnect tunnel {capturedConnID} WireGuard established");
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect tunnel {capturedConnID} WireGuard established");
                                                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                                         System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
                                                         lock (meshLock)
@@ -1038,7 +1038,7 @@ internal class MeshProtocolEngine
                                                     }
                                                     catch (Exception ex)
                                                     {
-                                                        context.Log($"[Mesh] Reconnect tunnel error: {ex.Message}");
+                                                        context.Log(LogLevel.Error, $"[Mesh] Reconnect tunnel error: {ex.Message}");
                                                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                                     }
                                                 });
@@ -1047,7 +1047,7 @@ internal class MeshProtocolEngine
                                         else if (parsedMsg.ID == MediationMessageType.MeshIntroduceRequest)
                                         {
                                             isIntroducer = true;
-                                            context.Log($"[Mesh] Reconnect: selected as introducer for {parsedMsg.PeerID}");
+                                            context.Log(LogLevel.Info, $"[Mesh] Reconnect: selected as introducer for {parsedMsg.PeerID}");
 
                                             // Cache the new peer's info for heartbeat repair.
                                             // Clear completedTunnelMeshIPs — peer is reconnecting with fresh NAT traversal.
@@ -1076,7 +1076,7 @@ internal class MeshProtocolEngine
 
                                                     if (host.GetPeer(IPAddress.Parse(exMeshIP)) == null)
                                                     {
-                                                        context.Log($"[Mesh] Reconnect introducer: no WG tunnel to {exMeshIP} — skipping");
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: no WG tunnel to {exMeshIP} — skipping");
                                                         continue;
                                                     }
 
@@ -1089,7 +1089,7 @@ internal class MeshProtocolEngine
                                                         string rpKey = $"{sA}|{sB}";
                                                         if (relayedPairs.Remove(rpKey))
                                                         {
-                                                            context.Log($"[Mesh] Reconnect: removed stale relay pair {rpKey}");
+                                                            context.Log(LogLevel.Warning, $"[Mesh] Reconnect: removed stale relay pair {rpKey}");
                                                             host.RemoveRelayRouteForPeer(IPAddress.Parse(exMeshIP));
                                                             host.RemoveRelayRouteForPeer(IPAddress.Parse(parsedMsg.PrivateAddressString));
                                                         }
@@ -1101,7 +1101,7 @@ internal class MeshProtocolEngine
                                                         string chosenRelay = PickRelay(exMeshIP, parsedMsg.PrivateAddressString) ?? (context.Options.AllowRelayThrough ? meshIP : null);
                                                         if (string.IsNullOrEmpty(chosenRelay))
                                                         {
-                                                            context.Log($"[Mesh] No eligible relay for {exMeshIP} <-> {parsedMsg.PrivateAddressString} and self-relay disabled — skipping pair");
+                                                            context.Log(LogLevel.Debug, $"[Mesh] No eligible relay for {exMeshIP} <-> {parsedMsg.PrivateAddressString} and self-relay disabled — skipping pair");
                                                             continue;
                                                         }
                                                         context.Log($"[Mesh] Reconnect: both {parsedMsg.PeerID} and {exPeerID} are symmetric — relay via {(chosenRelay == meshIP ? "self" : chosenRelay)}");
@@ -1158,7 +1158,7 @@ internal class MeshProtocolEngine
                                                             }
                                                             catch (Exception ex2)
                                                             {
-                                                                context.Log($"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex2.Message}");
+                                                                context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex2.Message}");
                                                             }
                                                         }
 
@@ -1180,7 +1180,7 @@ internal class MeshProtocolEngine
                                                         }
                                                         catch (Exception ex2)
                                                         {
-                                                            context.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {exMeshIP}: {ex2.Message}");
+                                                            context.Log(LogLevel.Error, $"[Mesh] Failed to send relay MeshConnectionBegin to {exMeshIP}: {ex2.Message}");
                                                         }
 
                                                         if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
@@ -1206,7 +1206,7 @@ internal class MeshProtocolEngine
                                                                 }
                                                                 catch (Exception ex2)
                                                                 {
-                                                                    context.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {parsedMsg.PrivateAddressString}: {ex2.Message}");
+                                                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send relay MeshConnectionBegin to {parsedMsg.PrivateAddressString}: {ex2.Message}");
                                                                 }
                                                             }
                                                             else
@@ -1237,11 +1237,11 @@ internal class MeshProtocolEngine
                                                         byte[] cbBytes = Encoding.UTF8.GetBytes(cbToExisting.Serialize());
                                                         MeshSend(cbBytes, cbBytes.Length,
                                                             new IPEndPoint(IPAddress.Parse(exMeshIP), MeshControlPort));
-                                                        context.Log($"[Mesh] Reconnect introducer: sent MeshConnectionBegin to {exMeshIP} about {parsedMsg.PeerID}");
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: sent MeshConnectionBegin to {exMeshIP} about {parsedMsg.PeerID}");
                                                     }
                                                     catch (Exception ex2)
                                                     {
-                                                        context.Log($"[Mesh] Failed to send MeshConnectionBegin to {exMeshIP}: {ex2.Message}");
+                                                        context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {exMeshIP}: {ex2.Message}");
                                                     }
 
                                                     // Send MeshConnectionBegin to new peer about existing peer (if tunnel ready)
@@ -1263,11 +1263,11 @@ internal class MeshProtocolEngine
                                                                 byte[] cbNewBytes = Encoding.UTF8.GetBytes(cbToNew.Serialize());
                                                                 MeshSend(cbNewBytes, cbNewBytes.Length,
                                                                     new IPEndPoint(IPAddress.Parse(parsedMsg.PrivateAddressString), MeshControlPort));
-                                                                context.Log($"[Mesh] Reconnect introducer: sent MeshConnectionBegin to {parsedMsg.PrivateAddressString} about {exPeerID}");
+                                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: sent MeshConnectionBegin to {parsedMsg.PrivateAddressString} about {exPeerID}");
                                                             }
                                                             catch (Exception ex2)
                                                             {
-                                                                context.Log($"[Mesh] Failed to send MeshConnectionBegin to {parsedMsg.PrivateAddressString}: {ex2.Message}");
+                                                                context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {parsedMsg.PrivateAddressString}: {ex2.Message}");
                                                             }
                                                         }
                                                         else
@@ -1275,7 +1275,7 @@ internal class MeshProtocolEngine
                                                             if (!deferredIntroductions.ContainsKey(parsedMsg.PrivateAddressString))
                                                                 deferredIntroductions[parsedMsg.PrivateAddressString] = new List<MediationMessage>();
                                                             deferredIntroductions[parsedMsg.PrivateAddressString].Add(cbToNew);
-                                                            context.Log($"[Mesh] Reconnect introducer: deferred MeshConnectionBegin to {parsedMsg.PrivateAddressString} about {exPeerID}");
+                                                            context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: deferred MeshConnectionBegin to {parsedMsg.PrivateAddressString} about {exPeerID}");
                                                         }
                                                     }
                                                 }
@@ -1306,7 +1306,7 @@ internal class MeshProtocolEngine
                                         {
                                             // Too many failed rediscovery attempts — tear down and reconnect fresh
                                             // so we get a new NAT test with fresh endpoint info
-                                            context.Log($"[Mesh] {MaxReconnectDiscoveryAttempts} rediscovery attempts failed — tearing down reconnected connection to start fresh");
+                                            context.Log(LogLevel.Error, $"[Mesh] {MaxReconnectDiscoveryAttempts} rediscovery attempts failed — tearing down reconnected connection to start fresh");
                                             reconnectedTcpClient.Close();
                                             reconnectedTcpClient = null;
                                             reconnectedStream = null;
@@ -1329,7 +1329,7 @@ internal class MeshProtocolEngine
                                             reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
                                             // Exponential backoff: 15s → 30s → 60s → 60s → 60s
                                             reconnectDiscoverySeconds = Math.Min(reconnectDiscoverySeconds * 2, 60);
-                                            context.Log($"[Mesh] Re-sent discovery request ({reconnectDiscoveryAttempts}/{MaxReconnectDiscoveryAttempts}), next in {reconnectDiscoverySeconds}s");
+                                            context.Log(LogLevel.Debug, $"[Mesh] Re-sent discovery request ({reconnectDiscoveryAttempts}/{MaxReconnectDiscoveryAttempts}), next in {reconnectDiscoverySeconds}s");
                                         }
                                     }
                                     else if (!stillIsolated)
@@ -1337,7 +1337,7 @@ internal class MeshProtocolEngine
                                         if (!isIntroducer)
                                         {
                                             // Peers recovered — close reconnected connection.
-                                            context.Log("[Mesh] Peers recovered — closing reconnected mediation connection");
+                                            context.Log(LogLevel.Debug, "[Mesh] Peers recovered — closing reconnected mediation connection");
                                             reconnectedTcpClient.Close();
                                             reconnectedTcpClient = null;
                                             reconnectedStream = null;
@@ -1353,7 +1353,7 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex)
                             {
-                                context.Log($"[Mesh] Reconnected TCP error: {ex.Message}");
+                                context.Log(LogLevel.Error, $"[Mesh] Reconnected TCP error: {ex.Message}");
                                 reconnectedTcpClient = null;
                                 reconnectedStream = null;
                                 reconnectedTcpBuffer = "";
@@ -1375,11 +1375,11 @@ internal class MeshProtocolEngine
                                 if (isolationDetectedAt == null)
                                 {
                                     isolationDetectedAt = DateTime.UtcNow;
-                                    context.Log($"[Mesh] Isolation detected — no active WireGuard peers. Will reconnect in {IsolationGracePeriodSeconds}s if not resolved.");
+                                    context.Log(LogLevel.Debug, $"[Mesh] Isolation detected — no active WireGuard peers. Will reconnect in {IsolationGracePeriodSeconds}s if not resolved.");
                                 }
                                 else if ((DateTime.UtcNow - isolationDetectedAt.Value).TotalSeconds >= IsolationGracePeriodSeconds)
                                 {
-                                    context.Log("[Mesh] Isolation persisted — reconnecting to mediation server for peer discovery");
+                                    context.Log(LogLevel.Debug, "[Mesh] Isolation persisted — reconnecting to mediation server for peer discovery");
                                     try
                                     {
                                         var mediationEP = context.Options.MediationEndpoint;
@@ -1394,7 +1394,7 @@ internal class MeshProtocolEngine
                                                     : null);
                                             sslStream.AuthenticateAsClient(mediationEP.Address.ToString());
                                             reconnectedStream = sslStream;
-                                            context.Log($"[Mesh] Reconnect TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                                            context.Log(LogLevel.Info, $"[Mesh] Reconnect TLS handshake complete (protocol: {sslStream.SslProtocol})");
                                         }
                                         else
                                         {
@@ -1450,7 +1450,7 @@ internal class MeshProtocolEngine
                                         if (natTypeRespR.ID == MediationMessageType.NATTypeResponse)
                                         {
                                             detectedNatType = natTypeRespR.NATType;
-                                            context.Log($"[Mesh] Reconnect NAT type: {detectedNatType}");
+                                            context.Log(LogLevel.Debug, $"[Mesh] Reconnect NAT type: {detectedNatType}");
                                         }
 
                                         // 3. Send MeshJoinRequest for peer discovery
@@ -1468,11 +1468,11 @@ internal class MeshProtocolEngine
 
                                         reconnectedStream.ReadTimeout = 100; // poll timeout for main loop
                                         lastReconnectDiscovery = DateTime.UtcNow;
-                                        context.Log("[Mesh] Reconnected to mediation server — sent discovery request");
+                                        context.Log(LogLevel.Debug, "[Mesh] Reconnected to mediation server — sent discovery request");
                                     }
                                     catch (Exception ex)
                                     {
-                                        context.Log($"[Mesh] Failed to reconnect to mediation: {ex.Message}");
+                                        context.Log(LogLevel.Error, $"[Mesh] Failed to reconnect to mediation: {ex.Message}");
                                         reconnectedTcpClient = null;
                                         reconnectedStream = null;
                                         isolationDetectedAt = null; // Reset to retry later
@@ -1483,7 +1483,7 @@ internal class MeshProtocolEngine
                             {
                                 if (isolationDetectedAt != null)
                                 {
-                                    context.Log("[Mesh] Isolation resolved — active peers detected");
+                                    context.Log(LogLevel.Debug, "[Mesh] Isolation resolved — active peers detected");
                                     isolationDetectedAt = null;
                                 }
                             }
@@ -1516,7 +1516,7 @@ internal class MeshProtocolEngine
                                     foreach (var deadGateway in deadGateways)
                                     {
                                         var removedRoutes = host.RemoveRelayRoutesViaGateway(deadGateway);
-                                        context.Log($"[Mesh] Removed {removedRoutes.Count} relay route(s) via {deadGateway}");
+                                        context.Log(LogLevel.Debug, $"[Mesh] Removed {removedRoutes.Count} relay route(s) via {deadGateway}");
                                     }
                                     // New relay assignments will come from the introducer via MeshConnectionBegin
                                 }
@@ -1536,7 +1536,7 @@ internal class MeshProtocolEngine
                 if (context.DisconnectRequested && !context.ShutdownRequested)
                 {
                     context.ConnectionState = MeshConnectionState.Disconnecting;
-                    context.Log("[Mesh] Disconnect requested — performing graceful leave");
+                    context.Log(LogLevel.Info, "[Mesh] Disconnect requested — performing graceful leave");
 
                     // Send MeshPeerLeave to all peers
                     try
@@ -1595,7 +1595,7 @@ internal class MeshProtocolEngine
                     tcpClient = null; stream = null; earlyTcpRemainder = "";
 
                     context.ConnectionState = MeshConnectionState.Disconnected;
-                    context.Log("[Mesh] Disconnected — waiting for reconnect request");
+                    context.Log(LogLevel.Info, "[Mesh] Disconnected — waiting for reconnect request");
 
                     // Idle wait
                     while (!context.ShutdownRequested && !context.ConnectRequested)
@@ -1604,7 +1604,7 @@ internal class MeshProtocolEngine
 
                     if (!context.ShutdownRequested)
                     {
-                        context.Log("[Mesh] Reconnect requested — re-entering connect loop");
+                        context.Log(LogLevel.Debug, "[Mesh] Reconnect requested — re-entering connect loop");
                         // Reload config from disk in case settings were changed via GUI/settings
                         context.ReloadConfig();
                         // Refresh local variables that were captured from TunnelOptions at startup
@@ -1623,7 +1623,7 @@ internal class MeshProtocolEngine
         }
         catch (Exception ex)
         {
-            context.Log($"[Mesh] Error: {ex.Message}");
+            context.Log(LogLevel.Error, $"[Mesh] Error: {ex.Message}");
             context.Log(ex.StackTrace);
             throw;
         }
@@ -1674,7 +1674,7 @@ internal class MeshProtocolEngine
         if (natTypeResponse.ID == MediationMessageType.NATTypeResponse)
         {
             detectedNatType = natTypeResponse.NATType;
-            context.Log($"[Mesh] NAT type detected: {detectedNatType}");
+            context.Log(LogLevel.Info, $"[Mesh] NAT type detected: {detectedNatType}");
         }
 
         // 3. Join mesh network
@@ -1696,7 +1696,7 @@ internal class MeshProtocolEngine
             return false;
         }
 
-        context.Log($"[Mesh] Joined network! Found {joinResponse.PeerCount} other peers");
+        context.Log(LogLevel.Info, $"[Mesh] Joined network! Found {joinResponse.PeerCount} other peers");
         return true;
     }
 
@@ -1712,7 +1712,7 @@ internal class MeshProtocolEngine
                     ProcessMeshControlPacket(result.Buffer, result.RemoteEndPoint);
                 }
                 catch (ObjectDisposedException) { break; }
-                catch (Exception ex) { context.Log($"[Mesh] Mesh control listener error: {ex.Message}"); }
+                catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Mesh control listener error: {ex.Message}"); }
             }
         });
     }
@@ -1761,12 +1761,12 @@ internal class MeshProtocolEngine
 
                     if (controlMsg.ID == MediationMessageType.MeshConnectionBegin)
                     {
-                        context.Log($"[Mesh] Received MeshConnectionBegin from {remoteEndPoint}: peer {controlMsg.PeerID} at {controlMsg.EndpointString}");
+                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshConnectionBegin from {remoteEndPoint}: peer {controlMsg.PeerID} at {controlMsg.EndpointString}");
                         string senderIP = remoteEndPoint.Address.ToString();
                         if (string.IsNullOrEmpty(introducerMeshIP) && senderIP != meshIP)
                         {
                             introducerMeshIP = senderIP;
-                            context.Log($"[Mesh] Learned introducer mesh IP from MeshConnectionBegin: {introducerMeshIP}");
+                            context.Log(LogLevel.Info, $"[Mesh] Learned introducer mesh IP from MeshConnectionBegin: {introducerMeshIP}");
                         }
                         meshConnectionBeginQueue.Enqueue(controlMsg);
                     }
@@ -1802,7 +1802,7 @@ internal class MeshProtocolEngine
                                         Observation = RelayHealthObservation.Other
                                     });
                                 }
-                                context.Log($"[Mesh] Relay {heartbeatSenderIP} dropped RelayCapable — queued reselection for affected pairs");
+                                context.Log(LogLevel.Debug, $"[Mesh] Relay {heartbeatSenderIP} dropped RelayCapable — queued reselection for affected pairs");
                             }
                         }
                         // Authoritative-by-claim: a heartbeat with IsIntroducer=true updates our
@@ -1820,7 +1820,7 @@ internal class MeshProtocolEngine
                         else if (string.IsNullOrEmpty(introducerMeshIP) && heartbeatSenderIP != meshIP)
                         {
                             introducerMeshIP = heartbeatSenderIP;
-                            context.Log($"[Mesh] Learned introducer mesh IP from MeshHeartbeat: {introducerMeshIP}");
+                            context.Log(LogLevel.Info, $"[Mesh] Learned introducer mesh IP from MeshHeartbeat: {introducerMeshIP}");
                         }
                         if (controlMsg.PeerRoster != null)
                         {
@@ -1855,7 +1855,7 @@ internal class MeshProtocolEngine
                                     if (knownIP == introducerMeshIP) continue;
                                     if (rosterIPs.Contains(knownIP)) continue;
                                     string pid = peerInfoByMeshIP.TryGetValue(knownIP, out var ki) ? ki.peerID : "";
-                                    context.Log($"[Mesh] Synthesizing MeshPeerRemoved for {knownIP} — absent from introducer's roster");
+                                    context.Log(LogLevel.Info, $"[Mesh] Synthesizing MeshPeerRemoved for {knownIP} — absent from introducer's roster");
                                     meshPeerRemovedQueue.Enqueue(new MediationMessage(MediationMessageType.MeshPeerRemoved)
                                     {
                                         PrivateAddressString = knownIP,
@@ -1893,12 +1893,12 @@ internal class MeshProtocolEngine
                     }
                     else if (controlMsg.ID == MediationMessageType.MeshPeerRemoved)
                     {
-                        context.Log($"[Mesh] Received MeshPeerRemoved: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) declared dead by introducer");
+                        context.Log(LogLevel.Warning, $"[Mesh] Received MeshPeerRemoved: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) declared dead by introducer");
                         meshPeerRemovedQueue.Enqueue(controlMsg);
                     }
                     else if (controlMsg.ID == MediationMessageType.MeshPeerLeave)
                     {
-                        context.Log($"[Mesh] Received MeshPeerLeave: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) left gracefully");
+                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshPeerLeave: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) left gracefully");
                         meshPeerLeaveQueue.Enqueue(controlMsg);
                     }
                     else if (controlMsg.ID == MediationMessageType.MeshIntroduction)
@@ -1907,18 +1907,18 @@ internal class MeshProtocolEngine
                     }
                     else if (controlMsg.ID == MediationMessageType.MeshRelayAssignment)
                     {
-                        context.Log($"[Mesh] Received MeshRelayAssignment: {controlMsg.PeerA} <-> {controlMsg.PeerB} via {controlMsg.RelayMeshIP}");
+                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayAssignment: {controlMsg.PeerA} <-> {controlMsg.PeerB} via {controlMsg.RelayMeshIP}");
                         meshRelayAssignmentQueue.Enqueue(controlMsg);
                     }
                     else if (controlMsg.ID == MediationMessageType.MeshRelayHealthReport)
                     {
-                        context.Log($"[Mesh] Received MeshRelayHealthReport from {controlMsg.Self}: pair {controlMsg.PeerA}<->{controlMsg.PeerB} relay {controlMsg.CurrentRelay} obs={controlMsg.Observation}");
+                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayHealthReport from {controlMsg.Self}: pair {controlMsg.PeerA}<->{controlMsg.PeerB} relay {controlMsg.CurrentRelay} obs={controlMsg.Observation}");
                         meshRelayHealthReportQueue.Enqueue(controlMsg);
                     }
         }
         catch (Exception ex)
         {
-            context.Log($"[Mesh] Mesh control packet processing error: {ex.Message}");
+            context.Log(LogLevel.Error, $"[Mesh] Mesh control packet processing error: {ex.Message}");
         }
     }
 
@@ -1934,13 +1934,13 @@ internal class MeshProtocolEngine
 
         if (string.IsNullOrEmpty(remotePeerID))
         {
-            context.Log($"[Mesh] MeshConnectionBegin missing PeerID — skipping");
+            context.Log(LogLevel.Debug, $"[Mesh] MeshConnectionBegin missing PeerID — skipping");
             return;
         }
         // Relay mode only needs mesh IP + introducer IP, not endpoint
         if (!cbMsg.IsRelay && string.IsNullOrEmpty(remoteEndpoint))
         {
-            context.Log($"[Mesh] MeshConnectionBegin missing endpoint (non-relay) — skipping");
+            context.Log(LogLevel.Debug, $"[Mesh] MeshConnectionBegin missing endpoint (non-relay) — skipping");
             return;
         }
 
@@ -1959,11 +1959,11 @@ internal class MeshProtocolEngine
         {
             if ((DateTime.UtcNow - pendingTime).TotalSeconds < context.Options.StaleTimeoutSeconds)
             {
-                context.Log($"[Mesh] Ignoring MeshConnectionBegin for {remotePeerID} — connection already pending ({(int)(DateTime.UtcNow - pendingTime).TotalSeconds}s ago)");
+                context.Log(LogLevel.Debug, $"[Mesh] Ignoring MeshConnectionBegin for {remotePeerID} — connection already pending ({(int)(DateTime.UtcNow - pendingTime).TotalSeconds}s ago)");
                 return;
             }
             // Stale pending request — clean up and allow the new attempt
-            context.Log($"[Mesh] Clearing stale pending request for {remotePeerID} ({(int)(DateTime.UtcNow - pendingTime).TotalSeconds}s old) — allowing new attempt");
+            context.Log(LogLevel.Warning, $"[Mesh] Clearing stale pending request for {remotePeerID} ({(int)(DateTime.UtcNow - pendingTime).TotalSeconds}s old) — allowing new attempt");
             pendingConnectionRequests.Remove(remotePeerID);
         }
 
@@ -1984,27 +1984,27 @@ internal class MeshProtocolEngine
             if (routeExists && !string.IsNullOrEmpty(newGateway) && currentGateway != null &&
                 currentGateway.ToString() != newGateway)
             {
-                context.Log($"[Mesh] Relay reselect for {remoteMeshIP}: gateway {currentGateway} → {newGateway}");
+                context.Log(LogLevel.Debug, $"[Mesh] Relay reselect for {remoteMeshIP}: gateway {currentGateway} → {newGateway}");
                 host.RemoveRelayRouteForPeer(IPAddress.Parse(remoteMeshIP));
                 if (host.AddRelayRoute(IPAddress.Parse(newGateway), IPAddress.Parse(remoteMeshIP)))
                 {
                     relayedRemotes[remoteMeshIP] = newGateway;
                     lastRelayHealthReport.TryRemove(remoteMeshIP, out _);
-                    context.Log($"[Mesh] Relay reselect applied: {remoteMeshIP} now via {newGateway}");
+                    context.Log(LogLevel.Debug, $"[Mesh] Relay reselect applied: {remoteMeshIP} now via {newGateway}");
                 }
                 else
                 {
-                    context.Log($"[Mesh] Relay reselect: AddRelayRoute failed for {remoteMeshIP} via {newGateway}");
+                    context.Log(LogLevel.Error, $"[Mesh] Relay reselect: AddRelayRoute failed for {remoteMeshIP} via {newGateway}");
                 }
                 return;
             }
             if (routeExists)
             {
-                context.Log($"[Mesh] Ignoring duplicate relay MeshConnectionBegin for {remotePeerID} ({remoteMeshIP}) — relay route confirmed in WireGuard");
+                context.Log(LogLevel.Debug, $"[Mesh] Ignoring duplicate relay MeshConnectionBegin for {remotePeerID} ({remoteMeshIP}) — relay route confirmed in WireGuard");
                 return;
             }
             // Route is gone — clear stale tracking and let the message re-establish it
-            context.Log($"[Mesh] Relay route for {remoteMeshIP} missing from WireGuard — allowing re-establishment");
+            context.Log(LogLevel.Debug, $"[Mesh] Relay route for {remoteMeshIP} missing from WireGuard — allowing re-establishment");
             completedTunnelMeshIPs.Remove(remoteMeshIP);
             wasRelayed = false;
         }
@@ -2022,17 +2022,17 @@ internal class MeshProtocolEngine
                                  DateTime.UtcNow - lastPong < tunnelHealthyWindow;
             if (tunnelHealthy)
             {
-                context.Log($"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel is healthy (last pong {(int)(DateTime.UtcNow - lastPong).TotalSeconds}s ago)");
+                context.Log(LogLevel.Debug, $"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel is healthy (last pong {(int)(DateTime.UtcNow - lastPong).TotalSeconds}s ago)");
                 return;
             }
 
             // Clean up the old connection (direct or relay) to allow reconnect
-            context.Log($"[Mesh] Peer {remotePeerID} ({remoteMeshIP}) being re-introduced — cleaning up old connection (relay={wasRelayed})");
+            context.Log(LogLevel.Debug, $"[Mesh] Peer {remotePeerID} ({remoteMeshIP}) being re-introduced — cleaning up old connection (relay={wasRelayed})");
             metricReconnects++;
             RemoveDeadPeer(remoteMeshIP);
         }
 
-        context.Log($"[Mesh] Processing MeshConnectionBegin: peer {remotePeerID} at {remoteEndpoint} (NAT: {remotePeerNatType}, meshIP: {remoteMeshIP}, relay: {cbMsg.IsRelay})");
+        context.Log(LogLevel.Debug, $"[Mesh] Processing MeshConnectionBegin: peer {remotePeerID} at {remoteEndpoint} (NAT: {remotePeerNatType}, meshIP: {remoteMeshIP}, relay: {cbMsg.IsRelay})");
 
         // Relay mode: route traffic for the remote peer through the chosen relay's tunnel.
         if (cbMsg.IsRelay && !string.IsNullOrEmpty(remoteMeshIP))
@@ -2045,7 +2045,7 @@ internal class MeshProtocolEngine
                 var gatewayIPAddr = IPAddress.Parse(gatewayIP);
                 if (host.AddRelayRoute(gatewayIPAddr, remoteMeshIPAddr))
                 {
-                    context.Log($"[Mesh] Relay route added: {remoteMeshIP} via {gatewayIP} — peer {remotePeerID} is reachable");
+                    context.Log(LogLevel.Debug, $"[Mesh] Relay route added: {remoteMeshIP} via {gatewayIP} — peer {remotePeerID} is reachable");
                     metricRelayRoutesEstablished++;
                     relayedRemotes[remoteMeshIP] = gatewayIP;
                     // Notify host (no-op in daemon, used by embedded mode to spawn a relayed proxy).
@@ -2053,12 +2053,12 @@ internal class MeshProtocolEngine
                 }
                 else
                 {
-                    context.Log($"[Mesh] Failed to add relay route for {remoteMeshIP} via {gatewayIP}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to add relay route for {remoteMeshIP} via {gatewayIP}");
                 }
             }
             else
             {
-                context.Log($"[Mesh] Relay MeshConnectionBegin missing RelayMeshIP/IntroducerMeshIP — cannot set up relay route");
+                context.Log(LogLevel.Error, $"[Mesh] Relay MeshConnectionBegin missing RelayMeshIP/IntroducerMeshIP — cannot set up relay route");
             }
             completedTunnelMeshIPs.Add(remoteMeshIP);
             tunnelCompletedAt[remoteMeshIP] = DateTime.UtcNow;
@@ -2073,7 +2073,7 @@ internal class MeshProtocolEngine
         var peerTunnel = new Tunnel(
             onConnectionFailure: () =>
             {
-                context.Log($"[Mesh] Introducer-relayed tunnel for {capturedPeerID} failed — cleaning up for future retry");
+                context.Log(LogLevel.Error, $"[Mesh] Introducer-relayed tunnel for {capturedPeerID} failed — cleaning up for future retry");
                 lock (meshLock)
                 {
                     activeConnectionTunnels.Remove(capturedPeerID.GetHashCode());
@@ -2092,7 +2092,7 @@ internal class MeshProtocolEngine
             ownMeshIP: meshIP,
             onConnectionComplete: () =>
             {
-                context.Log($"[Mesh] Introducer-relayed tunnel for {capturedPeerID} WireGuard established");
+                context.Log(LogLevel.Debug, $"[Mesh] Introducer-relayed tunnel for {capturedPeerID} WireGuard established");
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                 System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
                 lock (meshLock)
@@ -2105,7 +2105,7 @@ internal class MeshProtocolEngine
 
                         if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
                         {
-                            context.Log($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {capturedMeshIP}");
+                            context.Log(LogLevel.Debug, $"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {capturedMeshIP}");
                             foreach (var deferredMsg in deferred)
                             {
                                 string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
@@ -2117,11 +2117,11 @@ internal class MeshProtocolEngine
                                     byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
                                     MeshSend(deferredBytes, deferredBytes.Length,
                                         new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
-                                    context.Log($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                    context.Log(LogLevel.Debug, $"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
                                 }
                                 catch (Exception ex)
                                 {
-                                    context.Log($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
+                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
                                 }
                             }
                             deferredIntroductions.Remove(capturedMeshIP);
@@ -2155,11 +2155,11 @@ internal class MeshProtocolEngine
                     detectedNatType,
                     remoteMeshIP
                 );
-                context.Log($"[Mesh] Hole-punching started for {capturedPeerID} at {remoteEndpoint}");
+                context.Log(LogLevel.Info, $"[Mesh] Hole-punching started for {capturedPeerID} at {remoteEndpoint}");
             }
             catch (Exception ex)
             {
-                context.Log($"[Mesh] Error starting introducer-relayed tunnel for {capturedPeerID}: {ex.Message}");
+                context.Log(LogLevel.Error, $"[Mesh] Error starting introducer-relayed tunnel for {capturedPeerID}: {ex.Message}");
                 pendingConnectionRequests.Remove(capturedPeerID);
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
             }
@@ -2168,7 +2168,7 @@ internal class MeshProtocolEngine
 
     private void PerformGracefulShutdown()
     {
-        context.Log("[Mesh] Graceful shutdown initiated");
+        context.Log(LogLevel.Debug, "[Mesh] Graceful shutdown initiated");
         int recipientCount = 0;
         try
         {
@@ -2189,14 +2189,14 @@ internal class MeshProtocolEngine
                 }
                 catch (Exception ex)
                 {
-                    context.Log($"[Mesh] Failed to send MeshPeerLeave to {peer.PrivateAddress}: {ex.Message}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshPeerLeave to {peer.PrivateAddress}: {ex.Message}");
                 }
             }
-            context.Log($"[Mesh] Sent MeshPeerLeave to {recipientCount} peer(s)");
+            context.Log(LogLevel.Debug, $"[Mesh] Sent MeshPeerLeave to {recipientCount} peer(s)");
         }
         catch (Exception ex)
         {
-            context.Log($"[Mesh] Error sending graceful shutdown message: {ex.Message}");
+            context.Log(LogLevel.Error, $"[Mesh] Error sending graceful shutdown message: {ex.Message}");
         }
 
         // Brief drain delay before Run() returns and the finally block tears down sockets.
@@ -2255,7 +2255,7 @@ internal class MeshProtocolEngine
         if (peers == null || peers.Length == 0) return;
         var writeStream = targetStream ?? stream;
 
-        context.Log($"[Mesh] Discovered {peers.Length} peer(s) in network:");
+        context.Log(LogLevel.Debug, $"[Mesh] Discovered {peers.Length} peer(s) in network:");
         foreach (var peer in peers)
         {
             var peerObj = JsonSerializer.Deserialize<JsonElement>(peer.ToString());
@@ -2330,7 +2330,7 @@ internal class MeshProtocolEngine
                 }
             }
             if (dropped.Length > 0)
-                context.Log($"[Mesh] Disabled relay hosting — dropped {dropped.Length} pair(s)");
+                context.Log(LogLevel.Debug, $"[Mesh] Disabled relay hosting — dropped {dropped.Length} pair(s)");
 
             // Send an immediate heartbeat with RelayCapable=false so the introducer learns
             // right away and reassigns affected pairs, instead of waiting up to ProbeInterval
@@ -2347,11 +2347,11 @@ internal class MeshProtocolEngine
                     byte[] probeBytes = Encoding.UTF8.GetBytes(probe.Serialize());
                     MeshSend(probeBytes, probeBytes.Length,
                         new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
-                    context.Log("[Mesh] Sent immediate heartbeat advertising RelayCapable=false");
+                    context.Log(LogLevel.Debug, "[Mesh] Sent immediate heartbeat advertising RelayCapable=false");
                 }
                 catch (Exception ex)
                 {
-                    context.Log($"[Mesh] Failed to send immediate opt-out heartbeat: {ex.Message}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to send immediate opt-out heartbeat: {ex.Message}");
                 }
             }
         }
@@ -2361,7 +2361,7 @@ internal class MeshProtocolEngine
         {
             if (raMsg.RelayMeshIP != meshIP)
             {
-                context.Log($"[Mesh] Ignoring MeshRelayAssignment not addressed to us (RelayMeshIP={raMsg.RelayMeshIP})");
+                context.Log(LogLevel.Debug, $"[Mesh] Ignoring MeshRelayAssignment not addressed to us (RelayMeshIP={raMsg.RelayMeshIP})");
                 continue;
             }
             string sortA = string.Compare(raMsg.PeerA, raMsg.PeerB, StringComparison.Ordinal) < 0 ? raMsg.PeerA : raMsg.PeerB;
@@ -2377,7 +2377,7 @@ internal class MeshProtocolEngine
                 }
                 catch { }
                 RemoveHostedRelay(pairKey);
-                context.Log($"[Mesh] Released relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
+                context.Log(LogLevel.Debug, $"[Mesh] Released relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
                 continue;
             }
 
@@ -2395,7 +2395,7 @@ internal class MeshProtocolEngine
                 if (ok)
                 {
                     AddHostedRelay(pairKey);
-                    context.Log($"[Mesh] Hosting relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
+                    context.Log(LogLevel.Debug, $"[Mesh] Hosting relay for {raMsg.PeerA} <-> {raMsg.PeerB}");
                 }
                 else err = $"Missing direct WG peer (aPeer={aPeer != null}, bPeer={bPeer != null})";
             }
@@ -2434,7 +2434,7 @@ internal class MeshProtocolEngine
             var cooldown = TimeSpan.FromSeconds(context.Options.RelayReselectCooldownSeconds);
             if (lastRelayReselect.TryGetValue(pairKey, out var lastSel) && DateTime.UtcNow - lastSel < cooldown)
             {
-                context.Log($"[Mesh] Health report for {pairKey} within cooldown — ignored");
+                context.Log(LogLevel.Debug, $"[Mesh] Health report for {pairKey} within cooldown — ignored");
                 continue;
             }
 
@@ -2464,7 +2464,7 @@ internal class MeshProtocolEngine
 
             if (string.IsNullOrEmpty(newRelay) || newRelay == oldRelay)
             {
-                context.Log($"[Mesh] Health report for {pairKey}: no better candidate available");
+                context.Log(LogLevel.Debug, $"[Mesh] Health report for {pairKey}: no better candidate available");
                 lastRelayReselect[pairKey] = DateTime.UtcNow;
                 continue;
             }
@@ -2484,7 +2484,7 @@ internal class MeshProtocolEngine
                          : (relayCandidates.TryGetValue(newRelay, out var nc) ? nc.activeRoutes : 0));
             if (oldStillViable && oldS.HasValue && newS > oldS.Value * (1.0 - context.Options.RelayReselectMinImprovement))
             {
-                context.Log($"[Mesh] Health report for {pairKey}: new candidate {newRelay} (score {newS}) not meaningfully better than {oldRelay} (score {oldS}) — staying put");
+                context.Log(LogLevel.Debug, $"[Mesh] Health report for {pairKey}: new candidate {newRelay} (score {newS}) not meaningfully better than {oldRelay} (score {oldS}) — staying put");
                 lastRelayReselect[pairKey] = DateTime.UtcNow;
                 continue;
             }
@@ -2515,7 +2515,7 @@ internal class MeshProtocolEngine
                         Release = true
                     };
                     try { byte[] rb = Encoding.UTF8.GetBytes(release.Serialize()); MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(oldRelay), MeshControlPort)); }
-                    catch (Exception ex) { context.Log($"[Mesh] Failed to release old relay {oldRelay}: {ex.Message}"); }
+                    catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to release old relay {oldRelay}: {ex.Message}"); }
                 }
             }
 
@@ -2533,7 +2533,7 @@ internal class MeshProtocolEngine
                     RelayMeshIP = newRelay
                 };
                 try { byte[] ab = Encoding.UTF8.GetBytes(assign.Serialize()); MeshSend(ab, ab.Length, new IPEndPoint(IPAddress.Parse(newRelay), MeshControlPort)); }
-                catch (Exception ex) { context.Log($"[Mesh] Failed to dispatch MeshRelayAssignment to {newRelay}: {ex.Message}"); }
+                catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to dispatch MeshRelayAssignment to {newRelay}: {ex.Message}"); }
             }
 
             NotifyEndpoint(pa, pb, newRelay);
@@ -2545,14 +2545,14 @@ internal class MeshProtocolEngine
         {
             if (!string.IsNullOrEmpty(leaveMsg.PrivateAddressString))
             {
-                context.Log($"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
+                context.Log(LogLevel.Debug, $"[Mesh] Peer {leaveMsg.PrivateAddressString} left gracefully");
                 bool wasIntroducer = leaveMsg.PrivateAddressString == introducerMeshIP;
                 RemoveDeadPeer(leaveMsg.PrivateAddressString);
                 // Don't pre-arm takeover counters if a reconnect-to-mediation bid is already in flight
                 // (mesh-control-only loop). reconnectedTcpClient is always null in the primary loop.
                 if (wasIntroducer && !isIntroducer && reconnectedTcpClient == null)
                 {
-                    context.Log("[Mesh] Introducer left gracefully — forcing immediate takeover check");
+                    context.Log(LogLevel.Debug, "[Mesh] Introducer left gracefully — forcing immediate takeover check");
                     // Pre-arm both counters: clearing the ack flag so the probe block's
                     // first branch fires, and bumping misses one past threshold so even
                     // after the block's ++ the takeover gate trips.
@@ -2612,7 +2612,7 @@ internal class MeshProtocolEngine
                 }
                 catch (Exception ex)
                 {
-                    context.Log($"[Mesh] Failed to send heartbeat to {peerIP}: {ex.Message}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to send heartbeat to {peerIP}: {ex.Message}");
                 }
             }
 
@@ -2621,7 +2621,7 @@ internal class MeshProtocolEngine
                 heartbeatAckDeadline = DateTime.UtcNow.AddSeconds(5);
                 heartbeatSentTime = DateTime.UtcNow;
                 metricHeartbeatsSent++;
-                context.Log($"[Mesh] Heartbeat sent to {heartbeatTargets.Count} peer(s), collecting acks...");
+                context.Log(LogLevel.Debug, $"[Mesh] Heartbeat sent to {heartbeatTargets.Count} peer(s), collecting acks...");
             }
             else
             {
@@ -2652,7 +2652,7 @@ internal class MeshProtocolEngine
 
         if (heartbeatSentTime != null)
             metricLastHeartbeatResponseMs = (long)(DateTime.UtcNow - heartbeatSentTime.Value).TotalMilliseconds;
-        context.Log($"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
+        context.Log(LogLevel.Debug, $"[Mesh] Heartbeat ack collection complete: {heartbeatAcks.Count}/{heartbeatTargets.Count} responded");
 
         var deadPeers = new List<string>();
         foreach (var ip in heartbeatTargets)
@@ -2666,7 +2666,7 @@ internal class MeshProtocolEngine
                 heartbeatMissCount.TryGetValue(ip, out int prev);
                 heartbeatMissCount[ip] = prev + 1;
                 metricHeartbeatsMissed++;
-                context.Log($"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{peerDeadThreshold})");
+                context.Log(LogLevel.Warning, $"[Mesh] Peer {ip} missed heartbeat ({heartbeatMissCount[ip]}/{peerDeadThreshold})");
                 if (heartbeatMissCount[ip] >= peerDeadThreshold)
                 {
                     // Symmetric NAT hole-punching can take longer than the heartbeat window,
@@ -2683,7 +2683,7 @@ internal class MeshProtocolEngine
                     bool tunnelEverCompleted = completedTunnelMeshIPs.Contains(ip);
                     if (hasPendingTunnel && !tunnelEverCompleted)
                     {
-                        context.Log($"[Mesh] Peer {ip} would be dead but tunnel still establishing — deferring removal");
+                        context.Log(LogLevel.Debug, $"[Mesh] Peer {ip} would be dead but tunnel still establishing — deferring removal");
                         continue;
                     }
                     deadPeers.Add(ip);
@@ -2693,7 +2693,7 @@ internal class MeshProtocolEngine
         foreach (var deadIP in deadPeers)
         {
             metricPeersLost++;
-            context.Log($"[Mesh] Peer {deadIP} declared dead after {peerDeadThreshold} consecutive missed heartbeats");
+            context.Log(LogLevel.Warning, $"[Mesh] Peer {deadIP} declared dead after {peerDeadThreshold} consecutive missed heartbeats");
             string deadPID = peerInfoByMeshIP.TryGetValue(deadIP, out var di) ? di.peerID : null;
             var removeMsg = new MediationMessage(MediationMessageType.MeshPeerRemoved)
             {
@@ -2724,7 +2724,7 @@ internal class MeshProtocolEngine
                 }
                 catch (Exception ex)
                 {
-                    context.Log($"[Mesh] Failed to notify mediation of dead peer {deadIP}: {ex.Message}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to notify mediation of dead peer {deadIP}: {ex.Message}");
                 }
             }
             RemoveDeadPeer(deadIP);
@@ -2733,7 +2733,7 @@ internal class MeshProtocolEngine
         var targetList = heartbeatTargets.Where(ip => !deadPeers.Contains(ip)).ToList();
         int repairCount = RepairBrokenLinks(targetList, heartbeatAcks, mediationClient, mediationStream);
         if (repairCount > 0)
-            context.Log($"[Mesh] Heartbeat: sent {repairCount} repair message(s)");
+            context.Log(LogLevel.Debug, $"[Mesh] Heartbeat: sent {repairCount} repair message(s)");
 
         // Retry ConnectionRequest for peers with no completed tunnel — only if we have
         // a live mediation TCP. Without it, mediation-brokered reconnection isn't possible.
@@ -2749,7 +2749,7 @@ internal class MeshProtocolEngine
                 if (pendingConnectionRequests.ContainsKey(kvp.Value.peerID)) continue;
                 if (activePeerTunnels.ContainsKey(kvp.Value.peerID) || activePeerTunnels.ContainsKey(peerMeshIP)) continue;
 
-                context.Log($"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
+                context.Log(LogLevel.Debug, $"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
                 try
                 {
                     var reconnReq = new MediationMessage(MediationMessageType.ConnectionRequest)
@@ -2764,7 +2764,7 @@ internal class MeshProtocolEngine
                 }
                 catch (Exception ex)
                 {
-                    context.Log($"[Mesh] Failed to send reconnection request for {peerMeshIP}: {ex.Message}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to send reconnection request for {peerMeshIP}: {ex.Message}");
                 }
             }
         }
@@ -2780,8 +2780,8 @@ internal class MeshProtocolEngine
     /// </summary>
     private void HandleConnectionBegin(MediationMessage msg)
     {
-        context.Log($"[Mesh] *** ConnectionBegin received! ***");
-        context.Log($"[Mesh] ConnectionBegin: connID={msg.ConnectionID}, endpoint={msg.EndpointString}, NAT={msg.NATType}, meshIP={msg.PrivateAddressString}");
+        context.Log(LogLevel.Debug, $"[Mesh] *** ConnectionBegin received! ***");
+        context.Log(LogLevel.Debug, $"[Mesh] ConnectionBegin: connID={msg.ConnectionID}, endpoint={msg.EndpointString}, NAT={msg.NATType}, meshIP={msg.PrivateAddressString}");
 
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
         {
@@ -2812,7 +2812,7 @@ internal class MeshProtocolEngine
                 }
                 if (oldTunnel != null)
                 {
-                    context.Log($"[Mesh] Disposing old tunnel {oldConnID} for {cbMeshIP} (superseded by {msg.ConnectionID})");
+                    context.Log(LogLevel.Debug, $"[Mesh] Disposing old tunnel {oldConnID} for {cbMeshIP} (superseded by {msg.ConnectionID})");
                     try { oldTunnel.Dispose(); } catch { }
                 }
                 peerMeshIPs.Remove(oldConnID);
@@ -2825,7 +2825,7 @@ internal class MeshProtocolEngine
 
         if (activeConnectionTunnels.ContainsKey(msg.ConnectionID))
         {
-            context.Log($"[Mesh] Tunnel {msg.ConnectionID} already exists - ignoring duplicate ConnectionBegin");
+            context.Log(LogLevel.Debug, $"[Mesh] Tunnel {msg.ConnectionID} already exists - ignoring duplicate ConnectionBegin");
             return;
         }
 
@@ -2836,7 +2836,7 @@ internal class MeshProtocolEngine
         var peerTunnel = new Tunnel(
             onConnectionFailure: () =>
             {
-                context.Log($"[Mesh] Tunnel {capturedConnectionID} failed permanently after all retries — cleaning up for future retry");
+                context.Log(LogLevel.Error, $"[Mesh] Tunnel {capturedConnectionID} failed permanently after all retries — cleaning up for future retry");
                 lock (meshLock)
                 {
                     activeConnectionTunnels.Remove(capturedConnectionID);
@@ -2855,7 +2855,7 @@ internal class MeshProtocolEngine
             ownMeshIP: meshIP,
             onConnectionComplete: () =>
             {
-                context.Log($"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
+                context.Log(LogLevel.Info, $"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                 System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
                 lock (meshLock)
@@ -2866,7 +2866,7 @@ internal class MeshProtocolEngine
                         tunnelCompletedAt[completedMeshIP] = DateTime.UtcNow;
                         if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
                         {
-                            context.Log($"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
+                            context.Log(LogLevel.Debug, $"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
                             foreach (var deferredMsg in deferred)
                             {
                                 string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
@@ -2878,11 +2878,11 @@ internal class MeshProtocolEngine
                                     byte[] deferredBytes = Encoding.UTF8.GetBytes(deferredMsg.Serialize());
                                     MeshSend(deferredBytes, deferredBytes.Length,
                                         new IPEndPoint(IPAddress.Parse(targetIP), MeshControlPort));
-                                    context.Log($"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
+                                    context.Log(LogLevel.Debug, $"[Mesh] Sent deferred MeshConnectionBegin to {targetIP}");
                                 }
                                 catch (Exception ex)
                                 {
-                                    context.Log($"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
+                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send deferred MeshConnectionBegin to {targetIP}: {ex.Message}");
                                 }
                             }
                             deferredIntroductions.Remove(completedMeshIP);
@@ -2920,7 +2920,7 @@ internal class MeshProtocolEngine
             }
             catch (Exception ex)
             {
-                context.Log($"[Mesh] Error starting tunnel {capturedConnectionID}: {ex.Message}");
+                context.Log(LogLevel.Error, $"[Mesh] Error starting tunnel {capturedConnectionID}: {ex.Message}");
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
             }
         });
@@ -2945,13 +2945,13 @@ internal class MeshProtocolEngine
             bool serverSaysWereIntroducer = msg.IntroducerPeerID == peerID.ToString();
             if (serverSaysWereIntroducer && !isIntroducer)
             {
-                context.Log("[Mesh] Server confirmed us as new introducer (primary loop)");
+                context.Log(LogLevel.Info, "[Mesh] Server confirmed us as new introducer (primary loop)");
                 isIntroducer = true;
                 introducerMeshIP = meshIP;
             }
             else if (!serverSaysWereIntroducer && isIntroducer)
             {
-                context.Log($"[Mesh] Server picked a different introducer ({msg.IntroducerPeerID}) — relinquishing role");
+                context.Log(LogLevel.Info, $"[Mesh] Server picked a different introducer ({msg.IntroducerPeerID}) — relinquishing role");
                 isIntroducer = false;
 
                 // The new introducer doesn't know about relay routes we were hosting — drop them
@@ -2973,7 +2973,7 @@ internal class MeshProtocolEngine
                 lastRelayReselect.Clear();
                 relayedPairs.Clear();
                 if (droppedAtRelinquish.Length > 0)
-                    context.Log($"[Mesh] Relinquished introducer: dropped {droppedAtRelinquish.Length} hosted relay pair(s)");
+                    context.Log(LogLevel.Debug, $"[Mesh] Relinquished introducer: dropped {droppedAtRelinquish.Length} hosted relay pair(s)");
             }
             if (!serverSaysWereIntroducer && msg.Peers != null)
             {
@@ -2987,7 +2987,7 @@ internal class MeshProtocolEngine
                     {
                         if (introducerMeshIP != mip)
                         {
-                            context.Log($"[Mesh] Introducer updated to {mip} per server");
+                            context.Log(LogLevel.Info, $"[Mesh] Introducer updated to {mip} per server");
                             introducerMeshIP = mip;
                             introducerMissedProbes = 0;
                             introducerProbeAckReceived = true;
@@ -3016,7 +3016,7 @@ internal class MeshProtocolEngine
     private bool HandleMeshIntroduceRequest(MediationMessage msg)
     {
         isIntroducer = true;
-        context.Log($"[Mesh] Selected as introducer for new peer {msg.PeerID}");
+        context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID}");
 
         // Cache the new peer's info. Clear completedTunnelMeshIPs (it's reconnecting with fresh
         // NAT traversal) and any stale deferred messages.
@@ -3044,7 +3044,7 @@ internal class MeshProtocolEngine
 
                 if (string.IsNullOrEmpty(existingPeerMeshIP))
                 {
-                    context.Log($"[Mesh] Skipping peer with no mesh IP in OtherPeers list");
+                    context.Log(LogLevel.Debug, $"[Mesh] Skipping peer with no mesh IP in OtherPeers list");
                     continue;
                 }
 
@@ -3056,7 +3056,7 @@ internal class MeshProtocolEngine
                 // over WireGuard to peers we already have tunnels with.
                 if (host.GetPeer(IPAddress.Parse(existingPeerMeshIP)) == null)
                 {
-                    context.Log($"[Mesh] Skipping peer {existingPeerID} ({existingPeerMeshIP}) — no WireGuard tunnel to this peer");
+                    context.Log(LogLevel.Debug, $"[Mesh] Skipping peer {existingPeerID} ({existingPeerMeshIP}) — no WireGuard tunnel to this peer");
                     continue;
                 }
 
@@ -3069,7 +3069,7 @@ internal class MeshProtocolEngine
                     string pairKey = $"{sortA}|{sortB}";
                     if (relayedPairs.Remove(pairKey))
                     {
-                        context.Log($"[Mesh] Removed stale relay pair {pairKey} (NAT types changed)");
+                        context.Log(LogLevel.Warning, $"[Mesh] Removed stale relay pair {pairKey} (NAT types changed)");
                         host.RemoveRelayRouteForPeer(IPAddress.Parse(existingPeerMeshIP));
                         host.RemoveRelayRouteForPeer(IPAddress.Parse(msg.PrivateAddressString));
                     }
@@ -3088,7 +3088,7 @@ internal class MeshProtocolEngine
                     string chosenRelay = PickRelay(existingPeerMeshIP, msg.PrivateAddressString) ?? (context.Options.AllowRelayThrough ? meshIP : null);
                     if (string.IsNullOrEmpty(chosenRelay))
                     {
-                        context.Log($"[Mesh] No eligible relay for {existingPeerMeshIP} <-> {msg.PrivateAddressString} and self-relay disabled — skipping pair");
+                        context.Log(LogLevel.Debug, $"[Mesh] No eligible relay for {existingPeerMeshIP} <-> {msg.PrivateAddressString} and self-relay disabled — skipping pair");
                         continue;
                     }
                     context.Log($"[Mesh] Both {msg.PeerID} and {existingPeerID} are symmetric NAT — relay via {(chosenRelay == meshIP ? "self (introducer)" : chosenRelay)}");
@@ -3146,7 +3146,7 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex.Message}");
                         }
                     }
 
@@ -3168,7 +3168,7 @@ internal class MeshProtocolEngine
                     }
                     catch (Exception ex)
                     {
-                        context.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                        context.Log(LogLevel.Error, $"[Mesh] Failed to send relay MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
                     }
 
                     if (!string.IsNullOrEmpty(msg.PrivateAddressString))
@@ -3194,7 +3194,7 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex)
                             {
-                                context.Log($"[Mesh] Failed to send relay MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
+                                context.Log(LogLevel.Error, $"[Mesh] Failed to send relay MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
                             }
                         }
                         else
@@ -3224,7 +3224,7 @@ internal class MeshProtocolEngine
                 {
                     newPeerEndpointForExisting = $"{msg.LocalIP}:{msg.LocalPort}";
                     existingPeerEndpointForNew = $"{existingPeerLocalIP}:{existingPeerLocalPort}";
-                    context.Log($"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
+                    context.Log(LogLevel.Debug, $"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
                 }
 
                 // ExternalEndpointString always carries the external endpoint so the receiver
@@ -3260,11 +3260,11 @@ internal class MeshProtocolEngine
                         byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
                         MeshSend(toExistingBytes, toExistingBytes.Length,
                             new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
-                        context.Log($"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
+                        context.Log(LogLevel.Debug, $"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
                     }
                     catch (Exception ex)
                     {
-                        context.Log($"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                        context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
                     }
 
                     if (connBeginToNew != null)
@@ -3274,11 +3274,11 @@ internal class MeshProtocolEngine
                             byte[] toNewBytes = Encoding.UTF8.GetBytes(connBeginToNew.Serialize());
                             MeshSend(toNewBytes, toNewBytes.Length,
                                 new IPEndPoint(IPAddress.Parse(msg.PrivateAddressString), MeshControlPort));
-                            context.Log($"[Mesh] Sent MeshConnectionBegin to new peer {msg.PrivateAddressString} (about existing peer {existingPeerMeshIP})");
+                            context.Log(LogLevel.Debug, $"[Mesh] Sent MeshConnectionBegin to new peer {msg.PrivateAddressString} (about existing peer {existingPeerMeshIP})");
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Failed to send MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
                         }
                     }
                 }
@@ -3296,7 +3296,7 @@ internal class MeshProtocolEngine
                     if (connBeginToNew != null)
                         deferredIntroductions[msg.PrivateAddressString].Add(connBeginToNew);
 
-                    context.Log($"[Mesh] Deferred MeshConnectionBegin for both peers (tunnel to {msg.PrivateAddressString} not yet established)");
+                    context.Log(LogLevel.Debug, $"[Mesh] Deferred MeshConnectionBegin for both peers (tunnel to {msg.PrivateAddressString} not yet established)");
                 }
 
                 introduced++;
@@ -3312,12 +3312,12 @@ internal class MeshProtocolEngine
             stream.Write(ackBuffer, 0, ackBuffer.Length);
             stream.Flush();
             int deferredCount = deferredIntroductions.TryGetValue(msg.PrivateAddressString ?? "", out var dList) ? dList.Count : 0;
-            context.Log($"[Mesh] Sent MeshIntroduceAck for {msg.PeerID} ({introduced} introduced, {deferredCount} deferred, completedTunnels={completedTunnelMeshIPs.Count})");
+            context.Log(LogLevel.Debug, $"[Mesh] Sent MeshIntroduceAck for {msg.PeerID} ({introduced} introduced, {deferredCount} deferred, completedTunnels={completedTunnelMeshIPs.Count})");
             return true;
         }
         catch (Exception ex)
         {
-            context.Log($"[Mesh] MeshIntroduceAck write failed, connection lost: {ex.Message}");
+            context.Log(LogLevel.Error, $"[Mesh] MeshIntroduceAck write failed, connection lost: {ex.Message}");
             tcpClient.Close();
             return false;
         }
@@ -3336,7 +3336,7 @@ internal class MeshProtocolEngine
             int bytesRead = stream.Read(buffer, 0, buffer.Length);
             if (bytesRead == 0)
             {
-                context.Log("[Mesh] Mediation server closed connection");
+                context.Log(LogLevel.Debug, "[Mesh] Mediation server closed connection");
                 return false;
             }
             tcpBuffer += Encoding.ASCII.GetString(buffer, 0, bytesRead);
@@ -3381,15 +3381,15 @@ internal class MeshProtocolEngine
             }
             catch (Exception parseEx)
             {
-                context.Log($"[Mesh] Could not parse JSON object: {parseEx.Message}");
+                context.Log(LogLevel.Error, $"[Mesh] Could not parse JSON object: {parseEx.Message}");
                 jsonStartIndex = jsonObjEnd + 1;
                 continue;
             }
 
             if (msg.ID == MediationMessageType.ConnectionRequest)
             {
-                context.Log($"[Mesh] Received connection request! ConnectionID: {msg.ConnectionID}, Endpoint: {msg.EndpointString}");
-                context.Log($"[Mesh] Waiting for ConnectionBegin to establish tunnel...");
+                context.Log(LogLevel.Debug, $"[Mesh] Received connection request! ConnectionID: {msg.ConnectionID}, Endpoint: {msg.EndpointString}");
+                context.Log(LogLevel.Debug, $"[Mesh] Waiting for ConnectionBegin to establish tunnel...");
             }
             else if (msg.ID == MediationMessageType.ConnectionBegin)
             {
@@ -3401,7 +3401,7 @@ internal class MeshProtocolEngine
             }
             else if (msg.ID == MediationMessageType.MeshPeerList)
             {
-                context.Log($"[Mesh] Updated peer list received: {msg.PeerCount} peers");
+                context.Log(LogLevel.Debug, $"[Mesh] Updated peer list received: {msg.PeerCount} peers");
                 if (msg.Peers != null && msg.Peers.Length > 0)
                 {
                     hasPeers = true;
@@ -3410,7 +3410,7 @@ internal class MeshProtocolEngine
             }
             else if (msg.ID == MediationMessageType.ConnectionComplete)
             {
-                context.Log($"[Mesh] Received ConnectionComplete (routing to tunnel)");
+                context.Log(LogLevel.Debug, $"[Mesh] Received ConnectionComplete (routing to tunnel)");
                 Tunnel[] tunnelSnapshot;
                 lock (meshLock)
                 {
@@ -3422,7 +3422,7 @@ internal class MeshProtocolEngine
             }
             else if (msg.ID == MediationMessageType.ServerNotAvailable)
             {
-                context.Log($"[Mesh] ServerNotAvailable — target peer unavailable");
+                context.Log(LogLevel.Debug, $"[Mesh] ServerNotAvailable — target peer unavailable");
                 // Stale-pending cleanup handles the orphan ConnectionRequest after StaleTimeoutSeconds.
             }
             else if (msg.ID == MediationMessageType.MeshIntroduceRequest)
@@ -3477,12 +3477,12 @@ internal class MeshProtocolEngine
         else if (!introducerProbeAckReceived)
         {
             introducerMissedProbes++;
-            context.Log($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
+            context.Log(LogLevel.Warning, $"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
         }
         else
         {
             if (introducerMissedProbes > 0)
-                context.Log($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
+                context.Log(LogLevel.Warning, $"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
             introducerMissedProbes = 0;
         }
 
@@ -3493,14 +3493,14 @@ internal class MeshProtocolEngine
             // a different peer, the listener updates introducerMeshIP and we abort.
             string electionTarget = introducerMeshIP;
             int delayMs = new Random().Next(0, 5000);
-            context.Log($"[Mesh] Introducer confirmed dead — election delay {delayMs}ms before takeover attempt");
+            context.Log(LogLevel.Warning, $"[Mesh] Introducer confirmed dead — election delay {delayMs}ms before takeover attempt");
             for (int slept = 0; slept < delayMs; slept += 100)
             {
                 System.Threading.Thread.Sleep(100);
                 if (context.ShutdownRequested || context.DisconnectRequested) break;
                 if (introducerMeshIP != electionTarget)
                 {
-                    context.Log("[Mesh] Election aborted — another peer became introducer during delay");
+                    context.Log(LogLevel.Warning, "[Mesh] Election aborted — another peer became introducer during delay");
                     introducerMissedProbes = 0;
                     introducerProbeAckReceived = true;
                     break;
@@ -3515,7 +3515,7 @@ internal class MeshProtocolEngine
 
             try
             {
-                context.Log("[Mesh] Election delay elapsed — reconnecting to mediation to claim introducer role");
+                context.Log(LogLevel.Warning, "[Mesh] Election delay elapsed — reconnecting to mediation to claim introducer role");
                 var mediationEP = context.Options.MediationEndpoint;
                 reconnectedTcpClient = new TcpClient();
                 reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
@@ -3528,7 +3528,7 @@ internal class MeshProtocolEngine
                             : null);
                     sslStream.AuthenticateAsClient(mediationEP.Address.ToString());
                     reconnectedStream = sslStream;
-                    context.Log($"[Mesh] Takeover TLS handshake complete (protocol: {sslStream.SslProtocol})");
+                    context.Log(LogLevel.Info, $"[Mesh] Takeover TLS handshake complete (protocol: {sslStream.SslProtocol})");
                 }
                 else
                 {
@@ -3579,7 +3579,7 @@ internal class MeshProtocolEngine
                 if (natTypeRespR2.ID == MediationMessageType.NATTypeResponse)
                 {
                     detectedNatType = natTypeRespR2.NATType;
-                    context.Log($"[Mesh] Reconnect NAT type: {detectedNatType}");
+                    context.Log(LogLevel.Debug, $"[Mesh] Reconnect NAT type: {detectedNatType}");
                 }
 
                 // 3. Send MeshJoinRequest. Server decides who's the introducer; we don't claim
@@ -3603,7 +3603,7 @@ internal class MeshProtocolEngine
                 {
                     isIntroducer = true;
                     introducerMeshIP = meshIP;
-                    context.Log("[Mesh] Server confirmed us as new introducer");
+                    context.Log(LogLevel.Info, "[Mesh] Server confirmed us as new introducer");
                 }
                 else
                 {
@@ -3636,7 +3636,7 @@ internal class MeshProtocolEngine
                         // pointer so we don't keep probing a dead IP. Next heartbeat with
                         // IsIntroducer=true will set it correctly.
                         if (!string.IsNullOrEmpty(oldIntroducerMeshIP))
-                            context.Log($"[Mesh] Could not locate new introducer's mesh IP — clearing cached introducer pointer (was {oldIntroducerMeshIP})");
+                            context.Log(LogLevel.Error, $"[Mesh] Could not locate new introducer's mesh IP — clearing cached introducer pointer (was {oldIntroducerMeshIP})");
                         introducerMeshIP = null;
                     }
 
@@ -3655,7 +3655,7 @@ internal class MeshProtocolEngine
                     // acts as natural backoff.
                     introducerMissedProbes = IntroducerMissedProbeThreshold;
                     introducerProbeAckReceived = false;
-                    context.Log("[Mesh] No introducer resolved — will retry takeover on next probe cycle");
+                    context.Log(LogLevel.Debug, "[Mesh] No introducer resolved — will retry takeover on next probe cycle");
                 }
                 else
                 {
@@ -3665,7 +3665,7 @@ internal class MeshProtocolEngine
             }
             catch (Exception ex)
             {
-                context.Log($"[Mesh] Failed to reconnect for introducer takeover: {ex.Message}");
+                context.Log(LogLevel.Error, $"[Mesh] Failed to reconnect for introducer takeover: {ex.Message}");
                 try { reconnectedStream?.Dispose(); } catch { }
                 try { reconnectedTcpClient?.Dispose(); } catch { }
                 reconnectedTcpClient = null;
@@ -3717,12 +3717,12 @@ internal class MeshProtocolEngine
         if (!introducerProbeAckReceived)
         {
             introducerMissedProbes++;
-            context.Log($"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
+            context.Log(LogLevel.Warning, $"[Mesh] Introducer ({introducerMeshIP}) missed probe ack ({introducerMissedProbes}/{IntroducerMissedProbeThreshold})");
         }
         else
         {
             if (introducerMissedProbes > 0)
-                context.Log($"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
+                context.Log(LogLevel.Warning, $"[Mesh] Introducer ({introducerMeshIP}) responded — resetting missed probe count");
             introducerMissedProbes = 0;
         }
 
@@ -3733,14 +3733,14 @@ internal class MeshProtocolEngine
             // (handled in the listener) updates introducerMeshIP and we abort.
             string electionTarget = introducerMeshIP;
             int delayMs = new Random().Next(0, 5000);
-            context.Log($"[Mesh] Introducer confirmed dead (primary loop) — election delay {delayMs}ms");
+            context.Log(LogLevel.Warning, $"[Mesh] Introducer confirmed dead (primary loop) — election delay {delayMs}ms");
             for (int slept = 0; slept < delayMs; slept += 100)
             {
                 System.Threading.Thread.Sleep(100);
                 if (context.ShutdownRequested || context.DisconnectRequested) break;
                 if (introducerMeshIP != electionTarget)
                 {
-                    context.Log("[Mesh] Primary-loop election aborted — another peer became introducer during delay");
+                    context.Log(LogLevel.Warning, "[Mesh] Primary-loop election aborted — another peer became introducer during delay");
                     introducerMissedProbes = 0;
                     introducerProbeAckReceived = true;
                     break;
@@ -3748,7 +3748,7 @@ internal class MeshProtocolEngine
             }
             if (introducerMeshIP == electionTarget && !context.ShutdownRequested && !context.DisconnectRequested)
             {
-                context.Log("[Mesh] Election delay elapsed — sending MeshJoinRequest, awaiting server's choice");
+                context.Log(LogLevel.Warning, "[Mesh] Election delay elapsed — sending MeshJoinRequest, awaiting server's choice");
                 introducerMissedProbes = 0;
 
                 // Send MeshJoinRequest. We do NOT claim isIntroducer=true here — the MeshJoinResponse
@@ -3770,7 +3770,7 @@ internal class MeshProtocolEngine
                 }
                 catch (Exception ex)
                 {
-                    context.Log($"[Mesh] Failed to send takeover MeshJoinRequest: {ex.Message}");
+                    context.Log(LogLevel.Error, $"[Mesh] Failed to send takeover MeshJoinRequest: {ex.Message}");
                 }
             }
         }
@@ -3815,7 +3815,7 @@ internal class MeshProtocolEngine
             .ToList();
         foreach (var staleIP in stalePeers)
         {
-            context.Log($"[Mesh] Peer {staleIP} has been silent for >{staleThreshold.TotalMinutes}m — removing locally");
+            context.Log(LogLevel.Debug, $"[Mesh] Peer {staleIP} has been silent for >{staleThreshold.TotalMinutes}m — removing locally");
             RemoveDeadPeer(staleIP);
         }
     }
@@ -3910,11 +3910,11 @@ internal class MeshProtocolEngine
                 byte[] rBytes = Encoding.UTF8.GetBytes(report.Serialize());
                 MeshSend(rBytes, rBytes.Length, new IPEndPoint(IPAddress.Parse(introducerMeshIP), MeshControlPort));
                 lastRelayHealthReport[remote] = DateTime.UtcNow;
-                context.Log($"[Mesh] Sent MeshRelayHealthReport: remote={remote} relay={relay} obs={obs}");
+                context.Log(LogLevel.Debug, $"[Mesh] Sent MeshRelayHealthReport: remote={remote} relay={relay} obs={obs}");
             }
             catch (Exception ex)
             {
-                context.Log($"[Mesh] Failed to send MeshRelayHealthReport: {ex.Message}");
+                context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshRelayHealthReport: {ex.Message}");
             }
         }
     }
@@ -3953,7 +3953,7 @@ internal class MeshProtocolEngine
         if (wgPeer != null)
         {
             host.RemovePeer(wgPeer.ConnectionId);
-            context.Log($"[Mesh] Removed WireGuard peer {deadMeshIP}");
+            context.Log(LogLevel.Debug, $"[Mesh] Removed WireGuard peer {deadMeshIP}");
         }
 
         // Remove relay routes through this peer (as gateway)
@@ -3961,7 +3961,7 @@ internal class MeshProtocolEngine
         if (removedRelays.Count > 0)
         {
             metricRelayRoutesRemoved += removedRelays.Count;
-            context.Log($"[Mesh] Removed {removedRelays.Count} relay route(s) via {deadMeshIP}");
+            context.Log(LogLevel.Debug, $"[Mesh] Removed {removedRelays.Count} relay route(s) via {deadMeshIP}");
         }
 
         // Remove relay route targeting this peer (was relayed through a gateway)
@@ -4248,7 +4248,7 @@ internal class MeshProtocolEngine
         }
         catch (Exception ex)
         {
-            context.Log($"[Mesh] Error building mesh state: {ex.Message}");
+            context.Log(LogLevel.Error, $"[Mesh] Error building mesh state: {ex.Message}");
             return new MeshState
             {
                 NetworkID = context.Options.NetworkID,
@@ -4276,7 +4276,7 @@ internal class MeshProtocolEngine
             RelayMeshIP = newRelay
         };
         try { byte[] cbBytes = Encoding.UTF8.GetBytes(cb.Serialize()); MeshSend(cbBytes, cbBytes.Length, new IPEndPoint(IPAddress.Parse(toIP), MeshControlPort)); }
-        catch (Exception ex) { context.Log($"[Mesh] Failed to notify {toIP} of reselect: {ex.Message}"); }
+        catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to notify {toIP} of reselect: {ex.Message}"); }
     }
 
     private int RepairBrokenLinks(
@@ -4345,7 +4345,7 @@ internal class MeshProtocolEngine
                             assignedRelay = PickRelay(ipA, ipB) ?? (context.Options.AllowRelayThrough ? meshIP : null);
                             if (string.IsNullOrEmpty(assignedRelay))
                             {
-                                context.Log($"[Mesh] Heartbeat: relayed pair {ipA} <-> {ipB} broken but no eligible relay — skipping");
+                                context.Log(LogLevel.Debug, $"[Mesh] Heartbeat: relayed pair {ipA} <-> {ipB} broken but no eligible relay — skipping");
                                 continue;
                             }
                             // If we'd previously self-hosted this pair and we're switching away, release.
@@ -4382,7 +4382,7 @@ internal class MeshProtocolEngine
                                 byte[] ab = Encoding.UTF8.GetBytes(assign.Serialize());
                                 MeshSend(ab, ab.Length, new IPEndPoint(IPAddress.Parse(assignedRelay), MeshControlPort));
                             }
-                            catch (Exception ex) { context.Log($"[Mesh] Failed to send MeshRelayAssignment to {assignedRelay}: {ex.Message}"); }
+                            catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshRelayAssignment to {assignedRelay}: {ex.Message}"); }
                         }
 
                         if (!aReportsB)
@@ -4403,7 +4403,7 @@ internal class MeshProtocolEngine
                                 MeshSend(rBytes, rBytes.Length, new IPEndPoint(IPAddress.Parse(ipA), MeshControlPort));
                                 repairCount++;
                             }
-                            catch (Exception ex) { context.Log($"[Mesh] Failed to send relay repair to {ipA}: {ex.Message}"); }
+                            catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to send relay repair to {ipA}: {ex.Message}"); }
                         }
                         if (!bReportsA)
                         {
@@ -4423,7 +4423,7 @@ internal class MeshProtocolEngine
                                 MeshSend(rBytes, rBytes.Length, new IPEndPoint(IPAddress.Parse(ipB), MeshControlPort));
                                 repairCount++;
                             }
-                            catch (Exception ex) { context.Log($"[Mesh] Failed to send relay repair to {ipB}: {ex.Message}"); }
+                            catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to send relay repair to {ipB}: {ex.Message}"); }
                         }
 
                         lastRepairAttempt[pairKey] = DateTime.UtcNow;
@@ -4442,7 +4442,7 @@ internal class MeshProtocolEngine
 
                     if (!hasA || !hasB)
                     {
-                        context.Log($"[Mesh] Heartbeat: missing peer info for pair {ipA}(known={hasA}) <-> {ipB}(known={hasB}) — peerInfoByMeshIP has {peerInfoByMeshIP.Count} entries");
+                        context.Log(LogLevel.Debug, $"[Mesh] Heartbeat: missing peer info for pair {ipA}(known={hasA}) <-> {ipB}(known={hasB}) — peerInfoByMeshIP has {peerInfoByMeshIP.Count} entries");
                         continue;
                     }
 
@@ -4465,7 +4465,7 @@ internal class MeshProtocolEngine
                     // Escalation: after MaxRepairAttempts, use mediation server for fresh NAT traversal
                     if (attempts > context.Options.MaxRepairAttempts)
                     {
-                        context.Log($"[Mesh] Repair escalation ({attempts} attempts): {ipA} <-> {ipB} — requesting fresh NAT traversal via mediation");
+                        context.Log(LogLevel.Debug, $"[Mesh] Repair escalation ({attempts} attempts): {ipA} <-> {ipB} — requesting fresh NAT traversal via mediation");
                         if (mediationClient != null && mediationClient.Connected)
                         {
                             if (!string.IsNullOrEmpty(infoA.peerID) && !pendingConnectionRequests.ContainsKey(infoA.peerID))
@@ -4485,7 +4485,7 @@ internal class MeshProtocolEngine
                                 }
                                 catch (Exception ex)
                                 {
-                                    context.Log($"[Mesh] Failed to send escalation ConnectionRequest for {ipA}: {ex.Message}");
+                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send escalation ConnectionRequest for {ipA}: {ex.Message}");
                                 }
                             }
                             if (!string.IsNullOrEmpty(infoB.peerID) && !pendingConnectionRequests.ContainsKey(infoB.peerID))
@@ -4505,7 +4505,7 @@ internal class MeshProtocolEngine
                                 }
                                 catch (Exception ex)
                                 {
-                                    context.Log($"[Mesh] Failed to send escalation ConnectionRequest for {ipB}: {ex.Message}");
+                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send escalation ConnectionRequest for {ipB}: {ex.Message}");
                                 }
                             }
                         }
@@ -4521,7 +4521,7 @@ internal class MeshProtocolEngine
                             chosenRelay = PickRelay(ipA, ipB) ?? (context.Options.AllowRelayThrough ? meshIP : null);
                             if (string.IsNullOrEmpty(chosenRelay))
                             {
-                                context.Log($"[Mesh] No eligible relay for {ipA} <-> {ipB} and self-relay disabled — skipping");
+                                context.Log(LogLevel.Debug, $"[Mesh] No eligible relay for {ipA} <-> {ipB} and self-relay disabled — skipping");
                                 continue;
                             }
                             if (priorBothSym == meshIP && chosenRelay != meshIP)
@@ -4558,7 +4558,7 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex)
                             {
-                                context.Log($"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex.Message}");
+                                context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshRelayAssignment to {chosenRelay}: {ex.Message}");
                             }
                         }
 
@@ -4581,7 +4581,7 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Failed to send relay repair to {ipA}: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to send relay repair to {ipA}: {ex.Message}");
                         }
 
                         var relayToB = new MediationMessage(MediationMessageType.MeshConnectionBegin)
@@ -4603,7 +4603,7 @@ internal class MeshProtocolEngine
                         }
                         catch (Exception ex)
                         {
-                            context.Log($"[Mesh] Failed to send relay repair to {ipB}: {ex.Message}");
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to send relay repair to {ipB}: {ex.Message}");
                         }
 
                         relayedPairs.Add(pairKey);
@@ -4616,7 +4616,7 @@ internal class MeshProtocolEngine
                         bool hasWgB = host.GetPeer(IPAddress.Parse(ipB)) != null;
                         if (!hasWgA || !hasWgB)
                         {
-                            context.Log($"[Mesh] Skipping repair for {ipA} <-> {ipB} — no WireGuard tunnel to {(!hasWgA ? ipA : ipB)}");
+                            context.Log(LogLevel.Debug, $"[Mesh] Skipping repair for {ipA} <-> {ipB} — no WireGuard tunnel to {(!hasWgA ? ipA : ipB)}");
                             continue;
                         }
 
@@ -4652,7 +4652,7 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex)
                             {
-                                context.Log($"[Mesh] Failed to send repair MeshConnectionBegin to {ipA}: {ex.Message}");
+                                context.Log(LogLevel.Error, $"[Mesh] Failed to send repair MeshConnectionBegin to {ipA}: {ex.Message}");
                             }
                         }
 
@@ -4674,7 +4674,7 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex)
                             {
-                                context.Log($"[Mesh] Failed to send repair MeshConnectionBegin to {ipB}: {ex.Message}");
+                                context.Log(LogLevel.Error, $"[Mesh] Failed to send repair MeshConnectionBegin to {ipB}: {ex.Message}");
                             }
                         }
                         lastRepairAttempt[pairKey] = DateTime.UtcNow;
@@ -4690,7 +4690,7 @@ internal class MeshProtocolEngine
                 continue;
             if (!currentHeartbeatAcks[ip].Contains(meshIP))
             {
-                context.Log($"[Mesh] Heartbeat: peer {ip} cannot reach introducer ({meshIP}) — requesting re-connection via mediation");
+                context.Log(LogLevel.Error, $"[Mesh] Heartbeat: peer {ip} cannot reach introducer ({meshIP}) — requesting re-connection via mediation");
                 if (mediationClient != null && mediationClient.Connected &&
                     peerInfoByMeshIP.TryGetValue(ip, out var lostPeerInfo) &&
                     !string.IsNullOrEmpty(lostPeerInfo.peerID) &&
@@ -4711,7 +4711,7 @@ internal class MeshProtocolEngine
                     }
                     catch (Exception ex)
                     {
-                        context.Log($"[Mesh] Failed to send re-connection request for {ip}: {ex.Message}");
+                        context.Log(LogLevel.Error, $"[Mesh] Failed to send re-connection request for {ip}: {ex.Message}");
                     }
                 }
             }

@@ -65,7 +65,7 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
             if (p.ExitCode != 0)
             {
                 string err = p.StandardError.ReadToEnd();
-                Program.Log($"Warning: netsh enable failed for {interfaceName}: {err}");
+                Program.Log(LogLevel.Warning, $"netsh enable failed for {interfaceName}: {err}");
             }
         }
 
@@ -75,7 +75,7 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
         if (!ok)
         {
             int error = Marshal.GetLastWin32Error();
-            Program.Log($"Failed to set adapter state to UP (Error: {error})");
+            Program.Log(LogLevel.Error, $"Failed to set adapter state to UP (Error: {error})");
         }
     }
 
@@ -103,13 +103,13 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
                 if (current is not int i || i != 1)
                 {
                     key.SetValue("IPEnableRouter", 1, Microsoft.Win32.RegistryValueKind.DWord);
-                    Program.Log("[WireGuard] Set IPEnableRouter=1 (takes effect on RemoteAccess start or reboot)");
+                    Program.Log(LogLevel.Debug, "[WireGuard] Set IPEnableRouter=1 (takes effect on RemoteAccess start or reboot)");
                 }
             }
         }
         catch (Exception ex)
         {
-            Program.Log($"[WireGuard] Could not set IPEnableRouter: {ex.Message}");
+            Program.Log(LogLevel.Error, $"[WireGuard] Could not set IPEnableRouter: {ex.Message}");
         }
 
         // Start RemoteAccess service so IPEnableRouter takes effect without a reboot.
@@ -146,15 +146,15 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
             if (p.ExitCode != 0)
             {
                 string err = p.StandardError.ReadToEnd();
-                Program.Log($"[WireGuard] Failed to enable forwarding on {interfaceName}: {err}");
+                Program.Log(LogLevel.Error, $"[WireGuard] Failed to enable forwarding on {interfaceName}: {err}");
                 return false;
             }
-            Program.Log($"[WireGuard] IP forwarding enabled on {interfaceName}");
+            Program.Log(LogLevel.Debug, $"[WireGuard] IP forwarding enabled on {interfaceName}");
             return true;
         }
         catch (Exception ex)
         {
-            Program.Log($"[WireGuard] Error enabling forwarding: {ex.Message}");
+            Program.Log(LogLevel.Error, $"[WireGuard] Error enabling forwarding: {ex.Message}");
             return false;
         }
     }
@@ -164,7 +164,7 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
         if (adapters.TryRemove(interfaceName, out IntPtr adapter) && adapter != IntPtr.Zero)
         {
             try { WireGuardAPI.CloseAdapter(adapter); }
-            catch (Exception ex) { Program.Log($"Warning: Error closing WireGuard adapter: {ex.Message}"); }
+            catch (Exception ex) { Program.Log(LogLevel.Error, $"Warning: Error closing WireGuard adapter: {ex.Message}"); }
         }
     }
 

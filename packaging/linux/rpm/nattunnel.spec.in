@@ -12,7 +12,7 @@ Requires:       libX11
 Requires:       libICE
 Requires:       libSM
 Requires:       fontconfig
-Requires:       dotnet-runtime-9.0
+Requires:       dotnet-runtime-10.0
 
 # Disable automatic dependency extraction — it tries to pin glibc versions from the bundled
 # native shims and ends up wrong.

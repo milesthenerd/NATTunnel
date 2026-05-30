@@ -152,7 +152,15 @@ public class MeshNode : IDisposable
             MeshControlPort = meshControlPort,
         };
 
-        context = new EmbeddedContext(options, config.Logger);
+        context = new EmbeddedContext(options, config.LeveledLogger, config.Logger, config.MinLogLevel);
+
+        // Redirect any Program.Log calls from shared code (Tunnel, Symmetric NAT, etc.)
+        // into the same level-filtered sink the engine uses. Without this, the daemon's
+        // Console.WriteLine + rolling buffer would still fire from embedded mode and
+        // spam the host's stdout. Cleared in Dispose so subsequent daemon usage (if
+        // any) sees no leftover hook.
+        Program.LogSink = (level, message) => context.Log(level, message);
+
         host = new EmbeddedMeshHost();
         host.TunnelCreated += OnTunnelCreated;
         host.RelayedPeerAdded += OnRelayedPeerAdded;
@@ -572,6 +580,11 @@ public class MeshNode : IDisposable
             try { entry.Proxy.Dispose(); } catch { }
         }
         connectedPeers.Clear();
+
+        // Release the global Log sink we installed in the ctor so daemon usage in
+        // the same process (rare but possible) doesn't keep routing into a torn-down
+        // EmbeddedContext.
+        Program.LogSink = null;
     }
 
     /// <summary>

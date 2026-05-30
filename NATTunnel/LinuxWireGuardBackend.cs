@@ -16,7 +16,7 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
         SweepStaleInterfaces(keep: interfaceName);
         TryRunIp($"link delete dev {interfaceName}", suppressErrors: true);
         RunIp($"link add dev {interfaceName} type wireguard");
-        Program.Log($"Created WireGuard interface: {interfaceName}");
+        Program.Log(LogLevel.Debug, $"Created WireGuard interface: {interfaceName}");
     }
 
     private static void SweepStaleInterfaces(string keep)
@@ -46,7 +46,7 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
             string name = trimmed.Split(new[] { ' ', '\t', '@' }, 2, StringSplitOptions.RemoveEmptyEntries)[0];
             if (!name.StartsWith("nt-", StringComparison.Ordinal)) continue;
             if (name == keep) continue;
-            Program.Log($"Sweeping stale WireGuard interface: {name}");
+            Program.Log(LogLevel.Debug, $"Sweeping stale WireGuard interface: {name}");
             TryRunIp($"link delete dev {name}", suppressErrors: true);
         }
     }
@@ -63,7 +63,7 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
             WireGuardConfigSanitizer.WriteWgOnlyConfig(configFilePath, tempConfigPath);
             try { File.SetUnixFileMode(tempConfigPath, UnixFileMode.UserRead | UnixFileMode.UserWrite); } catch { }
             RunWg($"setconf {interfaceName} {ShellQuote(tempConfigPath)}");
-            Program.Log($"Applied WireGuard config to {interfaceName}");
+            Program.Log(LogLevel.Debug, $"Applied WireGuard config to {interfaceName}");
         }
         finally
         {
@@ -78,13 +78,13 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
     {
         TryRunIp($"-4 address flush dev {interfaceName}", suppressErrors: true);
         RunIp($"address add {ipAddress}/{prefixLength} dev {interfaceName}");
-        Program.Log($"Assigned IP {ipAddress}/{prefixLength} to {interfaceName}");
+        Program.Log(LogLevel.Debug, $"Assigned IP {ipAddress}/{prefixLength} to {interfaceName}");
     }
 
     public void SetInterfaceUp(string interfaceName)
     {
         RunIp($"link set dev {interfaceName} up");
-        Program.Log($"Interface {interfaceName} is up");
+        Program.Log(LogLevel.Debug, $"Interface {interfaceName} is up");
     }
 
     public bool AddOrUpdatePeer(string interfaceName, WireGuardPeer peer)
@@ -100,7 +100,7 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
         }
         catch (Exception ex)
         {
-            Program.Log($"[WireGuard] Failed to add/update peer {peer.PublicKey[..8]}...: {ex.Message}");
+            Program.Log(LogLevel.Error, $"[WireGuard] Failed to add/update peer {peer.PublicKey[..8]}...: {ex.Message}");
             return false;
         }
     }
@@ -114,12 +114,12 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
         try
         {
             File.WriteAllText("/proc/sys/net/ipv4/ip_forward", "1\n");
-            Program.Log($"[WireGuard] IPv4 forwarding enabled (system-wide; needed for {interfaceName} relay)");
+            Program.Log(LogLevel.Debug, $"[WireGuard] IPv4 forwarding enabled (system-wide; needed for {interfaceName} relay)");
             return true;
         }
         catch (Exception ex)
         {
-            Program.Log($"[WireGuard] Failed to enable IPv4 forwarding: {ex.Message}");
+            Program.Log(LogLevel.Error, $"[WireGuard] Failed to enable IPv4 forwarding: {ex.Message}");
             return false;
         }
     }
@@ -127,7 +127,7 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
     public void DestroyInterface(string interfaceName)
     {
         TryRunIp($"link delete dev {interfaceName}", suppressErrors: true);
-        Program.Log($"Destroyed WireGuard interface: {interfaceName}");
+        Program.Log(LogLevel.Debug, $"Destroyed WireGuard interface: {interfaceName}");
     }
 
     private static void RunIp(string args) => Run("ip", args);
