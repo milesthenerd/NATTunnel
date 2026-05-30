@@ -98,13 +98,21 @@ public class MeshNode : IDisposable
         this.config = config;
 
         // Split "host:port" into its components — mediation handshake DNS-resolves and connects.
+        // A bare "host" (no ':port') defaults to 6510 (the conventional mediation port).
         int colon = config.MediationEndpoint.LastIndexOf(':');
-        if (colon < 0) throw new ArgumentException("MeshConfig.MediationEndpoint must be 'host:port'.");
-        this.mediationHost = config.MediationEndpoint.Substring(0, colon);
-        if (!int.TryParse(config.MediationEndpoint.Substring(colon + 1), out this.mediationPort) ||
-            this.mediationPort <= 0 || this.mediationPort > 65535)
+        if (colon < 0)
         {
-            throw new ArgumentException("MeshConfig.MediationEndpoint port is not a valid integer.");
+            this.mediationHost = config.MediationEndpoint;
+            this.mediationPort = 6510;
+        }
+        else
+        {
+            this.mediationHost = config.MediationEndpoint.Substring(0, colon);
+            if (!int.TryParse(config.MediationEndpoint.Substring(colon + 1), out this.mediationPort) ||
+                this.mediationPort <= 0 || this.mediationPort > 65535)
+            {
+                throw new ArgumentException("MeshConfig.MediationEndpoint port is not a valid integer.");
+            }
         }
 
         // Identity: persistent PeerID if supplied, otherwise fresh per session.

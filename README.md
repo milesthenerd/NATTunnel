@@ -84,7 +84,7 @@ node.Start();
 await Task.Delay(-1);
 ```
 
-## Minimal example
+## Alternate example
 
 ```csharp
 using NATTunnel;

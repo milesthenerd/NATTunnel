@@ -158,12 +158,12 @@ public class MeshConfig
     }
 
     /// <summary>
-    /// Generate a fresh random <see cref="NetworkSecret"/>. 32 bytes of CSPRNG output, base64-encoded.
+    /// Generate a fresh random <see cref="NetworkSecret"/>. 12 bytes of CSPRNG output, base64-encoded (16 chars).
     /// Pair with <see cref="GenerateNetworkID"/> on first launch.
     /// </summary>
     public static string GenerateNetworkSecret()
     {
-        byte[] bytes = new byte[32];
+        byte[] bytes = new byte[12];
         System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
         return Convert.ToBase64String(bytes);
     }
