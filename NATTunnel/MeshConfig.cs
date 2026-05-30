@@ -117,6 +117,35 @@ public class MeshConfig
     /// </summary>
     public LogLevel MinLogLevel { get; set; } = LogLevel.Info;
 
+    /// <summary>
+    /// Maximum payload size (bytes) for <see cref="LocalIdentity"/> and for messages
+    /// passed to <see cref="MeshNode.SendMessageAsync"/> / <see cref="MeshNode.BroadcastAsync"/>.
+    /// Keeping it small ensures each message fits in a single Noise-encrypted UDP datagram.
+    /// </summary>
+    public const int MaxIdentitySize = 256;
+    public const int MaxMessageSize = 4096;
+
+    /// <summary>
+    /// Optional application-level identity blob exchanged automatically with every peer as
+    /// part of the post-handshake setup. Up to <see cref="MaxIdentitySize"/> bytes; null is
+    /// equivalent to an empty payload. The remote peer's blob is available as
+    /// <see cref="MeshPeer.Identity"/> by the time <see cref="MeshNode.PeerConnected"/>
+    /// fires — use it to communicate role/identity (e.g. "I'm the game server, port 8080")
+    /// before any application-layer connection is established.
+    ///
+    /// Set once at <see cref="MeshNode"/> construction; mutating after construction has no
+    /// effect on already-connected peers. For ongoing message passing use
+    /// <see cref="MeshNode.SendMessageAsync"/> instead.
+    /// </summary>
+    public byte[] LocalIdentity { get; set; }
+
+    /// <summary>
+    /// Timeout for reliable sends via <see cref="MeshNode.SendMessageAsync"/>. If no ack
+    /// arrives within this window the awaiting Task throws <see cref="TimeoutException"/>.
+    /// Default 5 seconds.
+    /// </summary>
+    public TimeSpan ReliableMessageTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
     internal void Validate()
     {
         if (string.IsNullOrEmpty(NetworkID)) throw new ArgumentException("MeshConfig.NetworkID is required.");
@@ -131,5 +160,9 @@ public class MeshConfig
             throw new ArgumentException("MeshConfig.LoopbackPortRangeStart out of range.");
         if (LoopbackPortRangeEnd < LoopbackPortRangeStart || LoopbackPortRangeEnd > 65535)
             throw new ArgumentException("MeshConfig.LoopbackPortRangeEnd must be >= LoopbackPortRangeStart and <= 65535.");
+        if (LocalIdentity != null && LocalIdentity.Length > MaxIdentitySize)
+            throw new ArgumentException($"MeshConfig.LocalIdentity must be at most {MaxIdentitySize} bytes (got {LocalIdentity.Length}).");
+        if (ReliableMessageTimeout <= TimeSpan.Zero)
+            throw new ArgumentException("MeshConfig.ReliableMessageTimeout must be positive.");
     }
 }

@@ -530,11 +530,14 @@ internal class Tunnel : IDisposable
         }
 
         // Embedded mode — route designated marker bytes to DataPacketReceived. 0x01 is the
-        // encrypted data envelope (design doc); 0x10 is the Noise handshake envelope. Both
-        // must come from our target peer; pre-connection packets are dropped silently to
+        // encrypted data envelope; 0x10 is the Noise handshake envelope; 0x30-0x33 are the
+        // application signaling envelopes (identity / unreliable / reliable / reliable-ack).
+        // All must come from our target peer; pre-connection packets are dropped silently to
         // avoid acting on a racing peer's early traffic.
         if (wireguardTunnel == null && receiveBuffer.Length > 0 &&
-            (receiveBuffer[0] == 0x01 || receiveBuffer[0] == 0x10))
+            (receiveBuffer[0] == 0x01 || receiveBuffer[0] == 0x10 ||
+             receiveBuffer[0] == 0x30 || receiveBuffer[0] == 0x31 ||
+             receiveBuffer[0] == 0x32 || receiveBuffer[0] == 0x33))
         {
             if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
             {

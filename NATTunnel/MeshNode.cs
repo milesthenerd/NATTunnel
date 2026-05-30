@@ -63,7 +63,11 @@ public class MeshNode : IDisposable
         }
     }
 
-    /// <summary>Raised once a peer's Noise handshake completes — the loopback endpoint is now safe to send to.</summary>
+    /// <summary>
+    /// Raised once a peer's Noise handshake completes AND its application identity blob has been
+    /// received — the loopback endpoint is safe to send to and <see cref="MeshPeer.Identity"/>
+    /// reflects the remote peer's <see cref="MeshConfig.LocalIdentity"/>.
+    /// </summary>
     public event Action<MeshPeer> PeerConnected;
 
     /// <summary>
@@ -73,6 +77,15 @@ public class MeshNode : IDisposable
     /// the same peer reconnecting gets a fresh MeshPeer + new loopback endpoint.
     /// </summary>
     public event Action<MeshPeer> PeerDisconnected;
+
+    /// <summary>
+    /// Raised when an application message arrives from a peer (sent via
+    /// <see cref="SendMessageAsync"/> or <see cref="BroadcastAsync"/> on the remote side).
+    /// Fires for both reliable and unreliable sends — receivers can't distinguish, since the
+    /// reliability is a sender-side concern. The payload buffer is owned by the callback;
+    /// don't retain references past the handler return.
+    /// </summary>
+    public event Action<MeshPeer, byte[]> MessageReceived;
 
     /// <summary>
     /// Construct a mesh node from a <see cref="MeshConfig"/>. Validates the config eagerly;
@@ -225,7 +238,8 @@ public class MeshNode : IDisposable
         bool isInitiator = string.Compare(peerID.ToString(), remotePeerID, StringComparison.Ordinal) > 0;
         var proxy = TryBuildProxyWithFreePort(p => new MeshPeerProxy(
             tunnel, p, config.HostGamePort,
-            staticKeyPair.PrivateKey, isInitiator, remotePeerID));
+            staticKeyPair.PrivateKey, isInitiator, remotePeerID,
+            localIdentity: config.LocalIdentity));
         if (proxy == null)
         {
             Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping connection.");
@@ -234,11 +248,7 @@ public class MeshNode : IDisposable
 
         var connected = new MeshPeer(remotePeerID, tunnel, proxy);
         connectedPeers[remotePeerID] = connected;
-        proxy.HandshakeComplete += () =>
-        {
-            Console.WriteLine($"[Embedded] Peer ready: {remotePeerID} via {proxy.LoopbackEndpoint}");
-            PeerConnected?.Invoke(connected);
-        };
+        WirePeerEvents(connected, proxy, remotePeerID, isRelayed: false, gatewayLabel: null);
 
         IPAddress senderMeshIP = null;
         if (IPAddress.TryParse(remoteMeshIP, out var meshIpAddr))
@@ -310,7 +320,8 @@ public class MeshNode : IDisposable
             staticKeyPair.PrivateKey, isInitiator,
             $"{remotePeerID}@relay",
             relayDestinationMeshIP: remoteMeshIP,
-            ownMeshIP: host.OwnMeshIP));
+            ownMeshIP: host.OwnMeshIP,
+            localIdentity: config.LocalIdentity));
         if (proxy == null)
         {
             Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for relayed {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping relay route.");
@@ -319,11 +330,7 @@ public class MeshNode : IDisposable
 
         var connected = new MeshPeer(remotePeerID, gatewayProxy.Tunnel, proxy);
         connectedPeers[remotePeerID] = connected;
-        proxy.HandshakeComplete += () =>
-        {
-            Console.WriteLine($"[Embedded] Relayed peer ready: {remotePeerID} via {proxy.LoopbackEndpoint} (gateway {gatewayMeshIP})");
-            PeerConnected?.Invoke(connected);
-        };
+        WirePeerEvents(connected, proxy, remotePeerID, isRelayed: true, gatewayLabel: gatewayMeshIP.ToString());
 
         // Register the relayed proxy under its mesh IP so cross-talk by inbound 0x01 finds the
         // right decryptor. (Direct proxies share the gateway's tunnel; multiple proxies
@@ -342,6 +349,65 @@ public class MeshNode : IDisposable
         // The gateway's tunnel is already connected (otherwise we wouldn't be relaying through it).
         // Start the Noise handshake immediately — it'll flow end-to-end through the gateway.
         proxy.Start();
+    }
+
+    /// <summary>
+    /// Subscribe a freshly-built proxy's events to MeshNode-level handlers: PeerConnected fires
+    /// only after BOTH handshake completion and identity arrival; MessageReceived bridges the
+    /// proxy's app-message events; reliable-ack resolves the matching pending send.
+    /// </summary>
+    private void WirePeerEvents(MeshPeer connected, MeshPeerProxy proxy, string remotePeerID, bool isRelayed, string gatewayLabel)
+    {
+        // Identity-and-handshake gating: PeerConnected fires once both have arrived. Order is
+        // not guaranteed — handshake-complete schedules the identity send, but identity packet
+        // delivery is async and the handshake event may fire first on this side.
+        int readinessFlags = 0; // bit 0 = handshake done, bit 1 = identity received
+        void TryFire()
+        {
+            if (readinessFlags == 0b11)
+            {
+                if (isRelayed)
+                    Console.WriteLine($"[Embedded] Relayed peer ready: {remotePeerID} via {proxy.LoopbackEndpoint} (gateway {gatewayLabel})");
+                else
+                    Console.WriteLine($"[Embedded] Peer ready: {remotePeerID} via {proxy.LoopbackEndpoint}");
+                try { PeerConnected?.Invoke(connected); }
+                catch (Exception ex) { Console.Error.WriteLine($"[Embedded] PeerConnected handler threw: {ex.Message}"); }
+            }
+        }
+
+        // Interlocked.Or returns the PRE-OR value. We only want to fire on the transition that
+        // sets the second bit — i.e. when the post-OR value is 0b11 but the pre-OR value wasn't.
+        // Interlocked.Or returns the PRE-OR value. We only want to fire on the transition that
+        // sets the second bit — i.e. when the post-OR value is 0b11 but the pre-OR value wasn't.
+        proxy.HandshakeComplete += () =>
+        {
+            int prev = Interlocked.Or(ref readinessFlags, 0b01);
+            if (prev != 0b11 && (prev | 0b01) == 0b11) TryFire();
+        };
+        proxy.IdentityReceived += identity =>
+        {
+            connected.Identity = identity ?? Array.Empty<byte>();
+            int prev = Interlocked.Or(ref readinessFlags, 0b10);
+            if (prev != 0b11 && (prev | 0b10) == 0b11) TryFire();
+        };
+
+        proxy.AppMessageReceived += payload =>
+        {
+            try { MessageReceived?.Invoke(connected, payload); }
+            catch (Exception ex) { Console.Error.WriteLine($"[Embedded] MessageReceived handler threw: {ex.Message}"); }
+        };
+        proxy.AppReliableReceived += payload =>
+        {
+            try { MessageReceived?.Invoke(connected, payload); }
+            catch (Exception ex) { Console.Error.WriteLine($"[Embedded] MessageReceived handler threw: {ex.Message}"); }
+        };
+        proxy.AppReliableAckReceived += seq =>
+        {
+            if (connected.PendingReliable.TryRemove(seq, out var tcs))
+            {
+                tcs.TrySetResult(true);
+            }
+        };
     }
 
     /// <summary>
@@ -568,6 +634,77 @@ public class MeshNode : IDisposable
         return ((IPEndPoint)probe.Client.LocalEndPoint).Port;
     }
 
+    /// <summary>
+    /// Send an application message to a single peer. With <paramref name="reliable"/> false
+    /// the bytes go out via 0x31 — best-effort UDP, no ack, no retransmit, returns true as
+    /// soon as the encryption succeeds. With reliable true the bytes go out via 0x32 with a
+    /// sequence number, and the returned Task completes when the matching 0x33 ack arrives or
+    /// throws <see cref="TimeoutException"/> after <see cref="MeshConfig.ReliableMessageTimeout"/>.
+    /// </summary>
+    public Task<bool> SendMessageAsync(MeshPeer peer, byte[] payload, bool reliable, CancellationToken cancellationToken = default)
+    {
+        if (peer == null) throw new ArgumentNullException(nameof(peer));
+        if (payload == null) throw new ArgumentNullException(nameof(payload));
+        if (payload.Length > MeshConfig.MaxMessageSize)
+            throw new ArgumentException($"Message payload must be at most {MeshConfig.MaxMessageSize} bytes (got {payload.Length}).", nameof(payload));
+
+        if (!reliable)
+        {
+            return Task.FromResult(peer.Proxy.SendAppUnreliable(payload));
+        }
+        return SendReliableInternalAsync(peer, payload, cancellationToken);
+    }
+
+    /// <summary>
+    /// Broadcast an application message to every currently-connected peer. Snapshot at call
+    /// time — late-joining peers don't receive this message. Returns when every per-peer send
+    /// has resolved (or the overall token cancels).
+    /// </summary>
+    public Task BroadcastAsync(byte[] payload, bool reliable, CancellationToken cancellationToken = default)
+    {
+        if (payload == null) throw new ArgumentNullException(nameof(payload));
+        var snapshot = connectedPeers.Values.ToArray();
+        if (snapshot.Length == 0) return Task.CompletedTask;
+        var sends = new Task[snapshot.Length];
+        for (int i = 0; i < snapshot.Length; i++)
+        {
+            sends[i] = SendMessageAsync(snapshot[i], payload, reliable, cancellationToken);
+        }
+        return Task.WhenAll(sends);
+    }
+
+    private async Task<bool> SendReliableInternalAsync(MeshPeer peer, byte[] payload, CancellationToken cancellationToken)
+    {
+        uint seq = unchecked((uint)Interlocked.Increment(ref peer.ReliableSeqCounter));
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        peer.PendingReliable[seq] = tcs;
+
+        try
+        {
+            if (!peer.Proxy.SendAppReliable(seq, payload))
+            {
+                peer.PendingReliable.TryRemove(seq, out _);
+                return false;
+            }
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(config.ReliableMessageTimeout);
+
+            using (timeoutCts.Token.Register(() =>
+            {
+                if (cancellationToken.IsCancellationRequested) tcs.TrySetCanceled(cancellationToken);
+                else tcs.TrySetException(new TimeoutException($"Reliable send to {peer.PeerID} (seq {seq}) was not acked within {config.ReliableMessageTimeout.TotalSeconds}s."));
+            }))
+            {
+                return await tcs.Task.ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            peer.PendingReliable.TryRemove(seq, out _);
+        }
+    }
+
     public void Dispose()
     {
         if (context != null) context.ShutdownRequested = true;
@@ -609,9 +746,24 @@ public class MeshNode : IDisposable
         /// </summary>
         public IPEndPoint LoopbackEndpoint => Proxy.LoopbackEndpoint;
 
+        /// <summary>
+        /// The application-level identity blob the remote peer configured via
+        /// <see cref="MeshConfig.LocalIdentity"/>. Always non-null by the time
+        /// <see cref="MeshNode.PeerConnected"/> fires; may be zero-length if the peer didn't
+        /// configure one. Use this to learn roles or other metadata about the peer before
+        /// opening an application-layer connection (e.g. "I'm the game server, port 8080").
+        /// </summary>
+        public byte[] Identity { get; internal set; } = Array.Empty<byte>();
+
         // Internal handles. Not part of the public API — used by MeshNode for its own bookkeeping.
         internal Tunnel Tunnel { get; }
         internal MeshPeerProxy Proxy { get; }
+
+        // Per-peer reliable-send state. Sequence numbers are allocated via Interlocked.Increment
+        // on ReliableSeqCounter; the matching TaskCompletionSource is parked in PendingReliable
+        // until the 0x33 ack arrives (or the timeout fires).
+        internal int ReliableSeqCounter;
+        internal readonly ConcurrentDictionary<uint, TaskCompletionSource<bool>> PendingReliable = new();
 
         internal MeshPeer(string peerID, Tunnel tunnel, MeshPeerProxy proxy)
         {

@@ -59,9 +59,10 @@ using var node = new MeshNode(new MeshConfig
     NetworkSecret = "shared-secret",
     MediationEndpoint = "sync.milesthenerd.net:6510",
     HostGamePort = hostGamePort,
-    // Optional: persistent identity, logger, relay capacity, etc.
+    // Optional: persistent identity, relay capacity, etc.
     // PersistentPeerID = playerAccountGuid,
-    // Logger = line => Console.WriteLine($"[mesh] {line}"),
+    // MinLogLevel = LogLevel.Warning
+    // Logger = line => Console.WriteLine(line),
 });
 
 node.PeerConnected += peer =>
@@ -76,6 +77,65 @@ node.PeerDisconnected += peer =>
 {
     Console.WriteLine($"Peer left: {peer.PeerID}");
 };
+
+node.Start();
+
+// Block until you're done — e.g. wait for a shutdown signal.
+await Task.Delay(-1);
+```
+
+## Minimal example
+
+```csharp
+using NATTunnel;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+
+// 1. Host app binds its own UDP socket on a known loopback port — this is where
+//    incoming packets from peers will arrive.
+const int hostGamePort = 51000;
+var hostSocket = new UdpClient(new IPEndPoint(IPAddress.Loopback, hostGamePort));
+
+_ = Task.Run(async () =>
+{
+    while (true)
+    {
+        var pkt = await hostSocket.ReceiveAsync();
+        // pkt.RemoteEndPoint is the loopback endpoint of the sending peer.
+        Console.WriteLine($"Got {pkt.Buffer.Length} bytes from {pkt.RemoteEndPoint}");
+    }
+});
+
+// 2. Configure + start the mesh node.
+using var node = new MeshNode(new MeshConfig
+{
+    NetworkID = "my-game-lobby-42",
+    NetworkSecret = "shared-secret",
+    MediationEndpoint = "sync.milesthenerd.net:6510",
+    HostGamePort = hostGamePort,
+    LocalIdentity = Encoding.UTF8.GetBytes("server"), // 256 byte limit
+    ReliableMessageTimeout = TimeSpan.FromSeconds(10), // default 5s
+});
+
+node.PeerConnected += peer =>
+{
+    var identity = Encoding.UTF8.GetString(peer.Identity);
+    if (identity == "server")
+    {
+        // client connect logic here
+    }
+};
+
+node.MessageReceived += async (peer, bytes) => {
+    var str = Encoding.UTF8.GetString(bytes);
+    Console.WriteLine($"Got msg {str} from {peer.PeerID}");
+
+    // send same bytes back
+    await node.SendMessageAsync(peer, bytes, reliable: true);
+    // or
+    await node.BroadcastAsync(bytes, reliable: false);
+}
 
 node.Start();
 

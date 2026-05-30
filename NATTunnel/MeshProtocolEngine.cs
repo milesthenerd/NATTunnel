@@ -143,6 +143,11 @@ internal class MeshProtocolEngine
     private object meshLock = new object();
     private Dictionary<string, Tunnel> activePeerTunnels = new Dictionary<string, Tunnel>();
     private Dictionary<string, DateTime> pendingConnectionRequests = new Dictionary<string, DateTime>();
+    // Tracks the last time we logged a "stale pending connection request" warning per peer,
+    // so the same ghost peer doesn't spam the log every cycle. Entries persist until the peer
+    // either connects or pendingConnectionRequests is cleared en masse (disconnect/rejoin).
+    private Dictionary<string, DateTime> lastStaleWarningAt = new Dictionary<string, DateTime>();
+    private static readonly TimeSpan StaleWarningCooldown = TimeSpan.FromMinutes(1);
     private Dictionary<int, Tunnel> activeConnectionTunnels = new Dictionary<int, Tunnel>();
     private Dictionary<int, string> connectionIDToPeerID = new Dictionary<int, string>();
     private Dictionary<int, string> peerMeshIPs = new Dictionary<int, string>();
@@ -361,6 +366,7 @@ internal class MeshProtocolEngine
                 // Clear per-connect tracking state (preserves closure references for background tasks)
                 activePeerTunnels.Clear();
                 pendingConnectionRequests.Clear();
+                lastStaleWarningAt.Clear();
                 activeConnectionTunnels.Clear();
                 connectionIDToPeerID.Clear();
                 peerMeshIPs.Clear();
@@ -702,7 +708,14 @@ internal class MeshProtocolEngine
                         foreach (var staleID in staleRequests)
                         {
                             pendingConnectionRequests.Remove(staleID);
-                            context.Log(LogLevel.Warning, $"[Mesh] Removed stale pending connection request for {staleID} (no response in {staleTimeout.TotalSeconds}s)");
+                            // Dedupe: ghost peers (never-responding) get re-added by other loops
+                            // and would otherwise log this warning every StaleTimeoutSeconds.
+                            // Cap to once per StaleWarningCooldown per peer.
+                            if (!lastStaleWarningAt.TryGetValue(staleID, out var lastAt) || now - lastAt > StaleWarningCooldown)
+                            {
+                                context.Log(LogLevel.Warning, $"[Mesh] Removed stale pending connection request for {staleID} (no response in {staleTimeout.TotalSeconds}s)");
+                                lastStaleWarningAt[staleID] = now;
+                            }
                         }
                     }
 
@@ -1403,6 +1416,7 @@ internal class MeshProtocolEngine
 
                                         // Clear stale peer state — endpoints may have changed during isolation
                                         pendingConnectionRequests.Clear();
+                lastStaleWarningAt.Clear();
 
                                         // Perform full mediation handshake (Connected → NAT test → MeshJoinRequest)
                                         reconnectedStream.ReadTimeout = 15000;
@@ -1565,6 +1579,7 @@ internal class MeshProtocolEngine
                     // Clear all tracking state (use Clear() to preserve closure references)
                     activePeerTunnels.Clear();
                     pendingConnectionRequests.Clear();
+                lastStaleWarningAt.Clear();
                     activeConnectionTunnels.Clear();
                     connectionIDToPeerID.Clear();
                     peerMeshIPs.Clear();
@@ -3536,6 +3551,7 @@ internal class MeshProtocolEngine
                 }
 
                 pendingConnectionRequests.Clear();
+                lastStaleWarningAt.Clear();
 
                 reconnectedStream.ReadTimeout = 15000;
                 string reconRemainder2 = "";
