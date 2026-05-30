@@ -146,6 +146,28 @@ public class MeshConfig
     /// </summary>
     public TimeSpan ReliableMessageTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// Generate a fresh random <see cref="NetworkID"/>. Format: "net-" followed by 8 lowercase
+    /// hex chars (4 bytes of CSPRNG output). Use this when seeding a config file the first time.
+    /// </summary>
+    public static string GenerateNetworkID()
+    {
+        byte[] bytes = new byte[4];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+        return "net-" + Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Generate a fresh random <see cref="NetworkSecret"/>. 32 bytes of CSPRNG output, base64-encoded.
+    /// Pair with <see cref="GenerateNetworkID"/> on first launch.
+    /// </summary>
+    public static string GenerateNetworkSecret()
+    {
+        byte[] bytes = new byte[32];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
+        return Convert.ToBase64String(bytes);
+    }
+
     internal void Validate()
     {
         if (string.IsNullOrEmpty(NetworkID)) throw new ArgumentException("MeshConfig.NetworkID is required.");

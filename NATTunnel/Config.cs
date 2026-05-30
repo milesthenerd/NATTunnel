@@ -348,19 +348,9 @@ public static class Config
         File.WriteAllLines(configPath, lines);
     }
 
-    private static string GenerateNetworkID()
-    {
-        byte[] bytes = new byte[4];
-        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
-        return "net-" + Convert.ToHexString(bytes).ToLowerInvariant();
-    }
+    private static string GenerateNetworkID() => MeshConfig.GenerateNetworkID();
 
-    private static string GenerateNetworkSecret()
-    {
-        byte[] bytes = new byte[32];
-        System.Security.Cryptography.RandomNumberGenerator.Fill(bytes);
-        return Convert.ToBase64String(bytes);
-    }
+    private static string GenerateNetworkSecret() => MeshConfig.GenerateNetworkSecret();
 
     /// <summary>
     /// Helper method that resolves a DNS and returns the correct IPvX ip depending on what's supported.
