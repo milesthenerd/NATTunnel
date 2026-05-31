@@ -71,12 +71,12 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
         return true;
     }
 
-    public void OnRelayPeerEstablished(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP)
+    public void OnRelayPeerEstablished(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP, IPEndPoint remotePublicEndpoint)
     {
         // Forward the full peer identity to NATTunnel.MeshNode so it can build a relayed
         // MeshPeerProxy. Idempotent — duplicate fires shouldn't re-create the proxy
         // (NATTunnel.MeshNode guards on its own peer dictionary).
-        try { RelayedPeerAdded?.Invoke(remotePeerID, remoteMeshIP, gatewayMeshIP); }
+        try { RelayedPeerAdded?.Invoke(remotePeerID, remoteMeshIP, gatewayMeshIP, remotePublicEndpoint); }
         catch (Exception ex) { Program.Log(LogLevel.Error, $"[EmbeddedMeshHost] RelayedPeerAdded handler threw: {ex.Message}"); }
     }
 
@@ -276,7 +276,7 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
     /// Carries the full peer identity that NATTunnel.MeshNode needs to construct a relayed
     /// MeshPeerProxy (peer ID for Noise initiator decision; mesh IPs for envelope + routing).
     /// </summary>
-    public event Action<string, IPAddress, IPAddress> RelayedPeerAdded;
+    public event Action<string, IPAddress, IPAddress, IPEndPoint> RelayedPeerAdded;
 
     public void ConfigureNewTunnel(Tunnel tunnel, string remotePeerID, string remoteMeshIP)
     {

@@ -27,6 +27,14 @@ internal class Tunnel : IDisposable
     private readonly IPEndPoint endpoint;
     private IPAddress targetPeerIp;
     private int targetPeerPort;
+
+    /// <summary>
+    /// The post-hole-punch remote endpoint this tunnel sends to. For a direct tunnel this is
+    /// the peer's NAT-translated public address. Null until hole-punching resolves
+    /// targetPeerIp/Port — i.e. before <see cref="connected"/> becomes true.
+    /// </summary>
+    public IPEndPoint RemoteEndpoint =>
+        (targetPeerIp != null && targetPeerPort > 0) ? new IPEndPoint(targetPeerIp, targetPeerPort) : null;
     private int holePunchReceivedCount;
     public bool connected;
     private NATType natType = NATType.Unknown;

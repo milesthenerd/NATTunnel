@@ -2064,7 +2064,13 @@ internal class MeshProtocolEngine
                     metricRelayRoutesEstablished++;
                     relayedRemotes[remoteMeshIP] = gatewayIP;
                     // Notify host (no-op in daemon, used by embedded mode to spawn a relayed proxy).
-                    host.OnRelayPeerEstablished(remotePeerID, remoteMeshIPAddr, gatewayIPAddr);
+                    IPEndPoint remotePublicEp = null;
+                    if (!string.IsNullOrEmpty(remoteEndpoint))
+                    {
+                        try { remotePublicEp = IPEndPoint.Parse(remoteEndpoint); }
+                        catch { remotePublicEp = null; }
+                    }
+                    host.OnRelayPeerEstablished(remotePeerID, remoteMeshIPAddr, gatewayIPAddr, remotePublicEp);
                 }
                 else
                 {

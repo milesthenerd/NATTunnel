@@ -72,7 +72,11 @@ internal interface IMeshHost
     /// Embedded hosts use this to construct a relayed MeshPeerProxy + start its Noise handshake.
     /// Daemon hosts can ignore it.
     /// </summary>
-    void OnRelayPeerEstablished(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP);
+    /// <param name="remotePublicEndpoint">
+    /// Remote peer's NAT-translated public endpoint as reported by the introducer in the
+    /// relay MeshConnectionBegin. Null if the introducer didn't supply one.
+    /// </param>
+    void OnRelayPeerEstablished(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP, IPEndPoint remotePublicEndpoint);
 
     /// <summary>
     /// Attempt to send a mesh-control packet (heartbeat, MeshConnectionBegin, MeshRelayAssignment, etc.)

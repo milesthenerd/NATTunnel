@@ -69,6 +69,33 @@ public class MeshNode : IDisposable
     }
 
     /// <summary>
+    /// Look up a connected peer by its <see cref="MeshPeer.PeerID"/>. Returns false if no peer
+    /// with that ID is currently connected (including: not yet handshaken, already disconnected,
+    /// or never seen). O(1).
+    /// </summary>
+    public bool TryGetPeer(string peerID, out MeshPeer peer)
+    {
+        if (string.IsNullOrEmpty(peerID)) { peer = null; return false; }
+        return connectedPeers.TryGetValue(peerID, out peer);
+    }
+
+    /// <summary>
+    /// Look up a connected peer by its <see cref="MeshPeer.LoopbackEndpoint"/> — useful when the
+    /// host transport surfaces a packet's apparent source endpoint
+    /// and the host needs to map it back to a <see cref="MeshPeer"/>. O(n) over current peers.
+    /// </summary>
+    public bool TryGetPeerByLoopback(IPEndPoint loopbackEndpoint, out MeshPeer peer)
+    {
+        peer = null;
+        if (loopbackEndpoint == null) return false;
+        foreach (var p in connectedPeers.Values)
+        {
+            if (loopbackEndpoint.Equals(p.LoopbackEndpoint)) { peer = p; return true; }
+        }
+        return false;
+    }
+
+    /// <summary>
     /// The maximum payload size (bytes) the host app's transport should produce per UDP
     /// datagram for safe delivery across all reachable peers. Derived from
     /// <see cref="MeshConfig.PathMTU"/> minus the proxy's per-packet overhead
@@ -279,7 +306,7 @@ public class MeshNode : IDisposable
             return;
         }
 
-        var connected = new MeshPeer(remotePeerID, tunnel, proxy);
+        var connected = new MeshPeer(remotePeerID, tunnel, proxy, isRelayed: false, publicEndpointOverride: null);
         connectedPeers[remotePeerID] = connected;
         WirePeerEvents(connected, proxy, remotePeerID, isRelayed: false, gatewayLabel: null);
 
@@ -322,7 +349,7 @@ public class MeshNode : IDisposable
     ///   - Wraps outbound data with the 0x02 envelope so the gateway forwards it
     ///   - Decodes inbound from the gateway's tunnel as direct 0x01 (the gateway strips its envelope)
     /// </summary>
-    private void OnRelayedPeerAdded(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP)
+    private void OnRelayedPeerAdded(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP, IPEndPoint remotePublicEndpoint)
     {
         if (Volatile.Read(ref disposed) != 0) return;
         if (string.IsNullOrEmpty(remotePeerID)) return;
@@ -365,7 +392,7 @@ public class MeshNode : IDisposable
             return;
         }
 
-        var connected = new MeshPeer(remotePeerID, gatewayProxy.Tunnel, proxy);
+        var connected = new MeshPeer(remotePeerID, gatewayProxy.Tunnel, proxy, isRelayed: true, publicEndpointOverride: remotePublicEndpoint);
         connectedPeers[remotePeerID] = connected;
         WirePeerEvents(connected, proxy, remotePeerID, isRelayed: true, gatewayLabel: gatewayMeshIP.ToString());
 
@@ -826,6 +853,20 @@ public class MeshNode : IDisposable
         /// </summary>
         public byte[] Identity { get; internal set; } = Array.Empty<byte>();
 
+        /// <summary>
+        /// The remote peer's public (NAT-translated) IP and port.
+        ///
+        /// For relayed peers, this is the remote peer's public endpoint as reported by the
+        /// introducer via mesh-control — not an endpoint we directly observed. May be null if
+        /// the introducer didn't supply one.
+        /// </summary>
+        public IPEndPoint PublicEndpoint { get; }
+
+        /// <summary>
+        /// True when this peer is reachable only via the introducer relay (typically because
+        /// both sides are symmetric NAT and direct hole-punching failed).
+        public bool IsRelayed { get; }
+
         // Internal handles. Not part of the public API — used by MeshNode for its own bookkeeping.
         internal Tunnel Tunnel { get; }
         internal MeshPeerProxy Proxy { get; }
@@ -836,11 +877,16 @@ public class MeshNode : IDisposable
         internal int ReliableSeqCounter;
         internal readonly ConcurrentDictionary<uint, TaskCompletionSource<bool>> PendingReliable = new();
 
-        internal MeshPeer(string peerID, Tunnel tunnel, MeshPeerProxy proxy)
+        internal MeshPeer(string peerID, Tunnel tunnel, MeshPeerProxy proxy, bool isRelayed, IPEndPoint publicEndpointOverride)
         {
             PeerID = peerID;
             Tunnel = tunnel;
             Proxy = proxy;
+            IsRelayed = isRelayed;
+            // Direct peers: tunnel.RemoteEndpoint is the peer's own NAT-translated address.
+            // Relayed peers: tunnel belongs to the gateway, so use the introducer-supplied
+            // endpoint instead (may be null if the introducer didn't include one).
+            PublicEndpoint = isRelayed ? publicEndpointOverride : tunnel.RemoteEndpoint;
         }
     }
 }

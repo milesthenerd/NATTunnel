@@ -911,10 +911,10 @@ namespace NATTunnel
             tunnel.SetWireGuardTunnel(this);
         }
 
-        public void OnRelayPeerEstablished(string remotePeerID, System.Net.IPAddress remoteMeshIP, System.Net.IPAddress gatewayMeshIP)
+        public void OnRelayPeerEstablished(string remotePeerID, System.Net.IPAddress remoteMeshIP, System.Net.IPAddress gatewayMeshIP, System.Net.IPEndPoint remotePublicEndpoint)
         {
             // Daemon mode: WG kernel routing handles relayed traffic transparently. No-op here.
-            _ = remotePeerID; _ = remoteMeshIP; _ = gatewayMeshIP;
+            _ = remotePeerID; _ = remoteMeshIP; _ = gatewayMeshIP; _ = remotePublicEndpoint;
         }
 
         public bool SendMeshControl(System.Net.IPAddress destinationMeshIP, byte[] data, int length)
