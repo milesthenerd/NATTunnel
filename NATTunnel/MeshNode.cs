@@ -69,6 +69,19 @@ public class MeshNode : IDisposable
     }
 
     /// <summary>
+    /// The maximum payload size (bytes) the host app's transport should produce per UDP
+    /// datagram for safe delivery across all reachable peers. Derived from
+    /// <see cref="MeshConfig.PathMTU"/> minus the proxy's per-packet overhead
+    /// (envelope byte + 8B counter + 16B AEAD tag = 25 bytes).
+    ///
+    /// Refer to this when configuring your transport to
+    /// avoid producing datagrams that would be silently dropped on low-MTU paths like cellular
+    /// or VPN-tunneled links. Ignore this value at your own risk if
+    /// <see cref="MeshConfig.AutoFragment"/> is false.
+    /// </summary>
+    public int RecommendedHostMTU => config.PathMTU - 25;
+
+    /// <summary>
     /// Raised once a peer's Noise handshake completes AND its application identity blob has been
     /// received — the loopback endpoint is safe to send to and <see cref="MeshPeer.Identity"/>
     /// reflects the remote peer's <see cref="MeshConfig.LocalIdentity"/>.
@@ -256,7 +269,10 @@ public class MeshNode : IDisposable
         var proxy = TryBuildProxyWithFreePort(p => new MeshPeerProxy(
             tunnel, p, config.HostGamePort,
             staticKeyPair.PrivateKey, isInitiator, remotePeerID,
-            localIdentity: config.LocalIdentity));
+            localIdentity: config.LocalIdentity,
+            autoFragment: config.AutoFragment,
+            PathMTU: config.PathMTU,
+            fragmentReassemblyTimeout: config.FragmentReassemblyTimeout));
         if (proxy == null)
         {
             Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping connection.");
@@ -339,7 +355,10 @@ public class MeshNode : IDisposable
             $"{remotePeerID}@relay",
             relayDestinationMeshIP: remoteMeshIP,
             ownMeshIP: host.OwnMeshIP,
-            localIdentity: config.LocalIdentity));
+            localIdentity: config.LocalIdentity,
+            autoFragment: config.AutoFragment,
+            PathMTU: config.PathMTU,
+            fragmentReassemblyTimeout: config.FragmentReassemblyTimeout));
         if (proxy == null)
         {
             Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for relayed {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping relay route.");

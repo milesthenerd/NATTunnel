@@ -67,6 +67,17 @@ internal sealed class MeshPeerProxy : IDisposable
     /// </summary>
     public const byte EnvelopeAppReliableAck = 0x33;
 
+    /// <summary>
+    /// Application data fragment envelope: [0x40] [counter ‖ ChaCha20-Poly1305(
+    ///   [msgID (4 BE)] [fragIndex (1)] [fragCount (1)] [payload]
+    /// )]. Used only when <see cref="MeshConfig.AutoFragment"/> is true and a single host-game
+    /// packet exceeds the configured PathMTU after accounting for envelope/counter/tag
+    /// overhead. The receiver reassembles by msgID and delivers the concatenated payload to
+    /// the host's loopback once all fragments arrive (or discards after
+    /// FragmentReassemblyTimeout if any fragment is lost).
+    /// </summary>
+    public const byte EnvelopeDataFragment = 0x40;
+
     // Buffer big enough for any Noise message; spec max is 65535.
     private const int MaxNoiseMessage = 65535;
 
@@ -102,6 +113,23 @@ internal sealed class MeshPeerProxy : IDisposable
     // Cached last-sent handshake message for retransmit (UDP can lose msg-1/msg-2/msg-3).
     private byte[] lastSentHandshakeFrame;
     private Timer handshakeRetransmitTimer;
+
+    // Fragmentation/reassembly state. See MeshConfig.AutoFragment for why; see
+    // EnvelopeDataFragment for the on-wire format.
+    private readonly bool autoFragment;
+    private readonly int fragmentPayloadBudget;
+    private readonly TimeSpan fragmentReassemblyTimeout;
+    private long nextFragmentMessageId;
+    // Reassembly: msgID → in-progress assembly. Capped at a small size and GC'd on the
+    // reassembly timeout so a missing fragment can't leak memory.
+    private readonly ConcurrentDictionary<uint, FragmentAssembly> fragmentReassembly = new();
+
+    private sealed class FragmentAssembly
+    {
+        public byte[][] Fragments;
+        public int ReceivedCount;
+        public DateTime FirstSeen;
+    }
 
     /// <summary>The loopback endpoint the host game sends to when talking to this peer.</summary>
     public IPEndPoint LoopbackEndpoint { get; }
@@ -167,11 +195,28 @@ internal sealed class MeshPeerProxy : IDisposable
     /// Defaults to an empty array (the wire format always carries an identity envelope; an
     /// empty blob is sent if the application didn't configure one).
     /// </param>
+    /// <param name="autoFragment">
+    /// If true, plaintexts from the loopback socket larger than the per-packet payload budget
+    /// derived from <paramref name="PathMTU"/> are split into multiple 0x40 fragment packets,
+    /// reassembled on the receiving side. Off by default — only useful for transports that
+    /// don't do their own MTU-aware fragmentation.
+    /// </param>
+    /// <param name="PathMTU">
+    /// Conservative path MTU in bytes. Outbound encrypted UDP datagrams never exceed this.
+    /// Per-fragment payload budget is <c>PathMTU - 31</c> (1B envelope + 8B counter + 6B
+    /// frag header + 16B AEAD tag). Only meaningful when <paramref name="autoFragment"/> is true.
+    /// </param>
+    /// <param name="fragmentReassemblyTimeout">
+    /// How long the receiver keeps a partially-assembled message before discarding it.
+    /// </param>
     public MeshPeerProxy(Tunnel tunnel, int loopbackPort, int hostGamePort,
                          byte[] staticPrivateKey, bool isInitiator, string peerLabel,
                          IPAddress relayDestinationMeshIP = null,
                          IPAddress ownMeshIP = null,
-                         byte[] localIdentity = null)
+                         byte[] localIdentity = null,
+                         bool autoFragment = false,
+                         int PathMTU = 1200,
+                         TimeSpan fragmentReassemblyTimeout = default)
     {
         this.tunnel = tunnel ?? throw new ArgumentNullException(nameof(tunnel));
         this.staticPrivateKey = staticPrivateKey ?? throw new ArgumentNullException(nameof(staticPrivateKey));
@@ -179,6 +224,14 @@ internal sealed class MeshPeerProxy : IDisposable
         this.peerLabel = peerLabel ?? "?";
         // Normalize null -> empty so the wire-format codepath doesn't have to special-case null.
         this.localIdentity = localIdentity ?? Array.Empty<byte>();
+        this.autoFragment = autoFragment;
+        // Per-fragment plaintext budget: PathMTU minus envelope(1) + counter(8) + tag(16) =
+        // 25 bytes of crypto overhead, minus 6 bytes of fragment header (msgID 4 + idx 1 + cnt 1).
+        // Clamp to a sane minimum so a misconfigured tiny PathMTU doesn't produce
+        // negative-or-zero budgets that would never make progress.
+        this.fragmentPayloadBudget = Math.Max(64, PathMTU - 31);
+        this.fragmentReassemblyTimeout = fragmentReassemblyTimeout == default
+            ? TimeSpan.FromSeconds(2) : fragmentReassemblyTimeout;
         // Cache the 4-byte big-endian form once so the hot send path doesn't reallocate.
         this.relayDstMeshIPBytes = relayDestinationMeshIP?.GetAddressBytes();
         if (this.relayDstMeshIPBytes != null && this.relayDstMeshIPBytes.Length != 4)
@@ -321,6 +374,9 @@ internal sealed class MeshPeerProxy : IDisposable
                 break;
             case EnvelopeAppReliableAck:
                 HandleAppReliableAckMessage(framed.AsSpan(1));
+                break;
+            case EnvelopeDataFragment:
+                HandleDataFragmentMessage(framed.AsSpan(1));
                 break;
         }
     }
@@ -574,6 +630,106 @@ internal sealed class MeshPeerProxy : IDisposable
         catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] deliver-to-host failed: {ex.Message}"); }
     }
 
+    /// <summary>
+    /// Decrypt a 0x40-framed fragment, place it in its message's reassembly slot, and if all
+    /// fragments have arrived, concatenate + deliver to the host's loopback. Incomplete
+    /// messages are GC'd by <see cref="ReapStaleFragmentAssemblies"/> after the configured
+    /// timeout. Receive-side reassembly works whether or not this side has AutoFragment
+    /// enabled — the wire format only depends on the sender's setting.
+    /// </summary>
+    private void HandleDataFragmentMessage(ReadOnlySpan<byte> body)
+    {
+        var plaintext = TryDecryptInner(body);
+        if (plaintext == null || plaintext.Length < 6) return;
+
+        uint msgId = (uint)((plaintext[0] << 24) | (plaintext[1] << 16) | (plaintext[2] << 8) | plaintext[3]);
+        int fragIndex = plaintext[4];
+        int fragCount = plaintext[5];
+        if (fragCount == 0 || fragIndex >= fragCount) return; // malformed
+
+        int chunkLen = plaintext.Length - 6;
+        var chunk = new byte[chunkLen];
+        Buffer.BlockCopy(plaintext, 6, chunk, 0, chunkLen);
+
+        var assembly = fragmentReassembly.GetOrAdd(msgId, _ => new FragmentAssembly
+        {
+            Fragments = new byte[fragCount][],
+            FirstSeen = DateTime.UtcNow
+        });
+
+        // Defensive: fragCount mismatch across fragments of the same msgId means the sender
+        // either has a bug or this is a stale msgId from a previous wraparound. Drop.
+        if (assembly.Fragments.Length != fragCount) return;
+
+        // Idempotent on duplicate fragment delivery (UDP can dup).
+        if (assembly.Fragments[fragIndex] != null) return;
+        assembly.Fragments[fragIndex] = chunk;
+        int received = Interlocked.Increment(ref assembly.ReceivedCount);
+        if (received < fragCount)
+        {
+            ReapStaleFragmentAssemblies();
+            return;
+        }
+
+        // All fragments present. Concatenate and deliver.
+        int totalLen = 0;
+        foreach (var f in assembly.Fragments) totalLen += f.Length;
+        var full = new byte[totalLen];
+        int dst = 0;
+        foreach (var f in assembly.Fragments)
+        {
+            Buffer.BlockCopy(f, 0, full, dst, f.Length);
+            dst += f.Length;
+        }
+        fragmentReassembly.TryRemove(msgId, out _);
+        try { loopbackSocket.Send(full, full.Length, hostGameEndpoint); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] reassembled-deliver-to-host failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Walk the reassembly table and drop entries older than the configured timeout. Called
+    /// opportunistically from the fragment receive path — no dedicated timer needed because
+    /// fragments only accumulate when fragments are arriving.
+    /// </summary>
+    private void ReapStaleFragmentAssemblies()
+    {
+        var cutoff = DateTime.UtcNow - fragmentReassemblyTimeout;
+        foreach (var kv in fragmentReassembly)
+        {
+            if (kv.Value.FirstSeen < cutoff)
+                fragmentReassembly.TryRemove(kv.Key, out _);
+        }
+    }
+
+    /// <summary>
+    /// Encrypt a plaintext data payload with the per-peer Noise transport and send it as
+    /// a 0x01-framed UDP datagram through the underlying tunnel. Used by the fast-path
+    /// (whole-packet) send and by anywhere else that wants to emit a single non-fragmented
+    /// data envelope.
+    /// </summary>
+    private void EncryptAndSendData(byte[] plaintext)
+    {
+        // Envelope (1) + counter (8) + ciphertext (plaintext.Length) + tag (16)
+        var framed = new byte[1 + NoiseUdpTransport.CounterSize + plaintext.Length + NoiseUdpTransport.TagSize];
+        framed[0] = EnvelopeData;
+
+        int written;
+        lock (sendLock)
+        {
+            if (transport == null) return;
+            written = transport.Encrypt(plaintext, framed.AsSpan(1));
+        }
+
+        if (written != framed.Length - 1)
+        {
+            Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] unexpected ciphertext size {written} vs {framed.Length - 1}");
+            return;
+        }
+
+        try { SendThroughTunnel(framed); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] tunnel send failed: {ex.Message}"); }
+    }
+
     private async Task LoopbackReceiveLoop(CancellationToken token)
     {
         try
@@ -586,25 +742,39 @@ internal sealed class MeshPeerProxy : IDisposable
                 catch (ObjectDisposedException) { break; }
 
                 byte[] plaintext = result.Buffer;
-                // Envelope (1) + counter (8) + ciphertext (plaintext.Length) + tag (16)
-                var framed = new byte[1 + NoiseUdpTransport.CounterSize + plaintext.Length + NoiseUdpTransport.TagSize];
-                framed[0] = EnvelopeData;
 
-                int written;
-                lock (sendLock)
+                // Fast path: small enough to fit in one Noise-encrypted UDP datagram, or
+                // AutoFragment is disabled (caller is on the hook for keeping packets small).
+                if (!autoFragment || plaintext.Length <= fragmentPayloadBudget)
                 {
-                    if (transport == null) continue;
-                    written = transport.Encrypt(plaintext, framed.AsSpan(1));
-                }
-
-                if (written != framed.Length - 1)
-                {
-                    Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] unexpected ciphertext size {written} vs {framed.Length - 1}");
+                    EncryptAndSendData(plaintext);
                     continue;
                 }
 
-                try { SendThroughTunnel(framed); }
-                catch (Exception ex) { Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] tunnel send failed: {ex.Message}"); }
+                // Slow path: split into N fragments and send each as its own 0x40-framed
+                // encrypted UDP datagram. Each fragment carries [msgID(4) ‖ idx(1) ‖ count(1) ‖ chunk].
+                int budget = fragmentPayloadBudget;
+                int fragCount = (plaintext.Length + budget - 1) / budget;
+                if (fragCount > 255)
+                {
+                    Program.Log(LogLevel.Error, $"[MeshPeerProxy/{peerLabel}] packet of {plaintext.Length} bytes needs {fragCount} fragments (>255 max); dropping. Increase PathMTU or chunk at the host.");
+                    continue;
+                }
+                uint msgId = unchecked((uint)Interlocked.Increment(ref nextFragmentMessageId));
+                for (int i = 0; i < fragCount; i++)
+                {
+                    int offset = i * budget;
+                    int chunkLen = Math.Min(budget, plaintext.Length - offset);
+                    var fragPlaintext = new byte[6 + chunkLen];
+                    fragPlaintext[0] = (byte)(msgId >> 24);
+                    fragPlaintext[1] = (byte)(msgId >> 16);
+                    fragPlaintext[2] = (byte)(msgId >> 8);
+                    fragPlaintext[3] = (byte)msgId;
+                    fragPlaintext[4] = (byte)i;
+                    fragPlaintext[5] = (byte)fragCount;
+                    Buffer.BlockCopy(plaintext, offset, fragPlaintext, 6, chunkLen);
+                    TryEncryptAndSend(EnvelopeDataFragment, fragPlaintext, "data-fragment");
+                }
             }
         }
         catch (Exception ex)

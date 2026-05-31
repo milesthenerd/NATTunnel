@@ -147,6 +147,26 @@ public class MeshConfig
     public TimeSpan ReliableMessageTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// Conservative path MTU (bytes) for outbound encrypted UDP datagrams. 1200 is a safe bet across
+    /// cellular and VPNs. Enforced when <see cref="AutoFragment"/> is true;
+    /// otherwise informational only (read via <see cref="MeshNode.RecommendedHostMTU"/>).
+    /// </summary>
+    public int PathMTU { get; set; } = 1200;
+
+    /// <summary>
+    /// Split outbound packets larger than <see cref="PathMTU"/> into multiple encrypted
+    /// fragments and reassemble on receive. Off by default — leave off if your transport handles.
+    /// Turn on for transports that send oversize datagrams blindly.
+    /// Adds 6 bytes per fragment plus a reassembly dictionary lookup per inbound packet.
+    /// </summary>
+    public bool AutoFragment { get; set; } = false;
+
+    /// <summary>
+    /// How long to retain partially-assembled fragments before dropping. 2s default
+    /// </summary>
+    public TimeSpan FragmentReassemblyTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
     /// Generate a fresh random <see cref="NetworkID"/>. Format: "net-" followed by 8 lowercase
     /// hex chars (4 bytes of CSPRNG output). Use this when seeding a config file the first time.
     /// </summary>

@@ -25,7 +25,7 @@
   <!-- NuGet packaging metadata. Run `dotnet pack -c Release` to produce a .nupkg.        -->
   <PropertyGroup>
     <PackageId>NATTunnel</PackageId>
-    <Version>0.5.2</Version>
+    <Version>0.6.0</Version>
     <Authors>NATTunnel contributors</Authors>
     <Description>Embeddable peer-to-peer mesh networking library with NAT hole-punching, Noise XX end-to-end encryption, and userspace relay forwarding. Designed for games and other apps that need direct UDP peer connectivity without each peer running a server.</Description>
     <PackageTags>mesh;networking;nat-traversal;hole-punching;p2p;udp;noise;game-networking</PackageTags>

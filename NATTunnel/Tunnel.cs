@@ -531,13 +531,15 @@ internal class Tunnel : IDisposable
 
         // Embedded mode — route designated marker bytes to DataPacketReceived. 0x01 is the
         // encrypted data envelope; 0x10 is the Noise handshake envelope; 0x30-0x33 are the
-        // application signaling envelopes (identity / unreliable / reliable / reliable-ack).
+        // application signaling envelopes (identity / unreliable / reliable / reliable-ack);
+        // 0x40 is the data-fragment envelope used when MeshConfig.AutoFragment is enabled.
         // All must come from our target peer; pre-connection packets are dropped silently to
         // avoid acting on a racing peer's early traffic.
         if (wireguardTunnel == null && receiveBuffer.Length > 0 &&
             (receiveBuffer[0] == 0x01 || receiveBuffer[0] == 0x10 ||
              receiveBuffer[0] == 0x30 || receiveBuffer[0] == 0x31 ||
-             receiveBuffer[0] == 0x32 || receiveBuffer[0] == 0x33))
+             receiveBuffer[0] == 0x32 || receiveBuffer[0] == 0x33 ||
+             receiveBuffer[0] == 0x40))
         {
             if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
             {
