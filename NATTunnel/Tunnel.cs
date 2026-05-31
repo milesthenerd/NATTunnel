@@ -992,6 +992,7 @@ internal class Tunnel : IDisposable
     /// <summary>
     /// Detects the local LAN IP address by connecting a UDP socket to a public address.
     /// The OS selects the appropriate local interface without actually sending any data.
+    /// Filters out VPN/tunnel-adapter addresses which use a /32 host route.
     /// </summary>
     public static IPAddress GetLanIPAddress()
     {
@@ -999,11 +1000,41 @@ internal class Tunnel : IDisposable
         {
             using var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0);
             socket.Connect("8.8.8.8", 65530);
-            return (socket.LocalEndPoint as IPEndPoint)?.Address;
+            var candidate = (socket.LocalEndPoint as IPEndPoint)?.Address;
+            if (candidate == null) return null;
+            if (IsTunnelAdapterAddress(candidate)) return null;
+            return candidate;
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Returns true if the given IP belongs to a network interface with a /32 (host-route)
+    /// netmask, which is how virtual tunnel adapters configure themselves.
+    /// </summary>
+    private static bool IsTunnelAdapterAddress(IPAddress ip)
+    {
+        try
+        {
+            foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                foreach (var ua in nic.GetIPProperties().UnicastAddresses)
+                {
+                    if (!ip.Equals(ua.Address)) continue;
+                    // A /32 mask is 255.255.255.255 — convert PrefixLength to be robust across
+                    // platforms that may not populate IPv4Mask reliably (Windows does, Linux mostly does).
+                    if (ua.PrefixLength == 32) return true;
+                    // Some platforms report the mask but not PrefixLength; check both.
+                    var mask = ua.IPv4Mask;
+                    if (mask != null && mask.Equals(IPAddress.Parse("255.255.255.255"))) return true;
+                    return false;
+                }
+            }
+        }
+        catch { /* fall through — treat as non-tunnel on enumeration error */ }
+        return false;
     }
 }
