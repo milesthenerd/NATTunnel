@@ -42,6 +42,10 @@ public class MeshNode : IDisposable
     private UdpClient udpClient;
     private Task runTask;
     private int nextLoopbackPort;
+    // Monotonic counter for unique loopback IPs (127.x.y.z) when UseDistinctLoopbackIPs is true.
+    // Starts at 1 → first IP is 127.0.1.1, then 127.0.1.2, … 127.0.255.255, 127.1.0.0, etc.
+    // Wraps before reaching the loopback boundary (127.255.255.255 is reserved).
+    private int nextLoopbackIPCounter;
     // 0 = alive, 1 = Dispose has started or completed. Atomic gate on Dispose() entry so a
     // racy double-Dispose doesn't tear the same resources twice, and so concurrent event
     // handlers (TunnelCreated, RelayedPeerAdded) can detect a disposed node and bail
@@ -92,6 +96,30 @@ public class MeshNode : IDisposable
         {
             if (loopbackEndpoint.Equals(p.LoopbackEndpoint)) { peer = p; return true; }
         }
+        return false;
+    }
+
+    /// <summary>
+    /// Look up a connected peer by the IP portion of its <see cref="MeshPeer.LoopbackEndpoint"/>.
+    /// Only meaningful when <see cref="MeshConfig.UseDistinctLoopbackIPs"/> is true — otherwise
+    /// every peer shares 127.0.0.1 and this is ambiguous. Returns false if zero or more than one
+    /// peer matches. O(n).
+    /// </summary>
+    public bool TryGetPeerByLoopbackIP(IPAddress loopbackIP, out MeshPeer peer)
+    {
+        peer = null;
+        if (loopbackIP == null) return false;
+        MeshPeer match = null;
+        int count = 0;
+        foreach (var p in connectedPeers.Values)
+        {
+            if (loopbackIP.Equals(p.LoopbackEndpoint.Address))
+            {
+                match = p;
+                if (++count > 1) { peer = null; return false; }
+            }
+        }
+        if (count == 1) { peer = match; return true; }
         return false;
     }
 
@@ -293,13 +321,14 @@ public class MeshNode : IDisposable
         tunnel.RelayEnvelopeReceived += host.ForwardRelayEnvelope;
 
         bool isInitiator = string.Compare(peerID.ToString(), remotePeerID, StringComparison.Ordinal) > 0;
-        var proxy = TryBuildProxyWithFreePort(p => new MeshPeerProxy(
+        var proxy = TryBuildProxyWithFreePort((ip, p) => new MeshPeerProxy(
             tunnel, p, config.HostGamePort,
             staticKeyPair.PrivateKey, isInitiator, remotePeerID,
             localIdentity: config.LocalIdentity,
             autoFragment: config.AutoFragment,
             PathMTU: config.PathMTU,
-            fragmentReassemblyTimeout: config.FragmentReassemblyTimeout));
+            fragmentReassemblyTimeout: config.FragmentReassemblyTimeout,
+            loopbackIP: ip));
         if (proxy == null)
         {
             Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping connection.");
@@ -375,7 +404,7 @@ public class MeshNode : IDisposable
         }
 
         bool isInitiator = string.Compare(peerID.ToString(), remotePeerID, StringComparison.Ordinal) > 0;
-        var proxy = TryBuildProxyWithFreePort(p => new MeshPeerProxy(
+        var proxy = TryBuildProxyWithFreePort((ip, p) => new MeshPeerProxy(
             gatewayProxy.Tunnel,
             p, config.HostGamePort,
             staticKeyPair.PrivateKey, isInitiator,
@@ -385,7 +414,8 @@ public class MeshNode : IDisposable
             localIdentity: config.LocalIdentity,
             autoFragment: config.AutoFragment,
             PathMTU: config.PathMTU,
-            fragmentReassemblyTimeout: config.FragmentReassemblyTimeout));
+            fragmentReassemblyTimeout: config.FragmentReassemblyTimeout,
+            loopbackIP: ip));
         if (proxy == null)
         {
             Console.Error.WriteLine($"[Embedded] Could not allocate a free loopback port for relayed {remotePeerID} in range {config.LoopbackPortRangeStart}-{config.LoopbackPortRangeEnd}; dropping relay route.");
@@ -670,7 +700,7 @@ public class MeshNode : IDisposable
     /// the same port) throws SocketException — we catch and try the next port.
     /// </summary>
     /// <returns>The constructed proxy, or null if no port in the range was free.</returns>
-    private MeshPeerProxy TryBuildProxyWithFreePort(Func<int, MeshPeerProxy> factory)
+    private MeshPeerProxy TryBuildProxyWithFreePort(Func<IPAddress, int, MeshPeerProxy> factory)
     {
         int start = config.LoopbackPortRangeStart;
         int end = config.LoopbackPortRangeEnd;
@@ -680,21 +710,40 @@ public class MeshNode : IDisposable
             int candidate = Interlocked.Increment(ref nextLoopbackPort) - 1;
             if (candidate > end)
             {
-                // Wrap to the start; nextLoopbackPort is reset so subsequent allocations don't
-                // exceed the range.
                 Interlocked.Exchange(ref nextLoopbackPort, start + 1);
                 candidate = start;
             }
+            IPAddress ip = config.UseDistinctLoopbackIPs ? AllocateLoopbackIP() : IPAddress.Loopback;
             try
             {
-                return factory(candidate);
+                return factory(ip, candidate);
             }
             catch (SocketException)
             {
-                // Port in use — try the next one.
+                // Port (or ip:port) in use — try the next one.
             }
         }
         return null;
+    }
+
+    /// <summary>
+    /// Allocate the next 127.x.y.z address. Starts at 127.0.1.1, walks up through 127.255.255.254,
+    /// then wraps. Skips 127.0.0.0/24 to avoid 127.0.0.1 collisions with anything else the host
+    /// has bound there.
+    /// </summary>
+    private IPAddress AllocateLoopbackIP()
+    {
+        // Total addressable space we're willing to use: 127.0.1.1 .. 127.255.255.254
+        // That's (255*65536 + 65535 - 1) = ~16.7M slots, way more than any mesh will need.
+        const uint baseOffset = 256; // skip 127.0.0.x entirely
+        const uint maxOffset = 0x00FFFFFE; // 127.255.255.254
+        uint n = (uint)Interlocked.Increment(ref nextLoopbackIPCounter);
+        uint offset = baseOffset + (n - 1) % (maxOffset - baseOffset + 1);
+        // Reconstruct 127.a.b.c
+        byte a = (byte)((offset >> 16) & 0xFF);
+        byte b = (byte)((offset >> 8) & 0xFF);
+        byte c = (byte)(offset & 0xFF);
+        return new IPAddress(new byte[] { 127, a, b, c });
     }
 
     private static int PickRandomFreeUdpPort()

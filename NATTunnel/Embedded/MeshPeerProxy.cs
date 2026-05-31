@@ -216,7 +216,8 @@ internal sealed class MeshPeerProxy : IDisposable
                          byte[] localIdentity = null,
                          bool autoFragment = false,
                          int PathMTU = 1200,
-                         TimeSpan fragmentReassemblyTimeout = default)
+                         TimeSpan fragmentReassemblyTimeout = default,
+                         IPAddress loopbackIP = null)
     {
         this.tunnel = tunnel ?? throw new ArgumentNullException(nameof(tunnel));
         this.staticPrivateKey = staticPrivateKey ?? throw new ArgumentNullException(nameof(staticPrivateKey));
@@ -245,7 +246,7 @@ internal sealed class MeshPeerProxy : IDisposable
                 throw new ArgumentException("ownMeshIP must be IPv4 (4 bytes).", nameof(ownMeshIP));
         }
 
-        LoopbackEndpoint = new IPEndPoint(IPAddress.Loopback, loopbackPort);
+        LoopbackEndpoint = new IPEndPoint(loopbackIP ?? IPAddress.Loopback, loopbackPort);
         hostGameEndpoint = new IPEndPoint(IPAddress.Loopback, hostGamePort);
         loopbackSocket = new UdpClient(LoopbackEndpoint);
 

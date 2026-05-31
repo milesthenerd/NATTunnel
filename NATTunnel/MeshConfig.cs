@@ -93,6 +93,15 @@ public class MeshConfig
     public int LoopbackPortRangeEnd { get; set; } = 65535;
 
     /// <summary>
+    /// When true, each peer's loopback proxy binds to a distinct address in 127.0.0.0/8
+    /// (starting at 127.0.1.1) instead of all sharing 127.0.0.1. Useful when the host's
+    /// transport surfaces only the source IP and not the port — each peer then has a
+    /// unique IP that can be reverse-looked-up via <see cref="MeshNode.TryGetPeerByLoopbackIP"/>.
+    /// Off by default; LoopbackEndpoint stays on 127.0.0.1 like before.
+    /// </summary>
+    public bool UseDistinctLoopbackIPs { get; set; } = false;
+
+    /// <summary>
     /// Optional logger callback that receives both the severity and the message. Preferred
     /// over <see cref="Logger"/> because the host can route by level. Null (the default)
     /// falls through to <see cref="Logger"/>; if both are null, the library prints to
