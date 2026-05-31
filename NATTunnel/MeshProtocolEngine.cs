@@ -2097,6 +2097,15 @@ internal class MeshProtocolEngine
                     if (!string.IsNullOrEmpty(capturedMeshIP))
                         activePeerTunnels.Remove(capturedMeshIP);
                 }
+                // Tell the host to drop its peer registration for this mesh IP too. Without this,
+                // EmbeddedMeshHost.peersByMeshIP keeps a stale proxy entry whose underlying tunnel
+                // is dead, and subsequent relay traffic logs "Tunnel is not connected yet" on
+                // every packet until the heartbeat-driven RemoveDeadPeer eventually fires.
+                if (!string.IsNullOrEmpty(capturedMeshIP) && IPAddress.TryParse(capturedMeshIP, out var capturedMeshIPAddr))
+                {
+                    var hostPeer = host.GetPeer(capturedMeshIPAddr);
+                    if (hostPeer != null) host.RemovePeer(hostPeer.ConnectionId);
+                }
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                 System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
             },
@@ -2859,6 +2868,13 @@ internal class MeshProtocolEngine
                         activePeerTunnels.Remove(capturedPeerIDForCleanup);
                     if (!string.IsNullOrEmpty(capturedMeshIPForCleanup))
                         activePeerTunnels.Remove(capturedMeshIPForCleanup);
+                }
+                // Drop the host's peer registration so the proxy goes away alongside the tunnel.
+                // See the matching cleanup in the introducer-relayed branch for the full rationale.
+                if (!string.IsNullOrEmpty(capturedMeshIPForCleanup) && IPAddress.TryParse(capturedMeshIPForCleanup, out var capturedMeshIPAddr2))
+                {
+                    var hostPeer = host.GetPeer(capturedMeshIPAddr2);
+                    if (hostPeer != null) host.RemovePeer(hostPeer.ConnectionId);
                 }
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                 System.Threading.Interlocked.Increment(ref metricTunnelsFailed);

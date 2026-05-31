@@ -230,11 +230,31 @@ internal sealed class EmbeddedMeshHost : IMeshHost, IDisposable
         // Case 2: we're the relay. Forward verbatim through dst's tunnel.
         if (!peersByMeshIP.TryGetValue(dstMeshIP, out var dstProxy))
         {
-            Program.Log(LogLevel.Warning, $"[EmbeddedMeshHost] Relay: no tunnel to dst={dstMeshIP}; dropping.");
+            MaybeLogRelayDrop(dstMeshIP, "no tunnel to dst");
+            return;
+        }
+        // Skip the send if the tunnel isn't connected yet — otherwise SendDataPacket throws
+        // and we'd spam an Error log for every queued packet.
+        if (!dstProxy.Tunnel.connected)
+        {
+            MaybeLogRelayDrop(dstMeshIP, "tunnel not connected");
             return;
         }
         try { dstProxy.Tunnel.SendDataPacket(envelope); }
-        catch (Exception ex) { Program.Log(LogLevel.Error, $"[EmbeddedMeshHost] Relay forward to {dstMeshIP} failed: {ex.Message}"); }
+        catch (Exception ex) { MaybeLogRelayDrop(dstMeshIP, $"send failed: {ex.Message}"); }
+    }
+
+    // Per-destination rate-limit for the "relay drop" warning. Cap to once per minute per destination.
+    private readonly ConcurrentDictionary<IPAddress, DateTime> lastRelayDropLogAt = new();
+    private static readonly TimeSpan RelayDropLogCooldown = TimeSpan.FromMinutes(1);
+
+    private void MaybeLogRelayDrop(IPAddress dstMeshIP, string reason)
+    {
+        var now = DateTime.UtcNow;
+        if (lastRelayDropLogAt.TryGetValue(dstMeshIP, out var last) && now - last < RelayDropLogCooldown)
+            return;
+        lastRelayDropLogAt[dstMeshIP] = now;
+        Program.Log(LogLevel.Warning, $"[EmbeddedMeshHost] Relay forward to {dstMeshIP} dropped ({reason}); subsequent drops suppressed for {RelayDropLogCooldown.TotalSeconds:0}s.");
     }
 
     /// <summary>

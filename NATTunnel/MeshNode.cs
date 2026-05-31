@@ -42,6 +42,11 @@ public class MeshNode : IDisposable
     private UdpClient udpClient;
     private Task runTask;
     private int nextLoopbackPort;
+    // 0 = alive, 1 = Dispose has started or completed. Atomic gate on Dispose() entry so a
+    // racy double-Dispose doesn't tear the same resources twice, and so concurrent event
+    // handlers (TunnelCreated, RelayedPeerAdded) can detect a disposed node and bail
+    // before constructing a proxy that would leak.
+    private int disposed;
 
     // Established peers, keyed by remote peer GUID. Maintained by the TunnelCreated handler.
     private readonly ConcurrentDictionary<string, MeshPeer> connectedPeers = new();
@@ -133,6 +138,7 @@ public class MeshNode : IDisposable
 
     public void Start()
     {
+        if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(MeshNode));
         // Resolve the mediation hostname to an IP for the MeshOptions snapshot. MeshProtocolEngine expects
         // an IPEndPoint, so we do the DNS resolution here once. Force IPv4 — the shared UDP socket below
         // binds IPAddress.Any (IPv4), and Send() to a v6 endpoint throws WSAEAFNOSUPPORT.
@@ -231,6 +237,9 @@ public class MeshNode : IDisposable
     /// </summary>
     private void OnTunnelCreated(Tunnel tunnel, string remotePeerID, string remoteMeshIP)
     {
+        // Late-arriving events after Dispose has run would otherwise build a proxy that leaks
+        // sockets and never gets cleaned up. Bail before allocating anything.
+        if (Volatile.Read(ref disposed) != 0) return;
         if (string.IsNullOrEmpty(remotePeerID))
         {
             // Reconnect-side tunnels without a known peer ID can't initiate Noise (no way to
@@ -299,6 +308,7 @@ public class MeshNode : IDisposable
     /// </summary>
     private void OnRelayedPeerAdded(string remotePeerID, IPAddress remoteMeshIP, IPAddress gatewayMeshIP)
     {
+        if (Volatile.Read(ref disposed) != 0) return;
         if (string.IsNullOrEmpty(remotePeerID)) return;
         // Idempotency: ignore if we already have a proxy for this peer.
         if (connectedPeers.ContainsKey(remotePeerID)) return;
@@ -660,6 +670,7 @@ public class MeshNode : IDisposable
     /// </summary>
     public Task<bool> SendMessageAsync(MeshPeer peer, byte[] payload, bool reliable, CancellationToken cancellationToken = default)
     {
+        if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(MeshNode));
         if (peer == null) throw new ArgumentNullException(nameof(peer));
         if (payload == null) throw new ArgumentNullException(nameof(payload));
         if (payload.Length > MeshConfig.MaxMessageSize)
@@ -679,6 +690,7 @@ public class MeshNode : IDisposable
     /// </summary>
     public Task BroadcastAsync(byte[] payload, bool reliable, CancellationToken cancellationToken = default)
     {
+        if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(MeshNode));
         if (payload == null) throw new ArgumentNullException(nameof(payload));
         var snapshot = connectedPeers.Values.ToArray();
         if (snapshot.Length == 0) return Task.CompletedTask;
@@ -724,16 +736,39 @@ public class MeshNode : IDisposable
 
     public void Dispose()
     {
+        // Atomic single-shot guard: only the first Dispose call runs the teardown. Subsequent
+        // calls return immediately. Critical because the host app may race a Dispose with an
+        // event-driven OnTunnelCreated and otherwise tear sockets twice.
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+
         if (context != null) context.ShutdownRequested = true;
+        // Wait for the engine loop to actually finish before disposing the host/socket it uses.
+        // The 5s budget covers normal-case shutdown; if the engine genuinely hangs we proceed
+        // anyway to free the user's resources, accepting that the background thread will hit
+        // ObjectDisposedException on its next syscall (caught and ignored by the engine's outer
+        // try/catch).
         try { runTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+
+        // Snapshot+clear connectedPeers before disposing proxies so any late event delivery
+        // sees an empty dictionary and bails. The disposed flag also gates OnTunnelCreated
+        // and OnRelayedPeerAdded — that's the belt to this suspender.
+        var peersSnapshot = connectedPeers.Values.ToArray();
+        connectedPeers.Clear();
+        foreach (var entry in peersSnapshot)
+        {
+            // Fault any in-flight reliable sends so awaiters don't hang until ReliableMessageTimeout.
+            foreach (var pending in entry.PendingReliable.Values)
+            {
+                try { pending.TrySetException(new ObjectDisposedException(nameof(MeshNode))); }
+                catch { }
+            }
+            entry.PendingReliable.Clear();
+            try { entry.Proxy.Dispose(); } catch { }
+        }
+
         try { host?.Dispose(); } catch { }
         try { udpClient?.Dispose(); } catch { }
         try { staticKeyPair?.Dispose(); } catch { }
-        foreach (var entry in connectedPeers.Values)
-        {
-            try { entry.Proxy.Dispose(); } catch { }
-        }
-        connectedPeers.Clear();
 
         // Release the global Log sink we installed in the ctor so daemon usage in
         // the same process (rare but possible) doesn't keep routing into a torn-down
