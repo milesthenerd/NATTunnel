@@ -1416,7 +1416,7 @@ internal class MeshProtocolEngine
 
                                         // Clear stale peer state — endpoints may have changed during isolation
                                         pendingConnectionRequests.Clear();
-                lastStaleWarningAt.Clear();
+                                        lastStaleWarningAt.Clear();
 
                                         // Perform full mediation handshake (Connected → NAT test → MeshJoinRequest)
                                         reconnectedStream.ReadTimeout = 15000;
@@ -1579,7 +1579,7 @@ internal class MeshProtocolEngine
                     // Clear all tracking state (use Clear() to preserve closure references)
                     activePeerTunnels.Clear();
                     pendingConnectionRequests.Clear();
-                lastStaleWarningAt.Clear();
+                    lastStaleWarningAt.Clear();
                     activeConnectionTunnels.Clear();
                     connectionIDToPeerID.Clear();
                     peerMeshIPs.Clear();
@@ -1747,189 +1747,189 @@ internal class MeshProtocolEngine
             // Fast-path: binary ping/pong (0xFF prefix) — no JSON parsing
             if (buffer.Length >= 2 && buffer[0] == 0xFF)
             {
-                        if (buffer[1] == (byte)'P')
+                if (buffer[1] == (byte)'P')
+                {
+                    byte[] meshIPBytes = Encoding.UTF8.GetBytes(meshIP ?? "");
+                    byte[] pongPacket = new byte[2 + meshIPBytes.Length];
+                    pongPacket[0] = 0xFF;
+                    pongPacket[1] = (byte)'p';
+                    Buffer.BlockCopy(meshIPBytes, 0, pongPacket, 2, meshIPBytes.Length);
+                    MeshSend(pongPacket, pongPacket.Length, remoteEndPoint);
+                }
+                else if (buffer[1] == (byte)'p')
+                {
+                    long pongTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                    string responderIP = Encoding.UTF8.GetString(buffer, 2, buffer.Length - 2);
+                    if (!string.IsNullOrEmpty(responderIP) && pingSentTicks.TryGetValue(responderIP, out long sentTicks))
+                    {
+                        long elapsedMs = ((pongTicks - sentTicks) * 1000) / System.Diagnostics.Stopwatch.Frequency;
+                        peerLatencyMs[responderIP] = elapsedMs;
+                        peerLastPong[responderIP] = DateTime.UtcNow;
+                    }
+                }
+                return;
+            }
+
+            string json = Encoding.UTF8.GetString(buffer);
+            var controlMsg = JsonSerializer.Deserialize<MediationMessage>(json);
+            if (controlMsg == null) return;
+
+            if (controlMsg.ID == MediationMessageType.MeshConnectionBegin)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Received MeshConnectionBegin from {remoteEndPoint}: peer {controlMsg.PeerID} at {controlMsg.EndpointString}");
+                string senderIP = remoteEndPoint.Address.ToString();
+                if (string.IsNullOrEmpty(introducerMeshIP) && senderIP != meshIP)
+                {
+                    introducerMeshIP = senderIP;
+                    context.Log(LogLevel.Info, $"[Mesh] Learned introducer mesh IP from MeshConnectionBegin: {introducerMeshIP}");
+                }
+                meshConnectionBeginQueue.Enqueue(controlMsg);
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshHeartbeat)
+            {
+                string heartbeatSenderIP = remoteEndPoint.Address.ToString();
+                lastHeartbeatReceivedFrom[heartbeatSenderIP] = DateTime.UtcNow;
+                if (heartbeatSenderIP != meshIP)
+                {
+                    bool wasCapable = relayCandidates.TryGetValue(heartbeatSenderIP, out var prevCand) && prevCand.capable;
+                    relayCandidates[heartbeatSenderIP] = (controlMsg.RelayCapable, controlMsg.ActiveRelayRoutes, controlMsg.RelayCapacity, DateTime.UtcNow);
+                    // Capability flipped capable→uncapable: drive reselection for any pair
+                    // currently routed through this candidate. Reuses the health-report path
+                    // so threshold/cooldown rules still apply, but reselection fires immediately
+                    // instead of waiting for the 45s endpoint-side WG silence timeout.
+                    if (isIntroducer && wasCapable && !controlMsg.RelayCapable)
+                    {
+                        foreach (var kv in relayAssignments)
                         {
-                            byte[] meshIPBytes = Encoding.UTF8.GetBytes(meshIP ?? "");
-                            byte[] pongPacket = new byte[2 + meshIPBytes.Length];
-                            pongPacket[0] = 0xFF;
-                            pongPacket[1] = (byte)'p';
-                            Buffer.BlockCopy(meshIPBytes, 0, pongPacket, 2, meshIPBytes.Length);
-                            MeshSend(pongPacket, pongPacket.Length, remoteEndPoint);
-                        }
-                        else if (buffer[1] == (byte)'p')
-                        {
-                            long pongTicks = System.Diagnostics.Stopwatch.GetTimestamp();
-                            string responderIP = Encoding.UTF8.GetString(buffer, 2, buffer.Length - 2);
-                            if (!string.IsNullOrEmpty(responderIP) && pingSentTicks.TryGetValue(responderIP, out long sentTicks))
+                            if (kv.Value != heartbeatSenderIP) continue;
+                            var parts = kv.Key.Split('|', 2);
+                            if (parts.Length != 2) continue;
+                            // Operator opted out — bypass per-pair cooldown so reselection
+                            // fires on the next drain tick instead of waiting up to 120s.
+                            lastRelayReselect.TryRemove(kv.Key, out _);
+                            meshRelayHealthReportQueue.Enqueue(new MediationMessage(MediationMessageType.MeshRelayHealthReport)
                             {
-                                long elapsedMs = ((pongTicks - sentTicks) * 1000) / System.Diagnostics.Stopwatch.Frequency;
-                                peerLatencyMs[responderIP] = elapsedMs;
-                                peerLastPong[responderIP] = DateTime.UtcNow;
+                                PeerA = parts[0],
+                                PeerB = parts[1],
+                                CurrentRelay = heartbeatSenderIP,
+                                Self = parts[0],
+                                Remote = parts[1],
+                                Observation = RelayHealthObservation.Other
+                            });
+                        }
+                        context.Log(LogLevel.Debug, $"[Mesh] Relay {heartbeatSenderIP} dropped RelayCapable — queued reselection for affected pairs");
+                    }
+                }
+                // Authoritative-by-claim: a heartbeat with IsIntroducer=true updates our
+                // local pointer. Handles takeover where the new introducer is someone
+                // other than our current one. We do NOT relinquish our own role on
+                // someone else's claim — server-side election decides that.
+                if (heartbeatSenderIP != meshIP && controlMsg.IsIntroducer &&
+                    introducerMeshIP != heartbeatSenderIP && !isIntroducer)
+                {
+                    context.Log($"[Mesh] Introducer changed: {introducerMeshIP ?? "(none)"} → {heartbeatSenderIP} (heartbeat claim)");
+                    introducerMeshIP = heartbeatSenderIP;
+                    introducerMissedProbes = 0;
+                    introducerProbeAckReceived = true;
+                }
+                else if (string.IsNullOrEmpty(introducerMeshIP) && heartbeatSenderIP != meshIP)
+                {
+                    introducerMeshIP = heartbeatSenderIP;
+                    context.Log(LogLevel.Info, $"[Mesh] Learned introducer mesh IP from MeshHeartbeat: {introducerMeshIP}");
+                }
+                if (controlMsg.PeerRoster != null)
+                {
+                    var rosterIPs = new HashSet<string>();
+                    foreach (var entry in controlMsg.PeerRoster)
+                    {
+                        var parts = entry.Split('|', 4);
+                        if (parts.Length >= 3 && !string.IsNullOrEmpty(parts[0]) && parts[0] != meshIP)
+                        {
+                            string rMeshIP = parts[0];
+                            string rPeerID = parts[1];
+                            int.TryParse(parts[2], out int rNatInt);
+                            string rEndpoint = parts.Length >= 4 ? parts[3] : null;
+                            rosterIPs.Add(rMeshIP);
+                            if (!peerInfoByMeshIP.TryGetValue(rMeshIP, out var existing) ||
+                                string.IsNullOrEmpty(existing.peerID) || existing.endpoint == null)
+                            {
+                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt);
                             }
                         }
-                        return;
                     }
 
-                    string json = Encoding.UTF8.GetString(buffer);
-                    var controlMsg = JsonSerializer.Deserialize<MediationMessage>(json);
-                    if (controlMsg == null) return;
-
-                    if (controlMsg.ID == MediationMessageType.MeshConnectionBegin)
+                    // Treat the introducer's roster as authoritative — catches dropouts
+                    // whose MeshPeerRemoved/MeshPeerLeave was lost on the UDP path.
+                    if (!isIntroducer && controlMsg.IsIntroducer &&
+                        !string.IsNullOrEmpty(introducerMeshIP) &&
+                        heartbeatSenderIP == introducerMeshIP)
                     {
-                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshConnectionBegin from {remoteEndPoint}: peer {controlMsg.PeerID} at {controlMsg.EndpointString}");
-                        string senderIP = remoteEndPoint.Address.ToString();
-                        if (string.IsNullOrEmpty(introducerMeshIP) && senderIP != meshIP)
+                        foreach (var knownIP in peerInfoByMeshIP.Keys.ToArray())
                         {
-                            introducerMeshIP = senderIP;
-                            context.Log(LogLevel.Info, $"[Mesh] Learned introducer mesh IP from MeshConnectionBegin: {introducerMeshIP}");
-                        }
-                        meshConnectionBeginQueue.Enqueue(controlMsg);
-                    }
-                    else if (controlMsg.ID == MediationMessageType.MeshHeartbeat)
-                    {
-                        string heartbeatSenderIP = remoteEndPoint.Address.ToString();
-                        lastHeartbeatReceivedFrom[heartbeatSenderIP] = DateTime.UtcNow;
-                        if (heartbeatSenderIP != meshIP)
-                        {
-                            bool wasCapable = relayCandidates.TryGetValue(heartbeatSenderIP, out var prevCand) && prevCand.capable;
-                            relayCandidates[heartbeatSenderIP] = (controlMsg.RelayCapable, controlMsg.ActiveRelayRoutes, controlMsg.RelayCapacity, DateTime.UtcNow);
-                            // Capability flipped capable→uncapable: drive reselection for any pair
-                            // currently routed through this candidate. Reuses the health-report path
-                            // so threshold/cooldown rules still apply, but reselection fires immediately
-                            // instead of waiting for the 45s endpoint-side WG silence timeout.
-                            if (isIntroducer && wasCapable && !controlMsg.RelayCapable)
+                            if (knownIP == meshIP) continue;
+                            if (knownIP == introducerMeshIP) continue;
+                            if (rosterIPs.Contains(knownIP)) continue;
+                            string pid = peerInfoByMeshIP.TryGetValue(knownIP, out var ki) ? ki.peerID : "";
+                            context.Log(LogLevel.Info, $"[Mesh] Synthesizing MeshPeerRemoved for {knownIP} — absent from introducer's roster");
+                            meshPeerRemovedQueue.Enqueue(new MediationMessage(MediationMessageType.MeshPeerRemoved)
                             {
-                                foreach (var kv in relayAssignments)
-                                {
-                                    if (kv.Value != heartbeatSenderIP) continue;
-                                    var parts = kv.Key.Split('|', 2);
-                                    if (parts.Length != 2) continue;
-                                    // Operator opted out — bypass per-pair cooldown so reselection
-                                    // fires on the next drain tick instead of waiting up to 120s.
-                                    lastRelayReselect.TryRemove(kv.Key, out _);
-                                    meshRelayHealthReportQueue.Enqueue(new MediationMessage(MediationMessageType.MeshRelayHealthReport)
-                                    {
-                                        PeerA = parts[0],
-                                        PeerB = parts[1],
-                                        CurrentRelay = heartbeatSenderIP,
-                                        Self = parts[0],
-                                        Remote = parts[1],
-                                        Observation = RelayHealthObservation.Other
-                                    });
-                                }
-                                context.Log(LogLevel.Debug, $"[Mesh] Relay {heartbeatSenderIP} dropped RelayCapable — queued reselection for affected pairs");
-                            }
+                                PrivateAddressString = knownIP,
+                                PeerID = pid ?? ""
+                            });
                         }
-                        // Authoritative-by-claim: a heartbeat with IsIntroducer=true updates our
-                        // local pointer. Handles takeover where the new introducer is someone
-                        // other than our current one. We do NOT relinquish our own role on
-                        // someone else's claim — server-side election decides that.
-                        if (heartbeatSenderIP != meshIP && controlMsg.IsIntroducer &&
-                            introducerMeshIP != heartbeatSenderIP && !isIntroducer)
-                        {
-                            context.Log($"[Mesh] Introducer changed: {introducerMeshIP ?? "(none)"} → {heartbeatSenderIP} (heartbeat claim)");
-                            introducerMeshIP = heartbeatSenderIP;
-                            introducerMissedProbes = 0;
-                            introducerProbeAckReceived = true;
-                        }
-                        else if (string.IsNullOrEmpty(introducerMeshIP) && heartbeatSenderIP != meshIP)
-                        {
-                            introducerMeshIP = heartbeatSenderIP;
-                            context.Log(LogLevel.Info, $"[Mesh] Learned introducer mesh IP from MeshHeartbeat: {introducerMeshIP}");
-                        }
-                        if (controlMsg.PeerRoster != null)
-                        {
-                            var rosterIPs = new HashSet<string>();
-                            foreach (var entry in controlMsg.PeerRoster)
-                            {
-                                var parts = entry.Split('|', 4);
-                                if (parts.Length >= 3 && !string.IsNullOrEmpty(parts[0]) && parts[0] != meshIP)
-                                {
-                                    string rMeshIP = parts[0];
-                                    string rPeerID = parts[1];
-                                    int.TryParse(parts[2], out int rNatInt);
-                                    string rEndpoint = parts.Length >= 4 ? parts[3] : null;
-                                    rosterIPs.Add(rMeshIP);
-                                    if (!peerInfoByMeshIP.TryGetValue(rMeshIP, out var existing) ||
-                                        string.IsNullOrEmpty(existing.peerID) || existing.endpoint == null)
-                                    {
-                                        peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt);
-                                    }
-                                }
-                            }
-
-                            // Treat the introducer's roster as authoritative — catches dropouts
-                            // whose MeshPeerRemoved/MeshPeerLeave was lost on the UDP path.
-                            if (!isIntroducer && controlMsg.IsIntroducer &&
-                                !string.IsNullOrEmpty(introducerMeshIP) &&
-                                heartbeatSenderIP == introducerMeshIP)
-                            {
-                                foreach (var knownIP in peerInfoByMeshIP.Keys.ToArray())
-                                {
-                                    if (knownIP == meshIP) continue;
-                                    if (knownIP == introducerMeshIP) continue;
-                                    if (rosterIPs.Contains(knownIP)) continue;
-                                    string pid = peerInfoByMeshIP.TryGetValue(knownIP, out var ki) ? ki.peerID : "";
-                                    context.Log(LogLevel.Info, $"[Mesh] Synthesizing MeshPeerRemoved for {knownIP} — absent from introducer's roster");
-                                    meshPeerRemovedQueue.Enqueue(new MediationMessage(MediationMessageType.MeshPeerRemoved)
-                                    {
-                                        PrivateAddressString = knownIP,
-                                        PeerID = pid ?? ""
-                                    });
-                                }
-                            }
-                        }
-                        var pongCutoff = DateTime.UtcNow.AddSeconds(-30);
-                        var connectedIPs = peerLastPong
-                            .Where(kvp => kvp.Value > pongCutoff && kvp.Key != meshIP)
-                            .Select(kvp => kvp.Key)
-                            .ToList();
-                        if (introducerMeshIP != null && !connectedIPs.Contains(introducerMeshIP))
-                            connectedIPs.Add(introducerMeshIP);
-                        var ack = new MediationMessage(MediationMessageType.MeshHeartbeatAck)
-                        {
-                            PeerID = peerID.ToString(),
-                            PrivateAddressString = meshIP,
-                            NATType = detectedNatType,
-                            ConnectedMeshIPs = connectedIPs.ToArray()
-                        };
-                        byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
-                        MeshSend(ackBytes, ackBytes.Length, remoteEndPoint);
                     }
-                    else if (controlMsg.ID == MediationMessageType.MeshHeartbeatAck)
-                    {
-                        string ackSourceIP = remoteEndPoint.Address.ToString();
-                        lastHeartbeatReceivedFrom[ackSourceIP] = DateTime.UtcNow;
-                        if (!string.IsNullOrEmpty(introducerMeshIP) && ackSourceIP == introducerMeshIP)
-                        {
-                            introducerProbeAckReceived = true;
-                        }
-                        meshHeartbeatAckQueue.Enqueue(controlMsg);
-                    }
-                    else if (controlMsg.ID == MediationMessageType.MeshPeerRemoved)
-                    {
-                        context.Log(LogLevel.Warning, $"[Mesh] Received MeshPeerRemoved: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) declared dead by introducer");
-                        meshPeerRemovedQueue.Enqueue(controlMsg);
-                    }
-                    else if (controlMsg.ID == MediationMessageType.MeshPeerLeave)
-                    {
-                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshPeerLeave: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) left gracefully");
-                        meshPeerLeaveQueue.Enqueue(controlMsg);
-                    }
-                    else if (controlMsg.ID == MediationMessageType.MeshIntroduction)
-                    {
-                        // MeshIntroduction is no longer used
-                    }
-                    else if (controlMsg.ID == MediationMessageType.MeshRelayAssignment)
-                    {
-                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayAssignment: {controlMsg.PeerA} <-> {controlMsg.PeerB} via {controlMsg.RelayMeshIP}");
-                        meshRelayAssignmentQueue.Enqueue(controlMsg);
-                    }
-                    else if (controlMsg.ID == MediationMessageType.MeshRelayHealthReport)
-                    {
-                        context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayHealthReport from {controlMsg.Self}: pair {controlMsg.PeerA}<->{controlMsg.PeerB} relay {controlMsg.CurrentRelay} obs={controlMsg.Observation}");
-                        meshRelayHealthReportQueue.Enqueue(controlMsg);
-                    }
+                }
+                var pongCutoff = DateTime.UtcNow.AddSeconds(-30);
+                var connectedIPs = peerLastPong
+                    .Where(kvp => kvp.Value > pongCutoff && kvp.Key != meshIP)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+                if (introducerMeshIP != null && !connectedIPs.Contains(introducerMeshIP))
+                    connectedIPs.Add(introducerMeshIP);
+                var ack = new MediationMessage(MediationMessageType.MeshHeartbeatAck)
+                {
+                    PeerID = peerID.ToString(),
+                    PrivateAddressString = meshIP,
+                    NATType = detectedNatType,
+                    ConnectedMeshIPs = connectedIPs.ToArray()
+                };
+                byte[] ackBytes = Encoding.UTF8.GetBytes(ack.Serialize());
+                MeshSend(ackBytes, ackBytes.Length, remoteEndPoint);
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshHeartbeatAck)
+            {
+                string ackSourceIP = remoteEndPoint.Address.ToString();
+                lastHeartbeatReceivedFrom[ackSourceIP] = DateTime.UtcNow;
+                if (!string.IsNullOrEmpty(introducerMeshIP) && ackSourceIP == introducerMeshIP)
+                {
+                    introducerProbeAckReceived = true;
+                }
+                meshHeartbeatAckQueue.Enqueue(controlMsg);
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshPeerRemoved)
+            {
+                context.Log(LogLevel.Warning, $"[Mesh] Received MeshPeerRemoved: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) declared dead by introducer");
+                meshPeerRemovedQueue.Enqueue(controlMsg);
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshPeerLeave)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Received MeshPeerLeave: peer {controlMsg.PrivateAddressString} (peerID: {controlMsg.PeerID}) left gracefully");
+                meshPeerLeaveQueue.Enqueue(controlMsg);
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshIntroduction)
+            {
+                // MeshIntroduction is no longer used
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshRelayAssignment)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayAssignment: {controlMsg.PeerA} <-> {controlMsg.PeerB} via {controlMsg.RelayMeshIP}");
+                meshRelayAssignmentQueue.Enqueue(controlMsg);
+            }
+            else if (controlMsg.ID == MediationMessageType.MeshRelayHealthReport)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayHealthReport from {controlMsg.Self}: pair {controlMsg.PeerA}<->{controlMsg.PeerB} relay {controlMsg.CurrentRelay} obs={controlMsg.Observation}");
+                meshRelayHealthReportQueue.Enqueue(controlMsg);
+            }
         }
         catch (Exception ex)
         {
@@ -2240,6 +2240,18 @@ internal class MeshProtocolEngine
         }
 
         context.ShutdownRequested = true;
+    }
+
+    /// <summary>
+    /// Eagerly tear down the engine: set ShutdownRequested and close the owned client sockets
+    /// so any thread blocked on a synchronous Receive/Write unblocks immediately.
+    /// </summary>
+    internal void RequestShutdown()
+    {
+        if (context != null) context.ShutdownRequested = true;
+        try { meshControlClient?.Close(); } catch { }
+        try { tcpClient?.Close(); } catch { }
+        try { reconnectedTcpClient?.Close(); } catch { }
     }
 
     private (MediationMessage msg, string remainder) ExtractFirstJson(string data)

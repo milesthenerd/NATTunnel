@@ -836,13 +836,18 @@ public class MeshNode : IDisposable
         // event-driven OnTunnelCreated and otherwise tear sockets twice.
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
 
-        if (context != null) context.ShutdownRequested = true;
-        // Wait for the engine loop to actually finish before disposing the host/socket it uses.
-        // The 5s budget covers normal-case shutdown; if the engine genuinely hangs we proceed
-        // anyway to free the user's resources, accepting that the background thread will hit
-        // ObjectDisposedException on its next syscall (caught and ignored by the engine's outer
-        // try/catch).
-        try { runTask?.Wait(TimeSpan.FromSeconds(5)); } catch { }
+        // Set ShutdownRequested AND force-close the engine's owned client sockets so any
+        // thread blocked on synchronous Receive/Write unblocks immediately.
+        try { engine?.RequestShutdown(); } catch { }
+        bool engineExited = false;
+        try { engineExited = runTask?.Wait(TimeSpan.FromSeconds(5)) ?? true; } catch { }
+        if (!engineExited)
+        {
+            // Engine didn't finish in 5s — log it instead of silently moving on, so a stuck
+            // shutdown is visible.
+            try { context?.Log(LogLevel.Warning, "[Embedded] Engine task did not exit within 5s of Dispose — background work may continue briefly."); }
+            catch { }
+        }
 
         // Snapshot+clear connectedPeers before disposing proxies so any late event delivery
         // sees an empty dictionary and bails. The disposed flag also gates OnTunnelCreated
@@ -909,7 +914,10 @@ public class MeshNode : IDisposable
         /// introducer via mesh-control — not an endpoint we directly observed. May be null if
         /// the introducer didn't supply one.
         /// </summary>
-        public IPEndPoint PublicEndpoint { get; }
+        public IPEndPoint PublicEndpoint => IsRelayed ? relayedPublicEndpoint : Tunnel?.RemoteEndpoint;
+
+        // Snapshotted introducer-supplied endpoint for relayed peers
+        private readonly IPEndPoint relayedPublicEndpoint;
 
         /// <summary>
         /// True when this peer is reachable only via the introducer relay (typically because
@@ -932,10 +940,7 @@ public class MeshNode : IDisposable
             Tunnel = tunnel;
             Proxy = proxy;
             IsRelayed = isRelayed;
-            // Direct peers: tunnel.RemoteEndpoint is the peer's own NAT-translated address.
-            // Relayed peers: tunnel belongs to the gateway, so use the introducer-supplied
-            // endpoint instead (may be null if the introducer didn't include one).
-            PublicEndpoint = isRelayed ? publicEndpointOverride : tunnel.RemoteEndpoint;
+            relayedPublicEndpoint = publicEndpointOverride;
         }
     }
 }
