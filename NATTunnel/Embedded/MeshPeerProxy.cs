@@ -168,6 +168,18 @@ internal sealed class MeshPeerProxy : IDisposable
     public event Action<byte[]> MeshControlReceived;
 
     /// <summary>
+    /// Raised when this proxy gives up because it received too many consecutive undecryptable
+    /// packets during the handshake phase. MeshNode reacts by forgetting this peer 
+    /// so a fresh proxy can be built on the next connection attempt.
+    /// </summary>
+    public event Action HandshakeBroken;
+
+    // Counter for consecutive handshake read failures. Reset on any successful handshake read.
+    // After HandshakeFailureThreshold misses we declare the proxy broken and tear ourselves down.
+    private int consecutiveHandshakeFailures;
+    private const int HandshakeFailureThreshold = 15;
+
+    /// <summary>
     /// Construct a proxy for one peer.
     /// </summary>
     /// <param name="tunnel">
@@ -557,6 +569,7 @@ internal sealed class MeshPeerProxy : IDisposable
         try
         {
             var (_, _, t) = handshakeState.ReadMessage(body, payloadBuf);
+            consecutiveHandshakeFailures = 0;
             if (t != null)
             {
                 CompleteHandshake(t);
@@ -567,7 +580,14 @@ internal sealed class MeshPeerProxy : IDisposable
         }
         catch (Exception ex)
         {
-            Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake read failed: {ex.Message}");
+            int fails = Interlocked.Increment(ref consecutiveHandshakeFailures);
+            Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake read failed ({fails}/{HandshakeFailureThreshold}): {ex.Message}");
+            if (fails >= HandshakeFailureThreshold)
+            {
+                Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake wedged after {fails} consecutive failures — tearing down proxy");
+                try { Dispose(); } catch { }
+                try { HandshakeBroken?.Invoke(); } catch { }
+            }
         }
     }
 

@@ -478,6 +478,18 @@ public class MeshNode : IDisposable
             int prev = Interlocked.Or(ref readinessFlags, 0b01);
             if (prev != 0b11 && (prev | 0b01) == 0b11) TryFire();
         };
+        proxy.HandshakeBroken += () =>
+        {
+            // Proxy gave up after too many undecryptable handshake packets — usually means the
+            // remote reconnected with a fresh Noise key and our stale proxy was intercepting.
+            // Drop the peer from our dictionary so MeshProtocolEngine's next reconnect attempt
+            // builds a clean proxy.
+            if (connectedPeers.TryRemove(remotePeerID, out var dropped) && readinessFlags == 0b11)
+            {
+                try { PeerDisconnected?.Invoke(dropped); }
+                catch (Exception ex) { Console.Error.WriteLine($"[Embedded] PeerDisconnected handler threw: {ex.Message}"); }
+            }
+        };
         proxy.IdentityReceived += identity =>
         {
             connected.Identity = identity ?? Array.Empty<byte>();
