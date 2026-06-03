@@ -38,6 +38,7 @@ internal class Tunnel : IDisposable
     private int holePunchReceivedCount;
     public bool connected;
     private NATType natType = NATType.Unknown;
+    private NATType remoteNatType = NATType.Unknown;
     private List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
     private int probeConnected = 0; // Atomic flag: first winning probe sets this to 1 via Interlocked.CompareExchange
     private int currentConnectionID = 0;
@@ -290,6 +291,8 @@ internal class Tunnel : IDisposable
     {
         // Stop any previous connection attempt's timer and probes
         CleanupPreviousConnectionAttempt();
+
+        remoteNatType = peerNatType;
 
         holePunchReceivedCount = 0;
         probeConnected = 0;
@@ -549,7 +552,14 @@ internal class Tunnel : IDisposable
              receiveBuffer[0] == 0x32 || receiveBuffer[0] == 0x33 ||
              receiveBuffer[0] == 0x40))
         {
-            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
+            // Port-match tightens the IP filter so multiple tunnels pointed at the same NAT
+            // (same public IP, different ports) don't send a packet to all of them. Relaxed
+            // for symmetric remotes pre-connection: their port may switch mid-handshake and
+            // the port-learning code at the top of ProcessUdpPacketBody needs to see those
+            // packets to update targetPeerPort.
+            bool portOk = listenEndpoint.Port == targetPeerPort
+                          || (!connected && (natType == NATType.Symmetric || remoteNatType == NATType.Symmetric));
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp) && portOk)
             {
                 DataPacketReceived?.Invoke(receiveBuffer);
             }
@@ -562,7 +572,10 @@ internal class Tunnel : IDisposable
         // We still gate on targetPeerIp matching the source — this filters out cross-talk.
         if (wireguardTunnel == null && receiveBuffer.Length > 0 && receiveBuffer[0] == 0x02)
         {
-            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
+            // see comment at first portOk
+            bool portOk = listenEndpoint.Port == targetPeerPort
+                          || (!connected && (natType == NATType.Symmetric || remoteNatType == NATType.Symmetric));
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp) && portOk)
             {
                 RelayEnvelopeReceived?.Invoke(receiveBuffer);
             }
@@ -574,7 +587,10 @@ internal class Tunnel : IDisposable
         // (HandleMeshControlMessage decrypts and reinjects into MeshProtocolEngine).
         if (wireguardTunnel == null && receiveBuffer.Length > 0 && receiveBuffer[0] == 0x20)
         {
-            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp))
+            // see comment at first portOk
+            bool portOk = listenEndpoint.Port == targetPeerPort
+                          || (!connected && (natType == NATType.Symmetric || remoteNatType == NATType.Symmetric));
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp) && portOk)
             {
                 DataPacketReceived?.Invoke(receiveBuffer);
             }
@@ -602,11 +618,16 @@ internal class Tunnel : IDisposable
             return;
         }
 
-        // Update target peer port if we're receiving from the correct IP but different port (Symmetric NAT port switching)
-        // Only do this before connection is established — once connected, the port is locked in.
-        // Without this guard, messages from a DIFFERENT peer sharing the same public IP
-        // (e.g. multiple peers behind the same NAT) would hijack this tunnel's targetPeerPort.
-        if (!connected && Equals(listenEndpoint.Address, targetPeerIp) && listenEndpoint.Port != targetPeerPort)
+        // Symmetric-NAT port switching: when the remote peer is behind a symmetric NAT, the
+        // port we initially learned from mediation may differ from the one it actually uses
+        // when it punches out. Update once we see traffic from a matching IP on a new port.
+        //
+        // Only do this for symmetric remotes — for non-symmetric peers the port is final and
+        // overwriting it would let another peer behind the same NAT (same IP, different port)
+        // steal this tunnel's target. Also gated on !connected so the port can't change after
+        // handshake completes.
+        if (!connected && natType == NATType.Symmetric &&
+            Equals(listenEndpoint.Address, targetPeerIp) && listenEndpoint.Port != targetPeerPort)
         {
             targetPeerPort = listenEndpoint.Port;
         }
@@ -848,10 +869,13 @@ internal class Tunnel : IDisposable
                     // In mesh mode with shared socket, only process if from our target peer.
                     // Without this, symmetric hole punch packets from OTHER peers would corrupt
                     // this tunnel's targetPeerIp/Port (line below overwrites them with the source).
-                    // Check both IP and port (when known) to disambiguate same-NAT peers.
+                    // Check IP always; check port too unless the remote is symmetric pre-connection
+                    // (their actual outbound port differs from the mediation-reported one and the
+                    // whole point of this handler is to learn it).
+                    bool symmetricLearning = !connected && remoteNatType == NATType.Symmetric;
                     if (targetPeerIp != null &&
                         (!Equals(listenEndpoint.Address, targetPeerIp) ||
-                         (targetPeerPort != 0 && listenEndpoint.Port != targetPeerPort)))
+                         (!symmetricLearning && targetPeerPort != 0 && listenEndpoint.Port != targetPeerPort)))
                         break;
                     holePunchReceivedCount++;
                     connectionTimeout = maxConnectionTimeout;
