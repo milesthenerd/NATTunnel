@@ -41,6 +41,14 @@ internal class Tunnel : IDisposable
     private NATType remoteNatType = NATType.Unknown;
     private List<UdpClient> symmetricConnectionUdpProbes = new List<UdpClient>();
     private int probeConnected = 0; // Atomic flag: first winning probe sets this to 1 via Interlocked.CompareExchange
+    // 0 = alive, 1 = Dispose has run. Checked by timer Elapsed handlers and async receive
+    // callbacks before doing socket I/O so a Dispose-during-hole-punch actually quiets the
+    // network immediately instead of waiting for the next packet to throw.
+    private int disposed;
+    // Receive loop for the winning symmetric probe (when natType == Symmetric and a probe won).
+    // Stored so Dispose can signal cancellation and await the task to exit.
+    private CancellationTokenSource winningProbeCts;
+    private Task winningProbeTask;
     private int currentConnectionID = 0;
     public IPAddress privateIP = null;
     private WireGuardTunnel wireguardTunnel;
@@ -344,6 +352,7 @@ internal class Tunnel : IDisposable
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = false };
             connectionAttempt.Elapsed += (source, e) =>
             {
+                if (Volatile.Read(ref disposed) != 0) return;
                 if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
@@ -381,6 +390,7 @@ internal class Tunnel : IDisposable
                 {
                     try
                     {
+                        if (Volatile.Read(ref disposed) != 0) return;
                         IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
                         byte[] receivedBuffer = capturedProbe.EndReceive(res, ref receivedEndpoint);
                         holePunchReceivedCount++;
@@ -404,16 +414,20 @@ internal class Tunnel : IDisposable
                             UpdateActivity();
                             ProcessUdpPacketBody(receivedBuffer, receivedEndpoint);
 
-                            // Start a receive loop on the winning probe socket for this tunnel only
-                            CancellationTokenSource probeCts = new CancellationTokenSource();
-                            Task.Run(() =>
+                            // Start a receive loop on the winning probe socket for this tunnel only.
+                            // Stored as a field so Dispose can cancel and await it instead of
+                            // letting it run until the next packet receive throws.
+                            winningProbeCts = new CancellationTokenSource();
+                            var capturedCts = winningProbeCts;
+                            winningProbeTask = Task.Run(() =>
                             {
                                 IPEndPoint probeEp = new IPEndPoint(IPAddress.Any, 0);
-                                while (!probeCts.Token.IsCancellationRequested)
+                                while (!capturedCts.Token.IsCancellationRequested)
                                 {
                                     try
                                     {
                                         byte[] data = capturedProbe.Receive(ref probeEp);
+                                        if (Volatile.Read(ref disposed) != 0) break;
                                         totalBytesReceived += data.Length;
                                         UpdateActivity();
                                         ProcessUdpPacketBody(data, probeEp);
@@ -441,6 +455,7 @@ internal class Tunnel : IDisposable
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = true };
             connectionAttempt.Elapsed += (source, e) =>
             {
+                if (Volatile.Read(ref disposed) != 0) return;
                 if (holePunchReceivedCount >= 1 && holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
@@ -481,6 +496,7 @@ internal class Tunnel : IDisposable
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = true };
             connectionAttempt.Elapsed += (source, e) =>
             {
+                if (Volatile.Read(ref disposed) != 0) return;
                 bool keepPunching = holePunchReceivedCount < HOLE_PUNCH_THRESHOLD || wireguardTunnel == null;
                 if (keepPunching)
                 {
@@ -987,10 +1003,17 @@ internal class Tunnel : IDisposable
     /// </summary>
     public void Dispose()
     {
+        // Atomic single-shot guard: subsequent Dispose calls become no-ops. Critical because
+        // the timer Elapsed handlers and BeginReceive callbacks now check this flag to bail
+        // before doing socket I/O — we need the flip to be observable to all of them BEFORE
+        // we start closing sockets out from under them.
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+
         try
         {
             // Cancel all running tasks
             udpClientTaskCancellationToken?.Cancel();
+            winningProbeCts?.Cancel();
 
             // Stop timers
             initialConnectionTimer?.Stop();
@@ -1012,6 +1035,13 @@ internal class Tunnel : IDisposable
                 probe?.Dispose();
             }
             symmetricConnectionUdpProbes.Clear();
+
+            // Briefly await the winning-probe receive loop so its thread is actually gone before
+            // we return. Socket close above will already have broken it out of Receive() with
+            // ObjectDisposedException; this just confirms it exited rather than letting it
+            // straggle a few milliseconds after Dispose.
+            try { winningProbeTask?.Wait(TimeSpan.FromMilliseconds(250)); } catch { }
+            winningProbeCts?.Dispose();
 
             // Dispose crypto resources
             shaHashGen?.Dispose();
