@@ -3,6 +3,9 @@
   <ItemGroup>
     <PackageReference Include="tomlyn" Version="0.16.2" />
     <PackageReference Include="Noise.NET" Version="1.0.0" />
+    <!-- BouncyCastle provides X25519 public-key derivation so daemon mode no longer needs
+         `wg pubkey` shelled-out to derive a public key from a private key. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
   </ItemGroup>
 
   <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish.
@@ -25,7 +28,7 @@
   <!-- NuGet packaging metadata. Run `dotnet pack -c Release` to produce a .nupkg.        -->
   <PropertyGroup>
     <PackageId>NATTunnel</PackageId>
-    <Version>0.7.3</Version>
+    <Version>0.7.4</Version>
     <Authors>NATTunnel contributors</Authors>
     <Description>Embeddable peer-to-peer mesh networking library with NAT hole-punching, Noise XX end-to-end encryption, and userspace relay forwarding. Designed for games and other apps that need direct UDP peer connectivity without each peer running a server.</Description>
     <PackageTags>mesh;networking;nat-traversal;hole-punching;p2p;udp;noise;game-networking</PackageTags>

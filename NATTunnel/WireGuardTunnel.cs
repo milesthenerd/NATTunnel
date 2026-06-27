@@ -320,7 +320,7 @@ namespace NATTunnel
                 Program.Log(LogLevel.Debug, "Checking WireGuard interface status...");
                 var statusPsi = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = "wg",
+                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
                     Arguments = $"show {interfaceName}",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
@@ -396,7 +396,7 @@ namespace NATTunnel
                                 // Use the peer's specific proxy port, not the shared 51821
                                 var resetPsi = new System.Diagnostics.ProcessStartInfo
                                 {
-                                    FileName = "wg",
+                                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
                                     Arguments = $"set {interfaceName} peer {peer.PublicKey} endpoint 127.0.0.1:{peer.ProxyPort}",
                                     UseShellExecute = false,
                                     RedirectStandardError = true,
@@ -450,7 +450,7 @@ namespace NATTunnel
                                 {
                                     var removePsi = new System.Diagnostics.ProcessStartInfo
                                     {
-                                        FileName = "wg",
+                                        FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
                                         Arguments = $"set {interfaceName} peer {peer.PublicKey} remove",
                                         UseShellExecute = false,
                                         RedirectStandardError = true,
@@ -506,7 +506,7 @@ namespace NATTunnel
                     // Also check WireGuard status
                     var wgPsi = new System.Diagnostics.ProcessStartInfo
                     {
-                        FileName = "wg",
+                        FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
                         Arguments = "show",
                         UseShellExecute = false,
                         RedirectStandardOutput = true,

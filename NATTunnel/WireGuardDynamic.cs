@@ -26,7 +26,7 @@ internal static class WireGuardDynamic
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = "wg",
+                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
                     Arguments = arguments,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
@@ -80,7 +80,7 @@ internal static class WireGuardDynamic
             {
                 StartInfo = new ProcessStartInfo
                 {
-                    FileName = "wg",
+                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
                     Arguments = arguments,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,

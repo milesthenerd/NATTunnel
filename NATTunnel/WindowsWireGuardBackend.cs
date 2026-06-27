@@ -170,9 +170,21 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
 
     private static void RunWg(string args)
     {
+        string wgPath = WireGuardDriverInstaller.TryFindWgExe();
+        if (wgPath == null)
+        {
+            // wg.exe missing — kick off the WireGuard for Windows installer (downloads if not bundled).
+            Program.Log(LogLevel.Info, "wg.exe not found on this system; attempting to install WireGuard for Windows ...");
+            if (!WireGuardDriverInstaller.TryInstallDriver())
+                throw new Exception("wg.exe is not installed and the installer could not be acquired. Install WireGuard for Windows manually from https://www.wireguard.com/install/.");
+            wgPath = WireGuardDriverInstaller.TryFindWgExe();
+            if (wgPath == null)
+                throw new Exception("wg.exe still not found after install attempt. Check that WireGuard for Windows finished installing successfully.");
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = "wg.exe",
+            FileName = wgPath,
             Arguments = args,
             UseShellExecute = false,
             RedirectStandardOutput = true,

@@ -52,64 +52,10 @@ internal static class WireGuardConfig
 
     public static (string privateKey, string publicKey) GenerateKeyPair()
     {
-        try
-        {
-            // Create process to run wg genkey
-            using var genKeyProcess = new System.Diagnostics.Process
-            {
-                StartInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "wg",
-                    Arguments = "genkey",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    CreateNoWindow = true
-                }
-            };
-
-            // Generate private key
-            genKeyProcess.Start();
-            string privateKey = genKeyProcess.StandardOutput.ReadToEnd().Trim();
-            genKeyProcess.WaitForExit();
-
-            if (genKeyProcess.ExitCode != 0)
-            {
-                throw new Exception("Failed to generate private key");
-            }
-
-            // Create process to generate public key
-            using var pubKeyProcess = new System.Diagnostics.Process
-            {
-                StartInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "wg",
-                    Arguments = "pubkey",
-                    UseShellExecute = false,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    CreateNoWindow = true
-                }
-            };
-
-            // Generate public key from private key
-            pubKeyProcess.Start();
-            pubKeyProcess.StandardInput.WriteLine(privateKey);
-            pubKeyProcess.StandardInput.Close();
-            string publicKey = pubKeyProcess.StandardOutput.ReadToEnd().Trim();
-            pubKeyProcess.WaitForExit();
-
-            if (pubKeyProcess.ExitCode != 0)
-            {
-                throw new Exception("Failed to generate public key");
-            }
-
-            return (privateKey, publicKey);
-        }
-        catch (Exception ex)
-        {
-            Program.Log(LogLevel.Error, $"Failed to generate WireGuard keys: {ex.Message}");
-            throw;
-        }
+        // Curve25519 X25519 keypair — same wire format as `wg genkey` / `wg pubkey`. Generated
+        // in-process via the Noise library we already depend on, so no wg.exe required.
+        using var kp = Noise.KeyPair.Generate();
+        return (Convert.ToBase64String(kp.PrivateKey), Convert.ToBase64String(kp.PublicKey));
     }
 
     /// <summary>
@@ -146,75 +92,38 @@ internal static class WireGuardConfig
     }
 
     /// <summary>
-    /// Extracts the private key from the WireGuard config file and derives the public key
-    /// Uses: echo (private key) | wg pubkey
+    /// Extract the private key from the [Interface] section of a WireGuard config and derive
+    /// the matching public key in-process (X25519 scalar-base multiply via BouncyCastle).
+    /// Replacement for the prior `wg pubkey` shell-out.
     /// </summary>
     public static string GetPublicKeyFromConfig(string configPath)
     {
         try
         {
-            // Read the config file
             if (!File.Exists(configPath))
-            {
                 throw new FileNotFoundException($"Config file not found: {configPath}");
-            }
 
-            string configContent = File.ReadAllText(configPath);
-
-            // Extract private key from [Interface] section
             string privateKey = null;
-            foreach (var line in configContent.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None))
+            foreach (var line in File.ReadAllLines(configPath))
             {
-                string trimmedLine = line.Trim();
-                if (trimmedLine.StartsWith("PrivateKey", StringComparison.OrdinalIgnoreCase))
-                {
-                    // Find the first equals sign and take everything after it
-                    int equalsIdx = trimmedLine.IndexOf('=');
-                    if (equalsIdx >= 0 && equalsIdx < trimmedLine.Length - 1)
-                    {
-                        privateKey = trimmedLine.Substring(equalsIdx + 1).Trim();
-                        if (!string.IsNullOrEmpty(privateKey))
-                        {
-                            break;
-                        }
-                    }
-                }
+                string trimmed = line.Trim();
+                if (!trimmed.StartsWith("PrivateKey", StringComparison.OrdinalIgnoreCase)) continue;
+                int eq = trimmed.IndexOf('=');
+                if (eq < 0 || eq >= trimmed.Length - 1) continue;
+                privateKey = trimmed.Substring(eq + 1).Trim();
+                if (!string.IsNullOrEmpty(privateKey)) break;
             }
 
             if (string.IsNullOrEmpty(privateKey))
-            {
                 throw new Exception("Could not find PrivateKey in config file");
-            }
 
-            // Derive public key from private key: echo (private key) | wg pubkey
-            using var pubKeyProcess = new System.Diagnostics.Process
-            {
-                StartInfo = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "wg",
-                    Arguments = "pubkey",
-                    UseShellExecute = false,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                }
-            };
+            byte[] privBytes = Convert.FromBase64String(privateKey);
+            if (privBytes.Length != 32)
+                throw new Exception($"PrivateKey is {privBytes.Length} bytes; expected 32 (Curve25519).");
 
-            pubKeyProcess.Start();
-            pubKeyProcess.StandardInput.WriteLine(privateKey);
-            pubKeyProcess.StandardInput.Close();
-            string publicKey = pubKeyProcess.StandardOutput.ReadToEnd().Trim();
-            string errorOutput = pubKeyProcess.StandardError.ReadToEnd();
-            pubKeyProcess.WaitForExit();
-
-            if (pubKeyProcess.ExitCode != 0)
-            {
-                throw new Exception($"Failed to derive public key from private key. wg error: {errorOutput}");
-            }
-
-            Program.Log(LogLevel.Debug, $"Derived public key from config: {configPath}");
-            return publicKey;
+            // BouncyCastle X25519: scalar-base multiplication on Curve25519.
+            var priv = new Org.BouncyCastle.Crypto.Parameters.X25519PrivateKeyParameters(privBytes, 0);
+            return Convert.ToBase64String(priv.GeneratePublicKey().GetEncoded());
         }
         catch (Exception ex)
         {

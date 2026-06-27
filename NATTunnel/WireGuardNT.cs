@@ -76,7 +76,7 @@ internal static class WireGuardNT
 
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = "wg.exe",
+                FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg.exe",
                 Arguments = args,
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
@@ -179,7 +179,7 @@ internal static class WireGuardNT
                 // Use wg.exe to update the configuration
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = "wg.exe",
+                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg.exe",
                     Arguments = $"setconf \"{interfaceName}\" \"{tempConfigPath}\"",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,

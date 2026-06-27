@@ -324,7 +324,7 @@ internal class WireGuardPeerManager
                 // Use wg.exe to reconfigure the interface
                 var psi = new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = "wg.exe",
+                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg.exe",
                     Arguments = $"setconf {interfaceName} \"{tempConfigPath}\"",
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
