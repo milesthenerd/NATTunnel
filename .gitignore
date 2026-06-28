@@ -10,3 +10,5 @@ mediation_server/key.pem
 # Built packages
 dist/
 node_modules/
+*.tar.gz
+stage/
