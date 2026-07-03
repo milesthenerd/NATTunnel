@@ -85,7 +85,17 @@ internal class MeshProtocolEngine
     /// yet see each other in the first ~10s after a fresh tunnel, and firing repair there would
     /// tear down a perfectly working connection.</summary>
     private readonly ConcurrentDictionary<string, DateTime> tunnelCompletedAt = new();
-    private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType)> peerInfoByMeshIP = new();
+    /// <summary>Per-peer negotiated peer-protocol version (mesh IP → version). -1 for peers we
+    /// haven't heard MeshVersionHello from yet; 0 means the peer is on an old build that predates
+    /// version negotiation (grandfathered as v1 in code that checks).</summary>
+    private readonly ConcurrentDictionary<string, int> peerNegotiatedVersion = new();
+    /// <summary>Peers whose peer-protocol range has no overlap with ours (PeerID → their advertised
+    /// range). Used to short-circuit hole-punch attempts against known-incompatible peers instead of
+    /// churning on retries. Keyed by PeerID (stable across sessions) with the range as the value so
+    /// a peer that upgrades and advertises a new range gets re-evaluated instead of staying blocked.
+    /// Cleared on disconnect/rejoin.</summary>
+    private readonly ConcurrentDictionary<string, (int min, int max)> incompatiblePeers = new();
+    private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion)> peerInfoByMeshIP = new();
     /// <summary>LAN endpoint info parallel to peerInfoByMeshIP, used for same-LAN pair detection.</summary>
     private readonly ConcurrentDictionary<string, (string localIP, int localPort)> peerLanByMeshIP = new();
     // Initialized in Run() once `context` is available — instance field initializers can't
@@ -392,6 +402,7 @@ internal class MeshProtocolEngine
                 pendingConnectionRequests.Clear();
                 lastStaleWarningAt.Clear();
                 activeConnectionTunnels.Clear();
+                incompatiblePeers.Clear();
                 connectionIDToPeerID.Clear();
                 peerMeshIPs.Clear();
                 pendingTunnelCount = 0;
@@ -414,10 +425,12 @@ internal class MeshProtocolEngine
                         string mip = pObj.TryGetProperty("meshIP", out JsonElement mipEl) ? mipEl.GetString() : null;
                         string ep = pObj.TryGetProperty("endpoint", out JsonElement epEl) ? epEl.GetString() : null;
                         int nt = pObj.TryGetProperty("natType", out JsonElement ntEl) ? ntEl.GetInt32() : -1;
+                        int pminV = pObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
+                        int pmaxV = pObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
 
                         if (!string.IsNullOrEmpty(mip))
                         {
-                            peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt);
+                            peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt, pminV, pmaxV);
                         }
 
                         if (!string.IsNullOrEmpty(joinResponse.IntroducerPeerID) &&
@@ -777,7 +790,9 @@ internal class MeshProtocolEngine
                                 NATType = detectedNatType,
                                 PrivateAddressString = meshIP,
                                 AuthToken = authToken,
-                                ProtocolVersion = MediationProtocol.ClientVersion
+                                ProtocolVersion = MediationProtocol.ClientVersion,
+                                PeerMinVersion = MediationProtocol.PeerMinVersion,
+                                PeerMaxVersion = MediationProtocol.PeerMaxVersion
                             };
                             string discoveryJson = discoveryRequest.Serialize();
                             byte[] discoveryBuffer = Encoding.ASCII.GetBytes(discoveryJson);
@@ -803,6 +818,7 @@ internal class MeshProtocolEngine
                         !activePeerTunnels.ContainsKey(joinResponse.IntroducerPeerID) &&
                         !(introducerMeshIP != null && activePeerTunnels.ContainsKey(introducerMeshIP)) &&
                         !pendingConnectionRequests.ContainsKey(joinResponse.IntroducerPeerID) &&
+                        !incompatiblePeers.ContainsKey(joinResponse.IntroducerPeerID) &&
                         pendingTunnelCount == 0)
                     {
                         introducerRetryCount++;
@@ -955,9 +971,11 @@ internal class MeshProtocolEngine
                                                     string ep2 = pe2.TryGetProperty("endpoint", out JsonElement epEl2) ? epEl2.GetString() : null;
                                                     int nt2 = pe2.TryGetProperty("natType", out JsonElement ntEl2) ? ntEl2.GetInt32() : -1;
                                                     string pid2 = pe2.TryGetProperty("peerID", out JsonElement pidEl2) ? pidEl2.GetString() : null;
+                                                    int pminV2 = pe2.TryGetProperty("peerMinVersion", out JsonElement pminEl2) ? pminEl2.GetInt32() : 1;
+                                                    int pmaxV2 = pe2.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
                                                     if (!string.IsNullOrEmpty(mip2))
                                                     {
-                                                        peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2);
+                                                        peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2, pminV2, pmaxV2);
                                                         context.Log(LogLevel.Debug, $"[Mesh] Cached peer info: {mip2} = NAT:{(NATType)nt2}, endpoint:{ep2}");
                                                     }
                                                 }
@@ -978,7 +996,7 @@ internal class MeshProtocolEngine
                                                     string cacheEndpoint = !string.IsNullOrEmpty(parsedMsg.ExternalEndpointString)
                                                         ? parsedMsg.ExternalEndpointString
                                                         : parsedMsg.EndpointString;
-                                                    peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType);
+                                                    peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion);
                                                 }
                                             }
 
@@ -1043,14 +1061,17 @@ internal class MeshProtocolEngine
                                                         context.Log(LogLevel.Debug, $"[Mesh] Reconnect tunnel {capturedConnID} WireGuard established");
                                                         System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                                                         System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
+                                                        string helloTarget = null;
                                                         lock (meshLock)
                                                         {
                                                             if (peerMeshIPs.TryGetValue(capturedConnID, out string cMeshIP) && !string.IsNullOrEmpty(cMeshIP))
                                                             {
                                                                 completedTunnelMeshIPs.Add(cMeshIP);
                                                                 tunnelCompletedAt[cMeshIP] = DateTime.UtcNow;
+                                                                helloTarget = cMeshIP;
                                                             }
                                                         }
+                                                        if (helloTarget != null) SendMeshVersionHello(helloTarget);
                                                     }
                                                 );
                                                 host?.ConfigureNewTunnel(reconnectTunnel, capturedPeerIDStr, capturedMeshIPStr);
@@ -1084,6 +1105,11 @@ internal class MeshProtocolEngine
                                         }
                                         else if (parsedMsg.ID == MediationMessageType.MeshIntroduceRequest)
                                         {
+                                            if (IsIncompatible(parsedMsg.PeerID, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion))
+                                            {
+                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect: declining introducer role for {parsedMsg.PeerID} — peer-protocol range v{parsedMsg.PeerMinVersion}-v{parsedMsg.PeerMaxVersion} previously refused");
+                                                continue;
+                                            }
                                             isIntroducer = true;
                                             context.Log(LogLevel.Info, $"[Mesh] Reconnect: selected as introducer for {parsedMsg.PeerID}");
 
@@ -1092,7 +1118,7 @@ internal class MeshProtocolEngine
                                             // Clear stale deferred messages — this MeshIntroduce supersedes them.
                                             if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
                                             {
-                                                peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType);
+                                                peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion);
                                                 completedTunnelMeshIPs.Remove(parsedMsg.PrivateAddressString);
                                                 deferredIntroductions.Remove(parsedMsg.PrivateAddressString);
                                             }
@@ -1107,14 +1133,23 @@ internal class MeshProtocolEngine
                                                     string exEndpoint = pe.TryGetProperty("endpoint", out JsonElement epEl2) ? epEl2.GetString() : null;
                                                     int exNatType = pe.TryGetProperty("natType", out JsonElement ntEl2) ? ntEl2.GetInt32() : -1;
                                                     string exPeerID = pe.TryGetProperty("peerID", out JsonElement pidEl2) ? pidEl2.GetString() : null;
+                                                    int exPeerMinVersion = pe.TryGetProperty("peerMinVersion", out JsonElement pminEl2) ? pminEl2.GetInt32() : 1;
+                                                    int exPeerMaxVersion = pe.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
 
                                                     if (string.IsNullOrEmpty(exMeshIP)) continue;
 
-                                                    peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType);
+                                                    peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType, exPeerMinVersion, exPeerMaxVersion);
 
                                                     if (host.GetPeer(IPAddress.Parse(exMeshIP)) == null)
                                                     {
                                                         context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: no WG tunnel to {exMeshIP} — skipping");
+                                                        continue;
+                                                    }
+
+                                                    if (IsIncompatible(exPeerID, exPeerMinVersion, exPeerMaxVersion) ||
+                                                        IsIncompatible(parsedMsg.PeerID, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion))
+                                                    {
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: skipping pair {parsedMsg.PeerID} <-> {exPeerID} — one or both previously refused on peer-protocol range");
                                                         continue;
                                                     }
 
@@ -1208,7 +1243,9 @@ internal class MeshProtocolEngine
                                                             PrivateAddressString = parsedMsg.PrivateAddressString,
                                                             IsRelay = true,
                                                             IntroducerMeshIP = meshIP,
-                                                            RelayMeshIP = chosenRelay
+                                                            RelayMeshIP = chosenRelay,
+                                                            PeerMinVersion = parsedMsg.PeerMinVersion,
+                                                            PeerMaxVersion = parsedMsg.PeerMaxVersion
                                                         };
                                                         try
                                                         {
@@ -1231,7 +1268,9 @@ internal class MeshProtocolEngine
                                                                 PrivateAddressString = exMeshIP,
                                                                 IsRelay = true,
                                                                 IntroducerMeshIP = meshIP,
-                                                                RelayMeshIP = chosenRelay
+                                                                RelayMeshIP = chosenRelay,
+                                                                PeerMinVersion = exPeerMinVersion,
+                                                                PeerMaxVersion = exPeerMaxVersion
                                                             };
 
                                                             if (completedTunnelMeshIPs.Contains(parsedMsg.PrivateAddressString))
@@ -1268,7 +1307,9 @@ internal class MeshProtocolEngine
                                                         EndpointString = parsedMsg.EndpointString,
                                                         ExternalEndpointString = parsedMsg.EndpointString,
                                                         NATType = parsedMsg.NATType,
-                                                        PrivateAddressString = parsedMsg.PrivateAddressString
+                                                        PrivateAddressString = parsedMsg.PrivateAddressString,
+                                                        PeerMinVersion = parsedMsg.PeerMinVersion,
+                                                        PeerMaxVersion = parsedMsg.PeerMaxVersion
                                                     };
                                                     try
                                                     {
@@ -1291,7 +1332,9 @@ internal class MeshProtocolEngine
                                                             EndpointString = exEndpoint,
                                                             ExternalEndpointString = exEndpoint,
                                                             NATType = (NATType)exNatType,
-                                                            PrivateAddressString = exMeshIP
+                                                            PrivateAddressString = exMeshIP,
+                                                            PeerMinVersion = exPeerMinVersion,
+                                                            PeerMaxVersion = exPeerMaxVersion
                                                         };
 
                                                         if (completedTunnelMeshIPs.Contains(parsedMsg.PrivateAddressString))
@@ -1362,7 +1405,9 @@ internal class MeshProtocolEngine
                                                 NATType = detectedNatType,
                                                 PrivateAddressString = meshIP,
                                                 AuthToken = authToken,
-                                                ProtocolVersion = MediationProtocol.ClientVersion
+                                                ProtocolVersion = MediationProtocol.ClientVersion,
+                                                PeerMinVersion = MediationProtocol.PeerMinVersion,
+                                                PeerMaxVersion = MediationProtocol.PeerMaxVersion
                                             };
                                             byte[] rdBytes = Encoding.ASCII.GetBytes(rediscovery.Serialize());
                                             reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
@@ -1501,7 +1546,9 @@ internal class MeshProtocolEngine
                                             NATType = detectedNatType,
                                             PrivateAddressString = meshIP,
                                             AuthToken = authToken,
-                                            ProtocolVersion = MediationProtocol.ClientVersion
+                                            ProtocolVersion = MediationProtocol.ClientVersion,
+                                            PeerMinVersion = MediationProtocol.PeerMinVersion,
+                                            PeerMaxVersion = MediationProtocol.PeerMaxVersion
                                         };
                                         byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                                         reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
@@ -1727,7 +1774,9 @@ internal class MeshProtocolEngine
             NATType = detectedNatType,
             PrivateAddressString = meshIP,
             AuthToken = authToken,
-            ProtocolVersion = MediationProtocol.ClientVersion
+            ProtocolVersion = MediationProtocol.ClientVersion,
+            PeerMinVersion = MediationProtocol.PeerMinVersion,
+            PeerMaxVersion = MediationProtocol.PeerMaxVersion
         };
         byte[] sendBuffer = Encoding.ASCII.GetBytes(joinRequest.Serialize());
         stream.Write(sendBuffer, 0, sendBuffer.Length);
@@ -1890,7 +1939,7 @@ internal class MeshProtocolEngine
                             if (!peerInfoByMeshIP.TryGetValue(rMeshIP, out var existing) ||
                                 string.IsNullOrEmpty(existing.peerID) || existing.endpoint == null)
                             {
-                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt);
+                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt, 1, 1);
                             }
                         }
                     }
@@ -1967,11 +2016,82 @@ internal class MeshProtocolEngine
                 context.Log(LogLevel.Debug, $"[Mesh] Received MeshRelayHealthReport from {controlMsg.Self}: pair {controlMsg.PeerA}<->{controlMsg.PeerB} relay {controlMsg.CurrentRelay} obs={controlMsg.Observation}");
                 meshRelayHealthReportQueue.Enqueue(controlMsg);
             }
+            else if (controlMsg.ID == MediationMessageType.MeshVersionHello)
+            {
+                ProcessMeshVersionHello(controlMsg, remoteEndPoint);
+            }
         }
         catch (Exception ex)
         {
             context.Log(LogLevel.Error, $"[Mesh] Mesh control packet processing error: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Send our peer-protocol supported range to <paramref name="remoteMeshIP"/>. Called right
+    /// after a tunnel comes up; the receiver picks the intersection of ranges and stores it.
+    /// </summary>
+    /// <summary>
+    /// Returns true if we've previously refused this peer and their advertised range matches the
+    /// range we refused. A range change (peer upgraded/downgraded) evicts the block so we retry.
+    /// Callers that don't know a real range should pass v1/v1 (the pre-versioning-era default) so
+    /// pre-negotiation peers still block if we already refused them at v1.
+    /// </summary>
+    private bool IsIncompatible(string peerID, int theirMin, int theirMax)
+    {
+        if (string.IsNullOrEmpty(peerID)) return false;
+        if (!incompatiblePeers.TryGetValue(peerID, out var stored)) return false;
+        if (stored.min != theirMin || stored.max != theirMax)
+        {
+            incompatiblePeers.TryRemove(peerID, out _);
+            context.Log(LogLevel.Debug, $"[Mesh] Peer {peerID} advertised new peer-protocol range v{theirMin}-v{theirMax} (was v{stored.min}-v{stored.max}) — clearing incompatibility block");
+            return false;
+        }
+        return true;
+    }
+
+    private void SendMeshVersionHello(string remoteMeshIP)
+    {
+        if (string.IsNullOrEmpty(remoteMeshIP)) return;
+        try
+        {
+            var hello = new MediationMessage(MediationMessageType.MeshVersionHello)
+            {
+                PeerMinVersion = MediationProtocol.PeerMinVersion,
+                PeerMaxVersion = MediationProtocol.PeerMaxVersion
+            };
+            byte[] bytes = Encoding.UTF8.GetBytes(hello.Serialize());
+            MeshSend(bytes, bytes.Length, new IPEndPoint(IPAddress.Parse(remoteMeshIP), MeshControlPort));
+        }
+        catch (Exception ex)
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Failed to send MeshVersionHello to {remoteMeshIP}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Handle an incoming MeshVersionHello. Negotiates the intersection with our own range and
+    /// records the peer's version. Refuses the pair (tears down the WG peer) if no overlap.
+    /// </summary>
+    private void ProcessMeshVersionHello(MediationMessage msg, IPEndPoint from)
+    {
+        string remoteMeshIP = from.Address.ToString();
+        int remoteMin = msg.PeerMinVersion;
+        int remoteMax = msg.PeerMaxVersion;
+        int selected = Math.Min(MediationProtocol.PeerMaxVersion, remoteMax);
+        int lowerBound = Math.Max(MediationProtocol.PeerMinVersion, remoteMin);
+        if (selected < lowerBound)
+        {
+            context.Log(LogLevel.Warning, $"[Mesh] Peer {remoteMeshIP} supports peer-protocol v{remoteMin}-v{remoteMax}, we support v{MediationProtocol.PeerMinVersion}-v{MediationProtocol.PeerMaxVersion} — no overlap, removing peer");
+            if (peerInfoByMeshIP.TryGetValue(remoteMeshIP, out var info) && !string.IsNullOrEmpty(info.peerID))
+            {
+                incompatiblePeers[info.peerID] = (remoteMin, remoteMax);
+            }
+            RemoveDeadPeer(remoteMeshIP);
+            return;
+        }
+        peerNegotiatedVersion[remoteMeshIP] = selected;
+        context.Log(LogLevel.Debug, $"[Mesh] Peer {remoteMeshIP} negotiated peer-protocol v{selected}");
     }
 
     // Helper method to process a MeshConnectionBegin message:
@@ -1989,6 +2109,11 @@ internal class MeshProtocolEngine
             context.Log(LogLevel.Debug, $"[Mesh] MeshConnectionBegin missing PeerID — skipping");
             return;
         }
+        if (IsIncompatible(remotePeerID, cbMsg.PeerMinVersion, cbMsg.PeerMaxVersion))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Skipping MeshConnectionBegin for {remotePeerID} — peer-protocol range v{cbMsg.PeerMinVersion}-v{cbMsg.PeerMaxVersion} previously refused");
+            return;
+        }
         // Relay mode only needs mesh IP + introducer IP, not endpoint
         if (!cbMsg.IsRelay && string.IsNullOrEmpty(remoteEndpoint))
         {
@@ -2000,7 +2125,7 @@ internal class MeshProtocolEngine
         // knows NAT types of peers that joined after this peer's initial connection.
         if (!string.IsNullOrEmpty(remoteMeshIP))
         {
-            peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType);
+            peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType, cbMsg.PeerMinVersion, cbMsg.PeerMaxVersion);
         }
 
         // Skip if a connection attempt is already in progress for this peer.
@@ -2120,6 +2245,7 @@ internal class MeshProtocolEngine
             }
             completedTunnelMeshIPs.Add(remoteMeshIP);
             tunnelCompletedAt[remoteMeshIP] = DateTime.UtcNow;
+            SendMeshVersionHello(remoteMeshIP);
             pendingConnectionRequests.Remove(remotePeerID);
             return;
         }
@@ -2131,7 +2257,7 @@ internal class MeshProtocolEngine
         var peerTunnel = new Tunnel(
             onConnectionFailure: () =>
             {
-                context.Log(LogLevel.Error, $"[Mesh] Introducer-relayed tunnel for {capturedPeerID} failed — cleaning up for future retry");
+                context.Log(LogLevel.Error, $"[Mesh] Introducer-handled tunnel for {capturedPeerID} failed — cleaning up for future retry");
                 lock (meshLock)
                 {
                     activeConnectionTunnels.Remove(capturedPeerID.GetHashCode());
@@ -2159,7 +2285,7 @@ internal class MeshProtocolEngine
             ownMeshIP: meshIP,
             onConnectionComplete: () =>
             {
-                context.Log(LogLevel.Debug, $"[Mesh] Introducer-relayed tunnel for {capturedPeerID} WireGuard established");
+                context.Log(LogLevel.Debug, $"[Mesh] Introducer-handled tunnel for {capturedPeerID} WireGuard established");
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                 System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
                 lock (meshLock)
@@ -2169,6 +2295,7 @@ internal class MeshProtocolEngine
                     {
                         completedTunnelMeshIPs.Add(capturedMeshIP);
                         tunnelCompletedAt[capturedMeshIP] = DateTime.UtcNow;
+                        SendMeshVersionHello(capturedMeshIP);
 
                         if (deferredIntroductions.TryGetValue(capturedMeshIP, out var deferred) && deferred.Count > 0)
                         {
@@ -2342,11 +2469,28 @@ internal class MeshProtocolEngine
             string peerEndpoint = peerObj.GetProperty("endpoint").GetString();
             string peerMeshIP = peerObj.TryGetProperty("meshIP", out JsonElement meshIPElement) ? meshIPElement.GetString() : null;
             int peerNatTypeInt = peerObj.TryGetProperty("natType", out JsonElement natEl) ? natEl.GetInt32() : -1;
+            int peerMinVersion = peerObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
+            int peerMaxVersion = peerObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
 
             if (targetPeerID == peerID.ToString()) continue;
             if (activePeerTunnels.ContainsKey(targetPeerID) || (peerMeshIP != null && activePeerTunnels.ContainsKey(peerMeshIP))) continue;
             if (pendingConnectionRequests.ContainsKey(targetPeerID)) continue;
             if (detectedNatType == NATType.Symmetric && (NATType)peerNatTypeInt == NATType.Symmetric) continue;
+            // Pre-flight version check: if the mediation server echoed a range with no overlap,
+            // record it now so the introducer-retry loop and other paths short-circuit too.
+            {
+                int lowerBound = Math.Max(MediationProtocol.PeerMinVersion, peerMinVersion);
+                int upperBound = Math.Min(MediationProtocol.PeerMaxVersion, peerMaxVersion);
+                if (upperBound < lowerBound)
+                {
+                    incompatiblePeers[targetPeerID] = (peerMinVersion, peerMaxVersion);
+                }
+            }
+            if (IsIncompatible(targetPeerID, peerMinVersion, peerMaxVersion))
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Skipping ConnectionRequest to {targetPeerID} — peer-protocol range v{peerMinVersion}-v{peerMaxVersion} incompatible with ours v{MediationProtocol.PeerMinVersion}-v{MediationProtocol.PeerMaxVersion}");
+                continue;
+            }
 
             var connectionRequest = new MediationMessage(MediationMessageType.ConnectionRequest)
             {
@@ -2722,8 +2866,11 @@ internal class MeshProtocolEngine
             }
             if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
             {
-                string existingEndpoint = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing) ? existing.endpoint : null;
-                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType);
+                bool hasExisting = peerInfoByMeshIP.TryGetValue(ackMeshIP, out var existing);
+                string existingEndpoint = hasExisting ? existing.endpoint : null;
+                int existingMinV = hasExisting ? existing.peerMinVersion : 1;
+                int existingMaxV = hasExisting ? existing.peerMaxVersion : 1;
+                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType, existingMinV, existingMaxV);
             }
         }
 
@@ -2827,6 +2974,7 @@ internal class MeshProtocolEngine
                 if (string.IsNullOrEmpty(kvp.Value.peerID)) continue;
                 if (pendingConnectionRequests.ContainsKey(kvp.Value.peerID)) continue;
                 if (activePeerTunnels.ContainsKey(kvp.Value.peerID) || activePeerTunnels.ContainsKey(peerMeshIP)) continue;
+                if (IsIncompatible(kvp.Value.peerID, kvp.Value.peerMinVersion, kvp.Value.peerMaxVersion)) continue;
 
                 context.Log(LogLevel.Debug, $"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
                 try
@@ -2862,6 +3010,12 @@ internal class MeshProtocolEngine
         context.Log(LogLevel.Debug, $"[Mesh] *** ConnectionBegin received! ***");
         context.Log(LogLevel.Debug, $"[Mesh] ConnectionBegin: connID={msg.ConnectionID}, endpoint={msg.EndpointString}, NAT={msg.NATType}, meshIP={msg.PrivateAddressString}");
 
+        if (IsIncompatible(msg.PeerID, msg.PeerMinVersion, msg.PeerMaxVersion))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Ignoring ConnectionBegin for {msg.PeerID} — peer-protocol range v{msg.PeerMinVersion}-v{msg.PeerMaxVersion} previously refused");
+            return;
+        }
+
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
         {
             peerMeshIPs[msg.ConnectionID] = msg.PrivateAddressString;
@@ -2872,7 +3026,7 @@ internal class MeshProtocolEngine
                 string cacheEndpoint = !string.IsNullOrEmpty(msg.ExternalEndpointString)
                     ? msg.ExternalEndpointString
                     : msg.EndpointString;
-                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType);
+                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion);
             }
 
             // Tear down any tunnel for the same mesh IP before creating a new one. Late-completing
@@ -2950,6 +3104,7 @@ internal class MeshProtocolEngine
                     {
                         completedTunnelMeshIPs.Add(completedMeshIP);
                         tunnelCompletedAt[completedMeshIP] = DateTime.UtcNow;
+                        SendMeshVersionHello(completedMeshIP);
                         if (deferredIntroductions.TryGetValue(completedMeshIP, out var deferred) && deferred.Count > 0)
                         {
                             context.Log(LogLevel.Debug, $"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
@@ -3101,6 +3256,19 @@ internal class MeshProtocolEngine
     /// </summary>
     private bool HandleMeshIntroduceRequest(MediationMessage msg)
     {
+        if (IsIncompatible(msg.PeerID, msg.PeerMinVersion, msg.PeerMaxVersion))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Declining introducer role for {msg.PeerID} — peer-protocol range v{msg.PeerMinVersion}-v{msg.PeerMaxVersion} previously refused");
+            try
+            {
+                var ack = new MediationMessage(MediationMessageType.MeshIntroduceAck) { PeerID = msg.PeerID };
+                byte[] ackBuffer = Encoding.ASCII.GetBytes(ack.Serialize());
+                stream.Write(ackBuffer, 0, ackBuffer.Length);
+                stream.Flush();
+            }
+            catch { }
+            return true;
+        }
         isIntroducer = true;
         context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID}");
 
@@ -3108,7 +3276,7 @@ internal class MeshProtocolEngine
         // NAT traversal) and any stale deferred messages.
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
         {
-            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType);
+            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion);
             if (!string.IsNullOrEmpty(msg.LocalIP))
                 peerLanByMeshIP[msg.PrivateAddressString] = (msg.LocalIP, msg.LocalPort);
             completedTunnelMeshIPs.Remove(msg.PrivateAddressString);
@@ -3127,6 +3295,8 @@ internal class MeshProtocolEngine
                 string existingPeerID = peerElement.TryGetProperty("peerID", out JsonElement pidEl) ? pidEl.GetString() : null;
                 string existingPeerLocalIP = peerElement.TryGetProperty("localIP", out JsonElement lipEl) ? lipEl.GetString() : null;
                 int existingPeerLocalPort = peerElement.TryGetProperty("localPort", out JsonElement lpEl) ? lpEl.GetInt32() : 0;
+                int existingPeerMinVersion = peerElement.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
+                int existingPeerMaxVersion = peerElement.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
 
                 if (string.IsNullOrEmpty(existingPeerMeshIP))
                 {
@@ -3134,7 +3304,14 @@ internal class MeshProtocolEngine
                     continue;
                 }
 
-                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType);
+                if (IsIncompatible(existingPeerID, existingPeerMinVersion, existingPeerMaxVersion) ||
+                    IsIncompatible(msg.PeerID, msg.PeerMinVersion, msg.PeerMaxVersion))
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh] Skipping introduction pair {msg.PeerID} <-> {existingPeerID} — one or both previously refused on peer-protocol range");
+                    continue;
+                }
+
+                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType, existingPeerMinVersion, existingPeerMaxVersion);
                 if (!string.IsNullOrEmpty(existingPeerLocalIP))
                     peerLanByMeshIP[existingPeerMeshIP] = (existingPeerLocalIP, existingPeerLocalPort);
 
@@ -3244,7 +3421,9 @@ internal class MeshProtocolEngine
                         PrivateAddressString = msg.PrivateAddressString,
                         IsRelay = true,
                         IntroducerMeshIP = meshIP,
-                        RelayMeshIP = chosenRelay
+                        RelayMeshIP = chosenRelay,
+                        PeerMinVersion = msg.PeerMinVersion,
+                        PeerMaxVersion = msg.PeerMaxVersion
                     };
                     try
                     {
@@ -3267,7 +3446,9 @@ internal class MeshProtocolEngine
                             PrivateAddressString = existingPeerMeshIP,
                             IsRelay = true,
                             IntroducerMeshIP = meshIP,
-                            RelayMeshIP = chosenRelay
+                            RelayMeshIP = chosenRelay,
+                            PeerMinVersion = existingPeerMinVersion,
+                            PeerMaxVersion = existingPeerMaxVersion
                         };
 
                         if (completedTunnelMeshIPs.Contains(msg.PrivateAddressString))
@@ -3321,7 +3502,9 @@ internal class MeshProtocolEngine
                     EndpointString = newPeerEndpointForExisting,
                     ExternalEndpointString = msg.EndpointString,
                     NATType = msg.NATType,
-                    PrivateAddressString = msg.PrivateAddressString
+                    PrivateAddressString = msg.PrivateAddressString,
+                    PeerMinVersion = msg.PeerMinVersion,
+                    PeerMaxVersion = msg.PeerMaxVersion
                 };
 
                 MediationMessage connBeginToNew = null;
@@ -3333,7 +3516,9 @@ internal class MeshProtocolEngine
                         EndpointString = existingPeerEndpointForNew,
                         ExternalEndpointString = existingPeerEndpoint,
                         NATType = (NATType)existingPeerNatType,
-                        PrivateAddressString = existingPeerMeshIP
+                        PrivateAddressString = existingPeerMeshIP,
+                        PeerMinVersion = existingPeerMinVersion,
+                        PeerMaxVersion = existingPeerMaxVersion
                     };
                 }
 
@@ -3678,7 +3863,9 @@ internal class MeshProtocolEngine
                     NATType = detectedNatType,
                     PrivateAddressString = meshIP,
                     AuthToken = authToken,
-                    ProtocolVersion = MediationProtocol.ClientVersion
+                    ProtocolVersion = MediationProtocol.ClientVersion,
+                    PeerMinVersion = MediationProtocol.PeerMinVersion,
+                    PeerMaxVersion = MediationProtocol.PeerMaxVersion
                 };
                 byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                 reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
@@ -3851,7 +4038,9 @@ internal class MeshProtocolEngine
                         NATType = detectedNatType,
                         PrivateAddressString = meshIP,
                         AuthToken = authToken,
-                        ProtocolVersion = MediationProtocol.ClientVersion
+                        ProtocolVersion = MediationProtocol.ClientVersion,
+                        PeerMinVersion = MediationProtocol.PeerMinVersion,
+                        PeerMaxVersion = MediationProtocol.PeerMaxVersion
                     };
                     byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                     stream.Write(joinBytes, 0, joinBytes.Length);
@@ -4109,6 +4298,7 @@ internal class MeshProtocolEngine
         peerLastPong.TryRemove(deadMeshIP, out _);
         relayedRemotes.TryRemove(deadMeshIP, out _);
         lastRelayHealthReport.TryRemove(deadMeshIP, out _);
+        peerNegotiatedVersion.TryRemove(deadMeshIP, out _);
     }
 
     // Pick the best relay for pair (a, b) from the candidate roster.
@@ -4192,7 +4382,7 @@ internal class MeshProtocolEngine
             var completedSnapshot = completedTunnelMeshIPs.ToArray();
             var relayedPairsSnapshot = relayedPairs.ToArray();
             var peerInfoSnapshot = peerInfoByMeshIP.ToArray();
-            var peerInfoDict = new Dictionary<string, (string peerID, string endpoint, NATType natType)>();
+            var peerInfoDict = new Dictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion)>();
             foreach (var kv in peerInfoSnapshot)
                 peerInfoDict[kv.Key] = kv.Value;
 
@@ -4300,7 +4490,8 @@ internal class MeshProtocolEngine
                     IsRelayGateway = isRelayGateway,
                     LatencyMs = latency,
                     RelayedVia = relayedVia.TryGetValue(peerMeshIP, out var gw) ? gw : null,
-                    Status = status
+                    Status = status,
+                    PeerProtocolVersion = peerNegotiatedVersion.TryGetValue(peerMeshIP, out var pver) ? pver : -1
                 };
 
                 state.ConnectedPeers.Add(peerInfo);
@@ -4364,7 +4555,9 @@ internal class MeshProtocolEngine
             PrivateAddressString = remoteIP,
             IsRelay = true,
             IntroducerMeshIP = meshIP,
-            RelayMeshIP = newRelay
+            RelayMeshIP = newRelay,
+            PeerMinVersion = info.peerMinVersion,
+            PeerMaxVersion = info.peerMaxVersion
         };
         try { byte[] cbBytes = Encoding.UTF8.GetBytes(cb.Serialize()); MeshSend(cbBytes, cbBytes.Length, new IPEndPoint(IPAddress.Parse(toIP), MeshControlPort)); }
         catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to notify {toIP} of reselect: {ex.Message}"); }
@@ -4398,6 +4591,14 @@ internal class MeshProtocolEngine
                         lastRepairAttempt.Remove(pairKey);
                     continue;
                 }
+
+                // Skip repair if either peer is known incompatible on peer-protocol range.
+                if (peerInfoByMeshIP.TryGetValue(ipA, out var repairInfoA) &&
+                    IsIncompatible(repairInfoA.peerID, repairInfoA.peerMinVersion, repairInfoA.peerMaxVersion))
+                    continue;
+                if (peerInfoByMeshIP.TryGetValue(ipB, out var repairInfoB) &&
+                    IsIncompatible(repairInfoB.peerID, repairInfoB.peerMinVersion, repairInfoB.peerMaxVersion))
+                    continue;
 
                 if (!aReportsB || !bReportsA)
                 {
@@ -4486,7 +4687,9 @@ internal class MeshProtocolEngine
                                 PrivateAddressString = ipB,
                                 IsRelay = true,
                                 IntroducerMeshIP = meshIP,
-                                RelayMeshIP = assignedRelay
+                                RelayMeshIP = assignedRelay,
+                                PeerMinVersion = relayInfoB.peerMinVersion,
+                                PeerMaxVersion = relayInfoB.peerMaxVersion
                             };
                             try
                             {
@@ -4506,7 +4709,9 @@ internal class MeshProtocolEngine
                                 PrivateAddressString = ipA,
                                 IsRelay = true,
                                 IntroducerMeshIP = meshIP,
-                                RelayMeshIP = assignedRelay
+                                RelayMeshIP = assignedRelay,
+                                PeerMinVersion = relayInfoA.peerMinVersion,
+                                PeerMaxVersion = relayInfoA.peerMaxVersion
                             };
                             try
                             {
@@ -4661,7 +4866,9 @@ internal class MeshProtocolEngine
                             PrivateAddressString = ipB,
                             IsRelay = true,
                             IntroducerMeshIP = meshIP,
-                            RelayMeshIP = chosenRelay
+                            RelayMeshIP = chosenRelay,
+                            PeerMinVersion = infoB.peerMinVersion,
+                            PeerMaxVersion = infoB.peerMaxVersion
                         };
                         try
                         {
@@ -4683,7 +4890,9 @@ internal class MeshProtocolEngine
                             PrivateAddressString = ipA,
                             IsRelay = true,
                             IntroducerMeshIP = meshIP,
-                            RelayMeshIP = chosenRelay
+                            RelayMeshIP = chosenRelay,
+                            PeerMinVersion = infoA.peerMinVersion,
+                            PeerMaxVersion = infoA.peerMaxVersion
                         };
                         try
                         {
@@ -4732,7 +4941,9 @@ internal class MeshProtocolEngine
                                 PeerID = infoB.peerID ?? "",
                                 EndpointString = endpointForA,
                                 NATType = infoB.natType,
-                                PrivateAddressString = ipB
+                                PrivateAddressString = ipB,
+                                PeerMinVersion = infoB.peerMinVersion,
+                                PeerMaxVersion = infoB.peerMaxVersion
                             };
                             try
                             {
@@ -4754,7 +4965,9 @@ internal class MeshProtocolEngine
                                 PeerID = infoA.peerID ?? "",
                                 EndpointString = endpointForB,
                                 NATType = infoA.natType,
-                                PrivateAddressString = ipA
+                                PrivateAddressString = ipA,
+                                PeerMinVersion = infoA.peerMinVersion,
+                                PeerMaxVersion = infoA.peerMaxVersion
                             };
                             try
                             {
@@ -4785,7 +4998,8 @@ internal class MeshProtocolEngine
                 if (mediationClient != null && mediationClient.Connected &&
                     peerInfoByMeshIP.TryGetValue(ip, out var lostPeerInfo) &&
                     !string.IsNullOrEmpty(lostPeerInfo.peerID) &&
-                    !pendingConnectionRequests.ContainsKey(lostPeerInfo.peerID))
+                    !pendingConnectionRequests.ContainsKey(lostPeerInfo.peerID) &&
+                    !IsIncompatible(lostPeerInfo.peerID, lostPeerInfo.peerMinVersion, lostPeerInfo.peerMaxVersion))
                 {
                     try
                     {

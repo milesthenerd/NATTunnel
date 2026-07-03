@@ -179,6 +179,14 @@ internal sealed class MeshPeerProxy : IDisposable
     private int consecutiveHandshakeFailures;
     private const int HandshakeFailureThreshold = 15;
 
+    // Handshake message counters — used to decide when we include the peer-version payload
+    // in Noise messages. Only msg 1 (initiator) and msg 2 (responder) carry a version.
+    private int handshakeMessagesSent;
+    private int handshakeMessagesReceived;
+
+    /// <summary>The negotiated peer protocol version once handshake completes. -1 pre-handshake.</summary>
+    public int NegotiatedPeerVersion { get; private set; } = -1;
+
     /// <summary>
     /// Construct a proxy for one peer.
     /// </summary>
@@ -292,7 +300,7 @@ internal sealed class MeshPeerProxy : IDisposable
         // Initiator sends msg-1 immediately; responder waits for it.
         if (isInitiator && !handshakeDone)
         {
-            SendNoiseMessage(null);
+            SendNoiseMessage();
         }
     }
 
@@ -324,10 +332,34 @@ internal sealed class MeshPeerProxy : IDisposable
         tunnel.SendDataPacket(framed);
     }
 
-    private void SendNoiseMessage(byte[] payload)
+    private static void WriteUInt32BE(byte[] buf, int offset, uint value)
     {
+        buf[offset] = (byte)((value >> 24) & 0xFF);
+        buf[offset + 1] = (byte)((value >> 16) & 0xFF);
+        buf[offset + 2] = (byte)((value >> 8) & 0xFF);
+        buf[offset + 3] = (byte)(value & 0xFF);
+    }
+
+    private static uint ReadUInt32BE(byte[] buf, int offset)
+        => ((uint)buf[offset] << 24) | ((uint)buf[offset + 1] << 16) | ((uint)buf[offset + 2] << 8) | buf[offset + 3];
+
+    private void SendNoiseMessage()
+    {
+        // Decide the Noise payload. Msg 1 (initiator's first send) and msg 2 (responder's
+        // only send) carry our peer protocol range; msg 3 has none. Track by counter so
+        // this stays correct regardless of who's who.
+        byte[] payload = null;
+        bool isFirstSend = handshakeMessagesSent == 0;
+        if (isFirstSend)
+        {
+            payload = new byte[8];
+            WriteUInt32BE(payload, 0, (uint)MediationProtocol.PeerMinVersion);
+            WriteUInt32BE(payload, 4, (uint)MediationProtocol.PeerMaxVersion);
+        }
+
         var buf = new byte[MaxNoiseMessage];
         var (bytesWritten, _, t) = handshakeState.WriteMessage(payload, buf);
+        handshakeMessagesSent++;
 
         var framed = new byte[bytesWritten + 1];
         framed[0] = EnvelopeNoiseHandshake;
@@ -568,15 +600,43 @@ internal sealed class MeshPeerProxy : IDisposable
         var payloadBuf = new byte[MaxNoiseMessage];
         try
         {
-            var (_, _, t) = handshakeState.ReadMessage(body, payloadBuf);
+            var (bytesRead, _, t) = handshakeState.ReadMessage(body, payloadBuf);
             consecutiveHandshakeFailures = 0;
+
+            // Msg 1 (received by responder) and msg 2 (received by initiator) carry the peer's
+            // supported version range. Msg 3 (received by responder) has none. Track by counter.
+            bool isFirstReceive = handshakeMessagesReceived == 0;
+            handshakeMessagesReceived++;
+            if (isFirstReceive)
+            {
+                if (bytesRead < 8)
+                {
+                    Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake msg missing peer version payload — tearing down proxy");
+                    try { Dispose(); } catch { }
+                    try { HandshakeBroken?.Invoke(); } catch { }
+                    return;
+                }
+                int remoteMin = (int)ReadUInt32BE(payloadBuf, 0);
+                int remoteMax = (int)ReadUInt32BE(payloadBuf, 4);
+                int selected = Math.Min(MediationProtocol.PeerMaxVersion, remoteMax);
+                int lowerBound = Math.Max(MediationProtocol.PeerMinVersion, remoteMin);
+                if (selected < lowerBound)
+                {
+                    Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] peer supports v{remoteMin}-v{remoteMax}, we support v{MediationProtocol.PeerMinVersion}-v{MediationProtocol.PeerMaxVersion} — no overlap, refusing pair");
+                    try { Dispose(); } catch { }
+                    try { HandshakeBroken?.Invoke(); } catch { }
+                    return;
+                }
+                NegotiatedPeerVersion = selected;
+            }
+
             if (t != null)
             {
                 CompleteHandshake(t);
                 return;
             }
             // Handshake not yet finished — send our next message.
-            SendNoiseMessage(null);
+            SendNoiseMessage();
         }
         catch (Exception ex)
         {

@@ -43,7 +43,7 @@ class NetworkRegistry {
      * @param {string} meshIP - Peer's mesh IP address (optional)
      * @returns {object[]} List of other peers in the same network
      */
-    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null) {
+    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1) {
         if (!networkID || !peerID) {
             throw new Error('networkID and peerID are required');
         }
@@ -72,6 +72,8 @@ class NetworkRegistry {
             existingPeer.meshIP = meshIP;
             existingPeer.localIP = localIP;
             existingPeer.localPort = localPort;
+            existingPeer.peerMinVersion = peerMinVersion;
+            existingPeer.peerMaxVersion = peerMaxVersion;
             existingPeer.joinTime = Date.now();
         } else {
             // Add new peer
@@ -83,6 +85,8 @@ class NetworkRegistry {
                 meshIP,
                 localIP,
                 localPort,
+                peerMinVersion,
+                peerMaxVersion,
                 joinTime: Date.now()
             });
             console.log(`[NetworkRegistry] Peer ${peerID} joined network ${networkID} (meshIP: ${meshIP}, total active: ${network.size})`);
@@ -96,6 +100,8 @@ class NetworkRegistry {
             meshIP,
             localIP,
             localPort,
+            peerMinVersion,
+            peerMaxVersion,
             connected: true,
             joinTime: Date.now()
         });
@@ -110,7 +116,9 @@ class NetworkRegistry {
                     natType: peer.natType,
                     meshIP: peer.meshIP,
                     localIP: peer.localIP,
-                    localPort: peer.localPort
+                    localPort: peer.localPort,
+                    peerMinVersion: peer.peerMinVersion,
+                    peerMaxVersion: peer.peerMaxVersion
                 });
             }
         }
@@ -188,6 +196,8 @@ class NetworkRegistry {
                 meshIP: member.meshIP,
                 localIP: member.localIP,
                 localPort: member.localPort,
+                peerMinVersion: member.peerMinVersion,
+                peerMaxVersion: member.peerMaxVersion,
                 connected: member.connected
             });
         }
@@ -289,7 +299,9 @@ class NetworkRegistry {
         return Array.from(network.values()).map(peer => ({
             peerID: peer.peerID,
             endpoint: peer.endpoint,
-            natType: peer.natType
+            natType: peer.natType,
+            peerMinVersion: peer.peerMinVersion,
+            peerMaxVersion: peer.peerMaxVersion
         }));
     }
 

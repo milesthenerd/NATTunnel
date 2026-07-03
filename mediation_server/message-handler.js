@@ -281,6 +281,20 @@ class MessageHandler {
             return;
         }
 
+        // Pre-flight peer-protocol overlap check. Skip brokering if the two peers advertise
+        // ranges that don't intersect — saves a full hole-punch/handshake round trip only for
+        // the pair to refuse each other afterward. Clients still enforce this on receive.
+        if (clientPeer && targetPeer &&
+            clientPeer.peerMinVersion && clientPeer.peerMaxVersion &&
+            targetPeer.peerMinVersion && targetPeer.peerMaxVersion) {
+            const lo = Math.max(clientPeer.peerMinVersion, targetPeer.peerMinVersion);
+            const hi = Math.min(clientPeer.peerMaxVersion, targetPeer.peerMaxVersion);
+            if (hi < lo) {
+                console.log(`[MessageHandler] Skipping ConnectionRequest ${clientSocketInfo.clientID} -> ${message.PeerID}: peer-protocol ranges don't overlap (v${clientPeer.peerMinVersion}-v${clientPeer.peerMaxVersion} vs v${targetPeer.peerMinVersion}-v${targetPeer.peerMaxVersion})`);
+                return;
+            }
+        }
+
         // Deduplicate: if a connection pair already exists between these two peers
         // (in either direction), skip creating a new one. This happens when P_new sends
         // ConnectionRequest for peer X and peer X also TransientReconnects and sends
@@ -416,7 +430,9 @@ class MessageHandler {
                 ConnectionID: connectionId,
                 IsServer: false,
                 PrivateAddressString: targetPeer ? targetPeer.meshIP : null,  // Peer's mesh IP
-                PeerID: targetSocket.clientID  // Target peer's ID so client can track pending requests
+                PeerID: targetSocket.clientID,  // Target peer's ID so client can track pending requests
+                PeerMinVersion: targetPeer ? targetPeer.peerMinVersion : undefined,
+                PeerMaxVersion: targetPeer ? targetPeer.peerMaxVersion : undefined
             };
 
             socket.write(Buffer.from(JSON.stringify(clientMessage)));
@@ -431,7 +447,9 @@ class MessageHandler {
                 ConnectionID: connectionId,
                 IsServer: false,  // In mesh mode, both are peers (not server/client)
                 PrivateAddressString: clientPeer ? clientPeer.meshIP : null,  // Initiating peer's mesh IP
-                PeerID: clientSocketInfo.clientID  // Initiating peer's ID so target can track pending requests
+                PeerID: clientSocketInfo.clientID,  // Initiating peer's ID so target can track pending requests
+                PeerMinVersion: clientPeer ? clientPeer.peerMinVersion : undefined,
+                PeerMaxVersion: clientPeer ? clientPeer.peerMaxVersion : undefined
             };
 
             targetSocket.socket.write(Buffer.from(JSON.stringify(serverMessage)));
@@ -499,6 +517,9 @@ class MessageHandler {
      */
     handleMeshJoinRequest(message, socket) {
         const { NetworkID, PeerID, NATType, PrivateAddressString } = message;
+        // Peer-to-peer protocol range this client supports. Grandfathered to v1
+        const peerMinVersion = message.PeerMinVersion || 1;
+        const peerMaxVersion = message.PeerMaxVersion || 1;
 
         if (!NetworkID) {
             console.log('[MessageHandler] MeshJoinRequest missing NetworkID');
@@ -666,7 +687,9 @@ class MessageHandler {
                 NATType,
                 PrivateAddressString,  // Mesh IP address
                 socketInfo.localIP,    // LAN IP for same-NAT detection
-                socketInfo.localPort   // Local UDP port
+                socketInfo.localPort,  // Local UDP port
+                peerMinVersion,        // Peer-to-peer protocol range advertised by this client
+                peerMaxVersion
             );
 
             console.log(`[MessageHandler] Peer ${PeerID} joined network ${NetworkID} (${otherPeers.length} active peers)`);
@@ -699,6 +722,14 @@ class MessageHandler {
                 if (p.natType === NATTypes.Symmetric) return false;
                 const sockInfo = this.connectionManager.sockets.find(s => s.clientID === p.peerID);
                 if (!sockInfo) return false;
+                // Introducer must share a peer-protocol range with the joiner. Without overlap,
+                // they can never form a WireGuard tunnel to the joiner, so they can't relay
+                // MeshConnectionBegin — picking them just churns the introducer role.
+                if (p.peerMinVersion && p.peerMaxVersion && peerMinVersion && peerMaxVersion) {
+                    const lo = Math.max(p.peerMinVersion, peerMinVersion);
+                    const hi = Math.min(p.peerMaxVersion, peerMaxVersion);
+                    if (hi < lo) return false;
+                }
                 // Re-register them in the active network if they fell out
                 // (e.g., network was deleted when it emptied, but socket is still alive)
                 const activeNetwork = this.networkRegistry.networks.get(NetworkID);
@@ -709,6 +740,8 @@ class MessageHandler {
                         endpoint: p.endpoint,
                         natType: p.natType,
                         meshIP: p.meshIP,
+                        peerMinVersion: p.peerMinVersion,
+                        peerMaxVersion: p.peerMaxVersion,
                         joinTime: Date.now()
                     });
                 }
@@ -783,7 +816,9 @@ class MessageHandler {
                     peerID: introducer.peerID,
                     endpoint: introducer.endpoint,
                     natType: introducer.natType,
-                    meshIP: introducer.meshIP
+                    meshIP: introducer.meshIP,
+                    peerMinVersion: introducer.peerMinVersion,
+                    peerMaxVersion: introducer.peerMaxVersion
                 });
             }
 
@@ -811,6 +846,8 @@ class MessageHandler {
                         PrivateAddressString: PrivateAddressString,
                         LocalIP: socketInfo.localIP,      // New peer's LAN IP for same-NAT detection
                         LocalPort: socketInfo.localPort,   // New peer's local UDP port
+                        PeerMinVersion: peerMinVersion,    // New peer's peer-to-peer protocol range
+                        PeerMaxVersion: peerMaxVersion,
                         OtherPeers: peersToIntroduce  // Peers to forward the introduction to (may be empty)
                     };
                     introducerPeer.socket.write(Buffer.from(JSON.stringify(introduceRequest)));
@@ -823,7 +860,9 @@ class MessageHandler {
                             natType: NATType,
                             meshIP: PrivateAddressString,
                             localIP: socketInfo.localIP,
-                            localPort: socketInfo.localPort
+                            localPort: socketInfo.localPort,
+                            peerMinVersion,
+                            peerMaxVersion
                         },
                         peersToIntroduce,
                         introducerPeerID: introducer.peerID,
@@ -959,11 +998,19 @@ class MessageHandler {
             let newIntroducer = null;
             let newIntroducerPeer = null;
 
+            const joinerMin = pending.newPeerInfo && pending.newPeerInfo.peerMinVersion;
+            const joinerMax = pending.newPeerInfo && pending.newPeerInfo.peerMaxVersion;
+            const rangesOverlap = (p) => {
+                if (!p.peerMinVersion || !p.peerMaxVersion || !joinerMin || !joinerMax) return true;
+                return Math.min(p.peerMaxVersion, joinerMax) >= Math.max(p.peerMinVersion, joinerMin);
+            };
+
             // First check active network peers (they have live TCP sockets by definition)
             const networkPeers = this.networkRegistry.getPeersInNetwork(pending.networkID);
             for (const p of networkPeers) {
                 if (p.peerID === newPeerID || p.peerID === disconnectedPeerID) continue;
                 if (p.natType === NATTypes.Symmetric) continue;
+                if (!rangesOverlap(p)) continue;
                 const activePeer = this.networkRegistry.findPeerByID(p.peerID);
                 if (activePeer && activePeer.socket) {
                     newIntroducer = p;
@@ -978,6 +1025,7 @@ class MessageHandler {
                 for (const m of meshMembers) {
                     if (m.peerID === disconnectedPeerID) continue;
                     if (m.natType === NATTypes.Symmetric) continue;
+                    if (!rangesOverlap(m)) continue;
                     // Check if this mesh member has a live TCP socket
                     const sockInfo = this.connectionManager.sockets.find(s => s.clientID === m.peerID);
                     if (sockInfo && sockInfo.socket) {
@@ -991,6 +1039,8 @@ class MessageHandler {
                                 endpoint: m.endpoint,
                                 natType: m.natType,
                                 meshIP: m.meshIP,
+                                peerMinVersion: m.peerMinVersion,
+                                peerMaxVersion: m.peerMaxVersion,
                                 joinTime: Date.now()
                             });
                         }
@@ -1018,6 +1068,8 @@ class MessageHandler {
                 PrivateAddressString: pending.newPeerInfo.meshIP,
                 LocalIP: pending.newPeerInfo.localIP,
                 LocalPort: pending.newPeerInfo.localPort,
+                PeerMinVersion: pending.newPeerInfo.peerMinVersion,
+                PeerMaxVersion: pending.newPeerInfo.peerMaxVersion,
                 OtherPeers: remainingPeers
             };
 

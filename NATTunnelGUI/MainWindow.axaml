@@ -4,7 +4,7 @@
         x:Class="NATTunnelGUI.MainWindow"
         Title="NATTunnel"
         Height="700"
-        Width="800"
+        Width="1000"
         MinHeight="550"
         Background="{StaticResource ContentBrush}"
         WindowStartupLocation="CenterScreen">
@@ -284,6 +284,14 @@
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding LatencyDisplay}" TextTrimming="None"
+                                               VerticalAlignment="Center" Margin="8,0,8,0" />
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTemplateColumn Header="Proto" Width="70">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <TextBlock Text="{Binding PeerVersionDisplay}" TextTrimming="None"
                                                VerticalAlignment="Center" Margin="8,0,8,0" />
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>

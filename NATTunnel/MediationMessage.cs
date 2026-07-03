@@ -200,6 +200,14 @@ internal class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string VersionError { get; set; }
+
+    /// <summary>MeshVersionHello: lower bound of the sender's supported peer-protocol range.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int PeerMinVersion { get; set; }
+
+    /// <summary>MeshVersionHello: upper bound of the sender's supported peer-protocol range.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int PeerMaxVersion { get; set; }
     public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;
@@ -407,7 +415,14 @@ internal enum MediationMessageType
     /// network and the client picked a new one. Carries the new mesh IP in PrivateAddressString.
     /// Server updates its meshMembers record without re-running introducer election.
     /// </summary>
-    MeshIPReassign          // 38
+    MeshIPReassign,         // 38
+    /// <summary>
+    /// Peer → peer: exchange peer-protocol supported range right after tunnel establishment.
+    /// Fields used: <see cref="MediationMessage.PeerMinVersion"/>, <see cref="MediationMessage.PeerMaxVersion"/>.
+    /// Receiver negotiates <c>min(their.Max, our.Max)</c> against <c>max(their.Min, our.Min)</c>;
+    /// if no overlap, drops the peer.
+    /// </summary>
+    MeshVersionHello        // 39
     // Note: Latency ping/pong uses binary 0xFF-prefixed packets, not JSON message types
 }
 

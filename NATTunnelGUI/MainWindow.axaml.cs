@@ -178,6 +178,7 @@ public partial class MainWindow : Window
                         Endpoint = peer.Endpoint ?? "-",
                         LatencyDisplay = peer.LatencyMs >= 0 ? $"{peer.LatencyMs}ms" : "-",
                         StatusDisplay = peer.Status ?? (peer.IsRelayed ? "Relayed" : "Direct"),
+                        PeerVersionDisplay = peer.PeerProtocolVersion > 0 ? $"v{peer.PeerProtocolVersion}" : "-",
                     });
                 }
             }
@@ -329,4 +330,5 @@ public class PeerDisplayItem
     public string? Endpoint { get; set; }
     public string? LatencyDisplay { get; set; }
     public string? StatusDisplay { get; set; }
+    public string? PeerVersionDisplay { get; set; }
 }

@@ -104,6 +104,14 @@ public class MeshState
 
         [JsonPropertyName("status")]
         public string Status { get; set; }
+
+        /// <summary>
+        /// Peer-protocol version negotiated via MeshVersionHello. -1 when not yet negotiated
+        /// (peer just came up, hello in flight); 0 when the peer is on a build predating the
+        /// negotiation (grandfathered as v1 in feature checks).
+        /// </summary>
+        [JsonPropertyName("peerProtocolVersion")]
+        public int PeerProtocolVersion { get; set; } = -1;
     }
 
     /// <summary>
