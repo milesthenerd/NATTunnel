@@ -112,28 +112,31 @@ public static class Config
 
         try
         {
-            //If no port is specified, error out
             string endpointString = (string)model[MediationEndpoint];
             int colonIndex = endpointString.IndexOf(':');
-            if (colonIndex <= 0)
-            {
-                Console.Error.WriteLine($"{MediationEndpoint} must have a port specified!");
-                return false;
-            }
-
-            string ip = endpointString[..colonIndex];
-            string port = endpointString[(colonIndex + 1)..];
+            string ip;
             int portForMediationIP;
 
-            if (!Int32.TryParse(port, out portForMediationIP))
+            if (colonIndex <= 0)
             {
-                Console.Error.WriteLine($"Invalid port for {MediationEndpoint}!");
-                return false;
+                // No port supplied — default to the conventional 6510.
+                ip = endpointString;
+                portForMediationIP = 6510;
+                endpointString = $"{ip}:{portForMediationIP}";
+            }
+            else
+            {
+                ip = endpointString[..colonIndex];
+                string port = endpointString[(colonIndex + 1)..];
+                if (!Int32.TryParse(port, out portForMediationIP))
+                {
+                    Console.Error.WriteLine($"Invalid port for {MediationEndpoint}!");
+                    return false;
+                }
             }
 
             //Try to parse mediationEndpoint with DNS lookup
             TunnelOptions.MediationEndpoint = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
-            // Preserve the original host:port string
             TunnelOptions.MediationEndpointString = endpointString;
         }
         catch
