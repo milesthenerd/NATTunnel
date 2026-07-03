@@ -489,6 +489,13 @@ public class MeshNode : IDisposable
                 catch (Exception ex) { Console.Error.WriteLine($"[Embedded] PeerDisconnected handler threw: {ex.Message}"); }
             }
         };
+        proxy.VersionRefused += (remoteMin, remoteMax) =>
+        {
+            // Record the peer as incompatible so MeshProtocolEngine's pre-flight paths
+            // (ProcessDiscoveredPeers, ProcessMeshConnectionBegin, introducer-selection, etc.)
+            // short-circuit future attempts against them until they advertise a new range.
+            try { engine?.MarkPeerIncompatible(remotePeerID, remoteMin, remoteMax); } catch { }
+        };
         proxy.IdentityReceived += identity =>
         {
             connected.Identity = identity ?? Array.Empty<byte>();

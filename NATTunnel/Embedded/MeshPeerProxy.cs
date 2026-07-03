@@ -169,10 +169,17 @@ internal sealed class MeshPeerProxy : IDisposable
 
     /// <summary>
     /// Raised when this proxy gives up because it received too many consecutive undecryptable
-    /// packets during the handshake phase. MeshNode reacts by forgetting this peer 
+    /// packets during the handshake phase. MeshNode reacts by forgetting this peer
     /// so a fresh proxy can be built on the next connection attempt.
     /// </summary>
     public event Action HandshakeBroken;
+
+    /// <summary>
+    /// Raised when the Noise-payload version range advertised by the remote has no overlap
+    /// with ours. Carries the range they sent so callers can record the incompatibility and
+    /// short-circuit future connection attempts against this peer.
+    /// </summary>
+    public event Action<int, int> VersionRefused;
 
     // Counter for consecutive handshake read failures. Reset on any successful handshake read.
     // After HandshakeFailureThreshold misses we declare the proxy broken and tear ourselves down.
@@ -623,6 +630,7 @@ internal sealed class MeshPeerProxy : IDisposable
                 if (selected < lowerBound)
                 {
                     Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] peer supports v{remoteMin}-v{remoteMax}, we support v{MediationProtocol.PeerMinVersion}-v{MediationProtocol.PeerMaxVersion} — no overlap, refusing pair");
+                    try { VersionRefused?.Invoke(remoteMin, remoteMax); } catch { }
                     try { Dispose(); } catch { }
                     try { HandshakeBroken?.Invoke(); } catch { }
                     return;

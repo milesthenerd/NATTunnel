@@ -132,6 +132,10 @@ public partial class MainWindow : Window
             PeerIDText.Text = state.OwnPeerID ?? "-";
             NATTypeText.Text = state.NATType ?? "-";
             RoleText.Text = state.IsIntroducer ? "Introducer" : "Peer";
+            string peerRange = state.PeerProtocolMinVersion == state.PeerProtocolMaxVersion
+                ? $"v{state.PeerProtocolMinVersion}"
+                : $"v{state.PeerProtocolMinVersion}-v{state.PeerProtocolMaxVersion}";
+            ProtocolText.Text = $"mediation v{state.MediationProtocolVersion} / peer {peerRange}";
             UptimeText.Text = FormatUptime(state.UptimeSeconds);
             NetworkNameText.Text = state.NetworkID ?? "-";
 
@@ -200,7 +204,12 @@ public partial class MainWindow : Window
                     "AuthFailure" => "Authentication Failed",
                     _ => "NATTunnel Error"
                 };
-                _ = DialogHelpers.ShowInfoAsync(this, title, state.LastError);
+                string body = state.LastError;
+                if (state.LastErrorKind == "VersionMismatch")
+                {
+                    body += $"\n\nThis client speaks mediation v{state.MediationProtocolVersion} and peer {peerRange}.";
+                }
+                _ = DialogHelpers.ShowInfoAsync(this, title, body);
             }
         }
         catch

@@ -17,6 +17,6 @@ internal static class MediationProtocol
     /// if that value is still <c>&gt;= max(their.Min, our.Min)</c>, else the pair is refused.
     /// Bumped when envelope byte semantics, fragment format, or mesh-control message shapes change.
     /// </summary>
-    public const int PeerMinVersion = 2;
-    public const int PeerMaxVersion = 3;
+    public const int PeerMinVersion = 1;
+    public const int PeerMaxVersion = 1;
 }

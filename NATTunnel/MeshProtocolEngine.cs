@@ -2037,6 +2037,18 @@ internal class MeshProtocolEngine
     /// Callers that don't know a real range should pass v1/v1 (the pre-versioning-era default) so
     /// pre-negotiation peers still block if we already refused them at v1.
     /// </summary>
+    /// <summary>
+    /// Record a peer as version-incompatible. Used by embedded mode's Noise-payload handshake:
+    /// the daemon path populates <see cref="incompatiblePeers"/> from <see cref="ProcessMeshVersionHello"/>,
+    /// but embedded refuses inside <c>MeshPeerProxy</c> before any daemon-level exchange, so it
+    /// has to inform the engine directly.
+    /// </summary>
+    internal void MarkPeerIncompatible(string peerID, int theirMin, int theirMax)
+    {
+        if (string.IsNullOrEmpty(peerID)) return;
+        incompatiblePeers[peerID] = (theirMin, theirMax);
+    }
+
     private bool IsIncompatible(string peerID, int theirMin, int theirMax)
     {
         if (string.IsNullOrEmpty(peerID)) return false;
@@ -4375,7 +4387,10 @@ internal class MeshProtocolEngine
                 ConnectionState = context.ConnectionState.ToString(),
                 HostedRelayPairs = HostedRelayCount(),
                 LastError = lastError,
-                LastErrorKind = lastErrorKind
+                LastErrorKind = lastErrorKind,
+                MediationProtocolVersion = MediationProtocol.ClientVersion,
+                PeerProtocolMinVersion = MediationProtocol.PeerMinVersion,
+                PeerProtocolMaxVersion = MediationProtocol.PeerMaxVersion
             };
 
             // Snapshot shared collections to avoid cross-thread enumeration issues

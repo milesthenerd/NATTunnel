@@ -62,6 +62,18 @@ public class MeshState
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string LastErrorKind { get; set; }
 
+    /// <summary>Mediation-server wire version this daemon speaks.</summary>
+    [JsonPropertyName("mediationProtocolVersion")]
+    public int MediationProtocolVersion { get; set; }
+
+    /// <summary>Peer-to-peer wire version range this daemon supports (lower bound).</summary>
+    [JsonPropertyName("peerProtocolMinVersion")]
+    public int PeerProtocolMinVersion { get; set; }
+
+    /// <summary>Peer-to-peer wire version range this daemon supports (upper bound).</summary>
+    [JsonPropertyName("peerProtocolMaxVersion")]
+    public int PeerProtocolMaxVersion { get; set; }
+
     public MeshState()
     {
         ConnectedPeers = new List<ConnectedPeer>();
