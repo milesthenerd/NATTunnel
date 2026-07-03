@@ -34,7 +34,7 @@ public class MeshNode : IDisposable
     private readonly int mediationPort;
 
     private readonly Guid peerID;
-    private readonly KeyPair staticKeyPair;
+    private readonly byte[] staticPrivateKey;
 
     private MeshProtocolEngine engine;
     private EmbeddedMeshHost host;
@@ -190,16 +190,15 @@ public class MeshNode : IDisposable
 
         // Identity: persistent PeerID if supplied, otherwise fresh per session.
         this.peerID = config.PersistentPeerID ?? Guid.NewGuid();
-        // Persistent static keypair: not yet supported (Noise.NET 1.0 doesn't expose a way to
-        // construct a KeyPair from a raw private key, and rolling our own X25519 public-derive
-        // is non-trivial without BCL Curve25519 exposed). Tracked for a future polish pass.
         if (config.PersistentStaticPrivateKey != null)
         {
-            throw new NotSupportedException(
-                "MeshConfig.PersistentStaticPrivateKey is reserved for a future release. " +
-                "Leave it null to generate a fresh Noise static keypair each session.");
+            this.staticPrivateKey = (byte[])config.PersistentStaticPrivateKey.Clone();
         }
-        this.staticKeyPair = KeyPair.Generate();
+        else
+        {
+            using var kp = KeyPair.Generate();
+            this.staticPrivateKey = (byte[])kp.PrivateKey.Clone();
+        }
 
         this.nextLoopbackPort = config.LoopbackPortRangeStart;
     }
@@ -323,7 +322,7 @@ public class MeshNode : IDisposable
         bool isInitiator = string.Compare(peerID.ToString(), remotePeerID, StringComparison.Ordinal) > 0;
         var proxy = TryBuildProxyWithFreePort((ip, p) => new MeshPeerProxy(
             tunnel, p, config.HostGamePort,
-            staticKeyPair.PrivateKey, isInitiator, remotePeerID,
+            staticPrivateKey, isInitiator, remotePeerID,
             localIdentity: config.LocalIdentity,
             autoFragment: config.AutoFragment,
             PathMTU: config.PathMTU,
@@ -407,7 +406,7 @@ public class MeshNode : IDisposable
         var proxy = TryBuildProxyWithFreePort((ip, p) => new MeshPeerProxy(
             gatewayProxy.Tunnel,
             p, config.HostGamePort,
-            staticKeyPair.PrivateKey, isInitiator,
+            staticPrivateKey, isInitiator,
             $"{remotePeerID}@relay",
             relayDestinationMeshIP: remoteMeshIP,
             ownMeshIP: host.OwnMeshIP,
@@ -880,7 +879,7 @@ public class MeshNode : IDisposable
 
         try { host?.Dispose(); } catch { }
         try { udpClient?.Dispose(); } catch { }
-        try { staticKeyPair?.Dispose(); } catch { }
+        if (staticPrivateKey != null) Array.Clear(staticPrivateKey, 0, staticPrivateKey.Length);
 
         // Release the global Log sink we installed in the ctor so daemon usage in
         // the same process (rare but possible) doesn't keep routing into a torn-down
