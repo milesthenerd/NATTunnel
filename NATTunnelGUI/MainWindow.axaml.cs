@@ -27,6 +27,9 @@ public partial class MainWindow : Window
     // Suppress reverting to a plain "Disconnected" UI while the daemon is still spinning up
     // its real state (and answering /status with its initial Disconnected placeholder).
     private bool waitingForRealState;
+    // Track the last error text we already popped a dialog for, so the same error doesn't
+    // spam the user on every /status poll.
+    private string? lastShownError;
 
     public MainWindow()
     {
@@ -179,6 +182,25 @@ public partial class MainWindow : Window
                 }
             }
             PeerListView.ItemsSource = peerItems;
+
+            // Surface newly-reported daemon errors as a modal dialog. When the daemon clears
+            // its error (e.g. on reconnect attempt), reset our latch so the same error text
+            // popping up again fires the dialog again.
+            if (string.IsNullOrEmpty(state.LastError))
+            {
+                lastShownError = null;
+            }
+            else if (state.LastError != lastShownError)
+            {
+                lastShownError = state.LastError;
+                string title = state.LastErrorKind switch
+                {
+                    "VersionMismatch" => "NATTunnel Update Required",
+                    "AuthFailure" => "Authentication Failed",
+                    _ => "NATTunnel Error"
+                };
+                _ = DialogHelpers.ShowInfoAsync(this, title, state.LastError);
+            }
         }
         catch
         {

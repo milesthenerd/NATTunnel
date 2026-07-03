@@ -46,6 +46,22 @@ public class MeshState
     [JsonPropertyName("metrics")]
     public MeshMetrics Metrics { get; set; }
 
+    /// <summary>
+    /// Human-readable description of the last mesh error (auth failure, version rejection,
+    /// mediation connect failure, etc.). Null when there's no notable error to surface.
+    /// </summary>
+    [JsonPropertyName("lastError")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string LastError { get; set; }
+
+    /// <summary>
+    /// Classification of <see cref="LastError"/> so the GUI can decide how to present it.
+    /// Values: "VersionMismatch", "AuthFailure", "MediationUnreachable", "Other".
+    /// </summary>
+    [JsonPropertyName("lastErrorKind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string LastErrorKind { get; set; }
+
     public MeshState()
     {
         ConnectedPeers = new List<ConnectedPeer>();

@@ -1,4 +1,4 @@
-const { MessageTypes, StatusTypes, Config, NATTypes } = require('./constants');
+const { MessageTypes, StatusTypes, Config, NATTypes, MediationProtocol } = require('./constants');
 const { Buffer } = require('buffer');
 const fs = require('fs');
 const path = require('path');
@@ -507,6 +507,21 @@ class MessageHandler {
 
         if (!PeerID) {
             console.log('[MessageHandler] MeshJoinRequest missing PeerID');
+            return;
+        }
+
+        // Protocol version check. Grandfather clients that pre-date versioning as v1.
+        const clientVersion = message.ProtocolVersion || 1;
+        const min = MediationProtocol.MinSupportedClientVersion;
+        const max = MediationProtocol.MaxSupportedClientVersion;
+        if (clientVersion < min || clientVersion > max) {
+            const response = {
+                ID: MessageTypes.MeshJoinResponse,
+                NetworkID, PeerCount: 0, Peers: [],
+                VersionError: `Client protocol version ${clientVersion} is outside supported range [${min}, ${max}]. Please update NATTunnel.`
+            };
+            socket.write(Buffer.from(JSON.stringify(response)));
+            console.log(`[MessageHandler] Version rejected for peer ${PeerID}: client v${clientVersion} outside [${min},${max}]`);
             return;
         }
 

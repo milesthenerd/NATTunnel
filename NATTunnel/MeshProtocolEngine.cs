@@ -182,6 +182,11 @@ internal class MeshProtocolEngine
     // Track mesh startup time for uptime calculation in MeshState
     private DateTime meshStartTime = DateTime.UtcNow;
 
+    // Last user-facing error the engine hit. Surfaced via MeshState so the GUI can pop a
+    // dialog explaining what went wrong (version mismatch, bad secret, etc.).
+    private string lastError;
+    private string lastErrorKind;
+
     /// <summary>
     /// Daemon entry point. Defaults to <see cref="DaemonContext"/> + the WireGuard tunnel as
     /// host. Delegates to the context-aware overload after constructing the daemon context.
@@ -215,6 +220,11 @@ internal class MeshProtocolEngine
         this.udpClient = udpClient;
         this.udpProxy = udpProxy;
         this.peerID = peerID;
+
+        // Register the state provider early so /status returns the engine's real state
+        // (including lastError) even when the mediation handshake fails and we never reach
+        // the deeper Run initialization.
+        context.RegisterMeshStateProvider(GetMeshState);
 
         // Derive the values that used to be locals in Program.RunMeshMode.
         // localUdpPort is the UDP socket's bound port; mediation correlates incoming
@@ -315,8 +325,22 @@ internal class MeshProtocolEngine
                             // against a TCP stream it opened on its own.
                             if (!PerformProtocolHandshake())
                             {
-                                // Auth failure — fatal. Bail out of Run entirely.
-                                return;
+                                // Auth or version failure. Drop into idle instead of exiting so
+                                // the GUI can still poll /status and see the error we captured
+                                // in lastError before the user disconnects or updates.
+                                context.ConnectionState = MeshConnectionState.Disconnected;
+                                try { tcpClient?.Dispose(); } catch { }
+                                tcpClient = null; stream = null; earlyTcpRemainder = "";
+                                while (!context.ShutdownRequested && !context.ConnectRequested)
+                                    System.Threading.Thread.Sleep(100);
+                                context.ConnectRequested = false;
+                                context.ReloadConfig();
+                                endpoint = context.Options.MediationEndpoint;
+                                authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
+                                    Encoding.UTF8.GetBytes(context.Options.NetworkID + ":" + context.Options.NetworkSecret)));
+                                // Clear the error so a fresh reconnect attempt starts clean.
+                                lastError = null; lastErrorKind = null;
+                                continue;
                             }
                             handshakeDelay = 5; // Reset on success
                             break;
@@ -752,7 +776,8 @@ internal class MeshProtocolEngine
                                 PeerID = peerID.ToString(),
                                 NATType = detectedNatType,
                                 PrivateAddressString = meshIP,
-                                AuthToken = authToken
+                                AuthToken = authToken,
+                                ProtocolVersion = MediationProtocol.ClientVersion
                             };
                             string discoveryJson = discoveryRequest.Serialize();
                             byte[] discoveryBuffer = Encoding.ASCII.GetBytes(discoveryJson);
@@ -1336,7 +1361,8 @@ internal class MeshProtocolEngine
                                                 PeerID = peerID.ToString(),
                                                 NATType = detectedNatType,
                                                 PrivateAddressString = meshIP,
-                                                AuthToken = authToken
+                                                AuthToken = authToken,
+                                                ProtocolVersion = MediationProtocol.ClientVersion
                                             };
                                             byte[] rdBytes = Encoding.ASCII.GetBytes(rediscovery.Serialize());
                                             reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
@@ -1474,7 +1500,8 @@ internal class MeshProtocolEngine
                                             PeerID = peerID.ToString(),
                                             NATType = detectedNatType,
                                             PrivateAddressString = meshIP,
-                                            AuthToken = authToken
+                                            AuthToken = authToken,
+                                            ProtocolVersion = MediationProtocol.ClientVersion
                                         };
                                         byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                                         reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
@@ -1699,15 +1726,25 @@ internal class MeshProtocolEngine
             PeerID = peerID.ToString(),
             NATType = detectedNatType,
             PrivateAddressString = meshIP,
-            AuthToken = authToken
+            AuthToken = authToken,
+            ProtocolVersion = MediationProtocol.ClientVersion
         };
         byte[] sendBuffer = Encoding.ASCII.GetBytes(joinRequest.Serialize());
         stream.Write(sendBuffer, 0, sendBuffer.Length);
 
         joinResponse = ReadOneTcpMessage();
+        if (!string.IsNullOrEmpty(joinResponse.VersionError))
+        {
+            context.Log(LogLevel.Error, $"[Mesh] Mediation server rejected protocol version: {joinResponse.VersionError}");
+            lastError = joinResponse.VersionError;
+            lastErrorKind = "VersionMismatch";
+            return false;
+        }
         if (!string.IsNullOrEmpty(joinResponse.AuthToken))
         {
-            Console.Error.WriteLine($"[Mesh] Authentication failed: {joinResponse.AuthToken}");
+            context.Log(LogLevel.Error, $"[Mesh] Authentication failed: {joinResponse.AuthToken}");
+            lastError = joinResponse.AuthToken;
+            lastErrorKind = "AuthFailure";
             return false;
         }
 
@@ -3640,7 +3677,8 @@ internal class MeshProtocolEngine
                     PeerID = peerID.ToString(),
                     NATType = detectedNatType,
                     PrivateAddressString = meshIP,
-                    AuthToken = authToken
+                    AuthToken = authToken,
+                    ProtocolVersion = MediationProtocol.ClientVersion
                 };
                 byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                 reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
@@ -3812,7 +3850,8 @@ internal class MeshProtocolEngine
                         PeerID = peerID.ToString(),
                         NATType = detectedNatType,
                         PrivateAddressString = meshIP,
-                        AuthToken = authToken
+                        AuthToken = authToken,
+                        ProtocolVersion = MediationProtocol.ClientVersion
                     };
                     byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                     stream.Write(joinBytes, 0, joinBytes.Length);
@@ -4144,7 +4183,9 @@ internal class MeshProtocolEngine
                 IntroducerMeshIP = introducerMeshIP,
                 UptimeSeconds = (long)(DateTime.UtcNow - meshStartTime).TotalSeconds,
                 ConnectionState = context.ConnectionState.ToString(),
-                HostedRelayPairs = HostedRelayCount()
+                HostedRelayPairs = HostedRelayCount(),
+                LastError = lastError,
+                LastErrorKind = lastErrorKind
             };
 
             // Snapshot shared collections to avoid cross-thread enumeration issues

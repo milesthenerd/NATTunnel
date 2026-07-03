@@ -185,6 +185,21 @@ internal class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string AuthToken { get; set; }
+
+    /// <summary>
+    /// Mediation protocol version the client was built for. Sent by the client in
+    /// MeshJoinRequest; the server compares it against its supported range and rejects if
+    /// out of window. Absent on messages older than protocol v1 (treated as v1 by the server).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int ProtocolVersion { get; set; }
+
+    /// <summary>
+    /// Set on MeshJoinResponse when the server rejects the client's ProtocolVersion. Human-readable;
+    /// includes the server's supported range so the client can display an actionable message.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string VersionError { get; set; }
     public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;

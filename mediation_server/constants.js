@@ -58,6 +58,14 @@ const StatusTypes = {
     Busy: 1
 };
 
+// Client<->mediation-server wire-format compatibility window.
+// A client's `ProtocolVersion` field must be within [MIN, MAX] on MeshJoinRequest;
+// otherwise the server rejects the join with `VersionError` set on the response.
+const MediationProtocol = {
+    MinSupportedClientVersion: 1,
+    MaxSupportedClientVersion: 1
+};
+
 // Server configuration
 const Config = {
     TCP_PORT: 6510,
@@ -93,5 +101,6 @@ module.exports = {
     NATTypes,
     MessageTypes,
     StatusTypes,
-    Config
+    Config,
+    MediationProtocol
 };
