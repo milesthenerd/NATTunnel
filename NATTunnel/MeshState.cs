@@ -74,6 +74,23 @@ public class MeshState
     [JsonPropertyName("peerProtocolMaxVersion")]
     public int PeerProtocolMaxVersion { get; set; }
 
+    /// <summary>This node's own identity fingerprint (SHA-256(pubkey)[..8] hex). Users share this
+    /// with peers who want to block them; GUIs display it as the "who am I" identifier.</summary>
+    [JsonPropertyName("ownFingerprint")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string OwnFingerprint { get; set; }
+
+    /// <summary>Currently-blocked peer fingerprints. Live snapshot — the GUI's Firewall pane
+    /// renders this list and posts to /blocks to mutate it.</summary>
+    [JsonPropertyName("blockedFingerprints")]
+    public List<string> BlockedFingerprints { get; set; } = new();
+
+    /// <summary>Peers seen within the recently-seen window (connected now or briefly gone). Powers
+    /// the Firewall pane's "known peers" list — users need a small grace window to catch a peer
+    /// they want to block right after they leave.</summary>
+    [JsonPropertyName("knownPeers")]
+    public List<KnownPeer> KnownPeers { get; set; } = new();
+
     public MeshState()
     {
         ConnectedPeers = new List<ConnectedPeer>();
@@ -124,6 +141,39 @@ public class MeshState
         /// </summary>
         [JsonPropertyName("peerProtocolVersion")]
         public int PeerProtocolVersion { get; set; } = -1;
+
+        /// <summary>
+        /// SHA-256(identityPublicKey)[..8] hex. Null when the peer hasn't advertised an identity
+        /// key yet (older build, or key not yet echoed through mediation). GUIs use this as the
+        /// argument to the Block action.
+        /// </summary>
+        [JsonPropertyName("fingerprint")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Fingerprint { get; set; }
+    }
+
+    /// <summary>
+    /// A peer we've seen recently — connected right now, or gone but within the recently-seen
+    /// window. Populates the Firewall pane so users can block someone who was here a moment ago.
+    /// </summary>
+    public class KnownPeer
+    {
+        [JsonPropertyName("meshIP")]
+        public string MeshIP { get; set; }
+
+        [JsonPropertyName("peerID")]
+        public string PeerID { get; set; }
+
+        /// <summary>SHA-256(identityPublicKey)[..8] hex. Null if the peer's identity hasn't been
+        /// echoed through mediation yet (older client) — GUI greys out the Block action in that case.</summary>
+        [JsonPropertyName("fingerprint")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string Fingerprint { get; set; }
+
+        /// <summary>True when this peer currently has an active tunnel; false when they're in the
+        /// grace window after disconnect. GUI can render active peers distinctly if it wants.</summary>
+        [JsonPropertyName("isConnected")]
+        public bool IsConnected { get; set; }
     }
 
     /// <summary>

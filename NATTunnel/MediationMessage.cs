@@ -208,6 +208,17 @@ internal class MediationMessage
     /// <summary>MeshVersionHello: upper bound of the sender's supported peer-protocol range.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int PeerMaxVersion { get; set; }
+
+    /// <summary>
+    /// 32-byte Curve25519 identity public key of the peer this message describes, base64-encoded.
+    /// Carried by MeshJoinRequest (sender advertises own identity), MeshJoinResponse.Peers/OtherPeers
+    /// entries (each existing peer's identity), MeshIntroduceRequest (new joiner's identity),
+    /// and MeshConnectionBegin/ConnectionBegin (the other peer's identity). Consumers derive a
+    /// fingerprint via SHA-256[..8] and cross-check against their local block list.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string IdentityPublicKey { get; set; }
+
     public MediationMessage(MediationMessageType id = 0)
     {
         ID = id;

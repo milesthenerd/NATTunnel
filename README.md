@@ -143,6 +143,34 @@ node.Start();
 await Task.Delay(-1);
 ```
 
+## Peer block example
+
+```csharp
+using var node = new MeshNode(new MeshConfig
+{
+    NetworkID = "my-game-lobby-42",
+    NetworkSecret = "shared-secret",
+    MediationEndpoint = "sync.milesthenerd.net:6510",
+    HostGamePort = 62123,
+    PersistentStaticPrivateKey = LoadFromStorage(),   // 32 bytes
+    PersistentBlockedFingerprints = LoadBlocksFromStorage(),
+});
+
+// Persist blocks whenever they change
+node.BlockListChanged += () => SaveToStorage(node.BlockedFingerprints);
+
+// Show the user their own fingerprint
+Console.WriteLine($"My fingerprint: {node.Fingerprint}");
+
+node.Start();
+
+// Later, when the user chooses to block someone
+node.BlockPeer(peer.Fingerprint);
+
+// If you want to unblock a peer
+node.UnblockPeer(peer.Fingerprint)
+```
+
 ## What you get
 
 - **Direct UDP connectivity to every peer in the mesh**, even across symmetric NAT and CGNAT (via the introducer-driven hole-punching protocol).

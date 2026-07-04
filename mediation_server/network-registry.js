@@ -43,7 +43,7 @@ class NetworkRegistry {
      * @param {string} meshIP - Peer's mesh IP address (optional)
      * @returns {object[]} List of other peers in the same network
      */
-    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1) {
+    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1, identityPublicKey = null) {
         if (!networkID || !peerID) {
             throw new Error('networkID and peerID are required');
         }
@@ -74,6 +74,7 @@ class NetworkRegistry {
             existingPeer.localPort = localPort;
             existingPeer.peerMinVersion = peerMinVersion;
             existingPeer.peerMaxVersion = peerMaxVersion;
+            existingPeer.identityPublicKey = identityPublicKey;
             existingPeer.joinTime = Date.now();
         } else {
             // Add new peer
@@ -87,6 +88,7 @@ class NetworkRegistry {
                 localPort,
                 peerMinVersion,
                 peerMaxVersion,
+                identityPublicKey,
                 joinTime: Date.now()
             });
             console.log(`[NetworkRegistry] Peer ${peerID} joined network ${networkID} (meshIP: ${meshIP}, total active: ${network.size})`);
@@ -102,6 +104,7 @@ class NetworkRegistry {
             localPort,
             peerMinVersion,
             peerMaxVersion,
+            identityPublicKey,
             connected: true,
             joinTime: Date.now()
         });
@@ -118,7 +121,8 @@ class NetworkRegistry {
                     localIP: peer.localIP,
                     localPort: peer.localPort,
                     peerMinVersion: peer.peerMinVersion,
-                    peerMaxVersion: peer.peerMaxVersion
+                    peerMaxVersion: peer.peerMaxVersion,
+                    identityPublicKey: peer.identityPublicKey
                 });
             }
         }
@@ -178,6 +182,10 @@ class NetworkRegistry {
         const now = Date.now();
         const STALE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes — remove peers disconnected longer than this
         const staleIDs = [];
+        // Cross-check against the active-network map: any meshMember marked connected but not
+        // in the active network map (which is authoritative for "has a live socket right now")
+        // had its disconnect handler skipped somehow — self-heal by treating it as disconnected.
+        const activeNetwork = this.networks.get(networkID);
 
         const result = [];
         for (const [id, member] of members.entries()) {
@@ -187,6 +195,23 @@ class NetworkRegistry {
             if (!member.connected && member.disconnectedAt && (now - member.disconnectedAt) > STALE_TIMEOUT_MS) {
                 staleIDs.push(id);
                 continue;
+            }
+            // Self-heal: catch a disconnected member that never got its disconnectedAt stamped
+            // (rejoin/leaveNetwork race, or crashed peer whose socket never fired 'close').
+            // Without the stamp, the stale-prune above won't fire and the peer sticks forever.
+            if (!member.connected && !member.disconnectedAt) {
+                console.warn(`[NetworkRegistry] Peer ${id} in ${networkID} disconnected without a timestamp — stamping now`);
+                member.disconnectedAt = now;
+            }
+            // Self-heal: if the member claims connected: true but isn't in the active network
+            // map, the socket-close handler was skipped. Mark them disconnected so the stale
+            // timer eventually fires. Being conservative — only flip if the active map exists
+            // and the peer is genuinely absent from it (not a race with a network we just
+            // deleted for being empty).
+            if (member.connected && activeNetwork && !activeNetwork.has(id)) {
+                console.warn(`[NetworkRegistry] Peer ${id} in ${networkID} marked connected but absent from active network — marking disconnected`);
+                member.connected = false;
+                member.disconnectedAt = now;
             }
 
             result.push({
@@ -198,6 +223,7 @@ class NetworkRegistry {
                 localPort: member.localPort,
                 peerMinVersion: member.peerMinVersion,
                 peerMaxVersion: member.peerMaxVersion,
+                identityPublicKey: member.identityPublicKey,
                 connected: member.connected
             });
         }
@@ -301,7 +327,8 @@ class NetworkRegistry {
             endpoint: peer.endpoint,
             natType: peer.natType,
             peerMinVersion: peer.peerMinVersion,
-            peerMaxVersion: peer.peerMaxVersion
+            peerMaxVersion: peer.peerMaxVersion,
+            identityPublicKey: peer.identityPublicKey
         }));
     }
 

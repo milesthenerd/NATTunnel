@@ -48,6 +48,9 @@ public static class Program
         UptimeSeconds = 0,
     };
 
+    /// <summary>Populated by RunMeshMode once the engine is running; /blocks endpoints use this.</summary>
+    internal static MeshProtocolEngine meshEngine;
+
     /// <summary>
     /// Optional sink that intercepts all <see cref="Log(string)"/> and
     /// <see cref="Log(LogLevel, string)"/> calls. When set (typically by the embedded
@@ -82,6 +85,22 @@ public static class Program
     {
         byte[] hash = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(networkID ?? ""));
         return "nt-" + Convert.ToHexString(hash, 0, 4).ToLowerInvariant();
+    }
+
+    /// <summary>Validate and normalize a block-list fingerprint. Returns the lowercase hex form
+    /// if it's exactly 16 hex chars (SHA-256(pubkey)[..8] hex), else null. Rejects anything else
+    /// so a malicious client can't poison the block set with junk that never matches anything.</summary>
+    private static string NormalizeFingerprint(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        string trimmed = raw.Trim();
+        if (trimmed.Length != 16) return null;
+        foreach (char c in trimmed)
+        {
+            bool isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!isHex) return null;
+        }
+        return trimmed.ToLowerInvariant();
     }
 
     public static void Main(string[] args)
@@ -294,6 +313,98 @@ public static class Program
                                     context.Response.OutputStream.Close();
                                 }
                             }
+                            else if (method == "GET" && rawUrl == "/blocks")
+                            {
+                                var list = meshEngine?.BlockedFingerprints ?? Array.Empty<string>();
+                                string json = System.Text.Json.JsonSerializer.Serialize(list);
+                                byte[] resp = Encoding.UTF8.GetBytes(json);
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = resp.Length;
+                                context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "POST" && rawUrl == "/blocks")
+                            {
+                                // Cap body at 1 KB — a fingerprint payload is ~40 bytes.
+                                // Prevents a malicious/broken client from streaming huge JSON at us.
+                                const int MaxBodyBytes = 1024;
+                                byte[] bodyBuf = new byte[MaxBodyBytes + 1];
+                                int totalRead = 0;
+                                int n;
+                                while ((n = context.Request.InputStream.Read(bodyBuf, totalRead, bodyBuf.Length - totalRead)) > 0)
+                                {
+                                    totalRead += n;
+                                    if (totalRead > MaxBodyBytes) break;
+                                }
+                                if (totalRead > MaxBodyBytes)
+                                {
+                                    context.Response.StatusCode = 413; // payload too large
+                                    context.Response.OutputStream.Close();
+                                }
+                                else
+                                {
+                                    string body = Encoding.UTF8.GetString(bodyBuf, 0, totalRead);
+                                    string fingerprint = null;
+                                    try
+                                    {
+                                        using var doc = System.Text.Json.JsonDocument.Parse(body);
+                                        if (doc.RootElement.TryGetProperty("fingerprint", out var fpEl) && fpEl.ValueKind == System.Text.Json.JsonValueKind.String)
+                                            fingerprint = fpEl.GetString();
+                                    }
+                                    catch { /* fall through — 400 below */ }
+                                    string normalized = NormalizeFingerprint(fingerprint);
+                                    if (normalized == null)
+                                    {
+                                        context.Response.StatusCode = 400;
+                                        context.Response.OutputStream.Close();
+                                    }
+                                    else
+                                    {
+                                        // The engine's BlockedFingerprints set IS TunnelOptions.BlockedFingerprints
+                                        // (shared reference), so a single mutation via the engine covers both
+                                        // and also triggers the endpoint/IP filter population + live-tunnel
+                                        // teardown. Adding to TunnelOptions first is a no-op afterwards.
+                                        meshEngine?.AddBlockedFingerprint(normalized);
+                                        TunnelOptions.BlockedFingerprints.Add(normalized);
+                                        Config.SaveBlockedFingerprints(TunnelOptions.BlockedFingerprints);
+                                        byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"blocked\"}");
+                                        context.Response.ContentType = "application/json";
+                                        context.Response.ContentLength64 = resp.Length;
+                                        context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                        context.Response.OutputStream.Close();
+                                    }
+                                }
+                            }
+                            else if (method == "DELETE" && rawUrl.StartsWith("/blocks/"))
+                            {
+                                string rawFingerprint = rawUrl.Substring("/blocks/".Length);
+                                // URL-decode first — a GUI/CLI that URL-encodes the fingerprint would
+                                // otherwise pass literal '%XX' sequences that fail the hex check.
+                                try { rawFingerprint = Uri.UnescapeDataString(rawFingerprint); } catch { }
+                                string normalized = NormalizeFingerprint(rawFingerprint);
+                                if (normalized == null)
+                                {
+                                    context.Response.StatusCode = 400;
+                                    context.Response.OutputStream.Close();
+                                }
+                                else
+                                {
+                                    // Order matters: RemoveBlockedFingerprint on the engine mutates
+                                    // TunnelOptions.BlockedFingerprints (they share a reference) AND
+                                    // triggers the blockedEndpoints/blockedIPs cleanup. If we removed
+                                    // from TunnelOptions first, the engine's Remove would return false
+                                    // and the cleanup would skip, leaving stale IP filters that silently
+                                    // drop packets from the unblocked peer forever.
+                                    meshEngine?.RemoveBlockedFingerprint(normalized);
+                                    TunnelOptions.BlockedFingerprints.Remove(normalized);
+                                    Config.SaveBlockedFingerprints(TunnelOptions.BlockedFingerprints);
+                                    byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"unblocked\"}");
+                                    context.Response.ContentType = "application/json";
+                                    context.Response.ContentLength64 = resp.Length;
+                                    context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                    context.Response.OutputStream.Close();
+                                }
+                            }
                             else if (method == "POST" && rawUrl == "/shutdown")
                             {
                                 ShutdownRequested = true;
@@ -385,7 +496,17 @@ public static class Program
             // Retries indefinitely on failure — WireGuard is already initialized above
             // and MUST NOT be recreated (native memory leak).
 
+            // Ensure a persistent identity key exists — auto-generate on first run.
+            if (TunnelOptions.IdentityPrivateKey == null)
+            {
+                using var kp = Noise.KeyPair.Generate();
+                TunnelOptions.IdentityPrivateKey = (byte[])kp.PrivateKey.Clone();
+                Config.SaveIdentityKey(TunnelOptions.IdentityPrivateKey);
+                Log("[Mesh] Generated new persistent identity key");
+            }
+
             MeshProtocolEngine engine = new MeshProtocolEngine();
+            meshEngine = engine;
             engine.Run(wireguardTunnel, meshIP, udpClient, udpProxy, peerID);
 
         }

@@ -272,6 +272,12 @@ public partial class MainWindow : Window
         settingsWindow.ShowDialog(this);
     }
 
+    private void Firewall_Click(object? sender, RoutedEventArgs e)
+    {
+        var firewallWindow = new FirewallWindow();
+        firewallWindow.ShowDialog(this);
+    }
+
     private async void StopRelaying_Click(object? sender, RoutedEventArgs e)
     {
         StopRelayingButton.IsEnabled = false;

@@ -432,7 +432,8 @@ class MessageHandler {
                 PrivateAddressString: targetPeer ? targetPeer.meshIP : null,  // Peer's mesh IP
                 PeerID: targetSocket.clientID,  // Target peer's ID so client can track pending requests
                 PeerMinVersion: targetPeer ? targetPeer.peerMinVersion : undefined,
-                PeerMaxVersion: targetPeer ? targetPeer.peerMaxVersion : undefined
+                PeerMaxVersion: targetPeer ? targetPeer.peerMaxVersion : undefined,
+                IdentityPublicKey: targetPeer ? targetPeer.identityPublicKey : undefined
             };
 
             socket.write(Buffer.from(JSON.stringify(clientMessage)));
@@ -449,7 +450,8 @@ class MessageHandler {
                 PrivateAddressString: clientPeer ? clientPeer.meshIP : null,  // Initiating peer's mesh IP
                 PeerID: clientSocketInfo.clientID,  // Initiating peer's ID so target can track pending requests
                 PeerMinVersion: clientPeer ? clientPeer.peerMinVersion : undefined,
-                PeerMaxVersion: clientPeer ? clientPeer.peerMaxVersion : undefined
+                PeerMaxVersion: clientPeer ? clientPeer.peerMaxVersion : undefined,
+                IdentityPublicKey: clientPeer ? clientPeer.identityPublicKey : undefined
             };
 
             targetSocket.socket.write(Buffer.from(JSON.stringify(serverMessage)));
@@ -520,6 +522,9 @@ class MessageHandler {
         // Peer-to-peer protocol range this client supports. Grandfathered to v1
         const peerMinVersion = message.PeerMinVersion || 1;
         const peerMaxVersion = message.PeerMaxVersion || 1;
+        // Stable identity public key (base64 32-byte Curve25519). Null for pre-block clients;
+        // block enforcement is opt-in, so null just means their fingerprint can't be advertised.
+        const identityPublicKey = message.IdentityPublicKey || null;
 
         if (!NetworkID) {
             console.log('[MessageHandler] MeshJoinRequest missing NetworkID');
@@ -689,7 +694,8 @@ class MessageHandler {
                 socketInfo.localIP,    // LAN IP for same-NAT detection
                 socketInfo.localPort,  // Local UDP port
                 peerMinVersion,        // Peer-to-peer protocol range advertised by this client
-                peerMaxVersion
+                peerMaxVersion,
+                identityPublicKey      // Base64 X25519 identity pubkey for block fingerprinting
             );
 
             console.log(`[MessageHandler] Peer ${PeerID} joined network ${NetworkID} (${otherPeers.length} active peers)`);
@@ -742,6 +748,7 @@ class MessageHandler {
                         meshIP: p.meshIP,
                         peerMinVersion: p.peerMinVersion,
                         peerMaxVersion: p.peerMaxVersion,
+                        identityPublicKey: p.identityPublicKey,
                         joinTime: Date.now()
                     });
                 }
@@ -818,7 +825,8 @@ class MessageHandler {
                     natType: introducer.natType,
                     meshIP: introducer.meshIP,
                     peerMinVersion: introducer.peerMinVersion,
-                    peerMaxVersion: introducer.peerMaxVersion
+                    peerMaxVersion: introducer.peerMaxVersion,
+                    identityPublicKey: introducer.identityPublicKey
                 });
             }
 
@@ -848,6 +856,7 @@ class MessageHandler {
                         LocalPort: socketInfo.localPort,   // New peer's local UDP port
                         PeerMinVersion: peerMinVersion,    // New peer's peer-to-peer protocol range
                         PeerMaxVersion: peerMaxVersion,
+                        IdentityPublicKey: identityPublicKey,
                         OtherPeers: peersToIntroduce  // Peers to forward the introduction to (may be empty)
                     };
                     introducerPeer.socket.write(Buffer.from(JSON.stringify(introduceRequest)));
@@ -862,7 +871,8 @@ class MessageHandler {
                             localIP: socketInfo.localIP,
                             localPort: socketInfo.localPort,
                             peerMinVersion,
-                            peerMaxVersion
+                            peerMaxVersion,
+                            identityPublicKey
                         },
                         peersToIntroduce,
                         introducerPeerID: introducer.peerID,
@@ -1041,6 +1051,7 @@ class MessageHandler {
                                 meshIP: m.meshIP,
                                 peerMinVersion: m.peerMinVersion,
                                 peerMaxVersion: m.peerMaxVersion,
+                                identityPublicKey: m.identityPublicKey,
                                 joinTime: Date.now()
                             });
                         }
@@ -1070,6 +1081,7 @@ class MessageHandler {
                 LocalPort: pending.newPeerInfo.localPort,
                 PeerMinVersion: pending.newPeerInfo.peerMinVersion,
                 PeerMaxVersion: pending.newPeerInfo.peerMaxVersion,
+                IdentityPublicKey: pending.newPeerInfo.identityPublicKey,
                 OtherPeers: remainingPeers
             };
 

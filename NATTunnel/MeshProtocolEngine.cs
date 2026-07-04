@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -95,7 +96,291 @@ internal class MeshProtocolEngine
     /// a peer that upgrades and advertises a new range gets re-evaluated instead of staying blocked.
     /// Cleared on disconnect/rejoin.</summary>
     private readonly ConcurrentDictionary<string, (int min, int max)> incompatiblePeers = new();
-    private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion)> peerInfoByMeshIP = new();
+
+    /// <summary>32-byte Curve25519 private key backing this node's stable identity. Set once via
+    /// <see cref="Run"/>; not mutated during the session. Derived pubkey feeds <see cref="ownIdentityPublicKey"/>.</summary>
+    private byte[] identityPrivateKey;
+    /// <summary>32-byte Curve25519 public key computed from <see cref="identityPrivateKey"/>. Sent in
+    /// join requests / MeshConnectionBegin so peers can identify each other for block filtering.</summary>
+    private byte[] ownIdentityPublicKey;
+    /// <summary>Peers this node has blocked, keyed by SHA-256(pubkey)[..8] hex fingerprint. Live
+    /// reference — the host mutates this via <see cref="AddBlockedFingerprint"/>/<see cref="RemoveBlockedFingerprint"/>
+    /// and changes take effect immediately without waiting for a reconnect.</summary>
+    private HashSet<string> blockedFingerprints;
+    private readonly object blockedFingerprintsLock = new();
+    /// <summary>Endpoints (IP:port strings) of currently-blocked peers, cached at block time and
+    /// checked in the shared UDP dispatcher so stray hole-punch packets from a blocked peer get
+    /// dropped before hitting any Tunnel. Belt-and-suspenders against RemoveDeadPeer missing a
+    /// tunnel whose connID isn't in peerMeshIPs.</summary>
+    private readonly ConcurrentDictionary<string, bool> blockedEndpoints = new();
+    /// <summary>IPs (not IP:port) of currently-blocked peers. Symmetric peers allocate a distinct
+    /// external port for each destination, so a fresh reconnect attempt will arrive from an
+    /// unblocked port even though the source machine is the same. Filtering by IP alone catches
+    /// those stray probes at the dispatcher. Populated alongside <see cref="blockedEndpoints"/>.</summary>
+    private readonly ConcurrentDictionary<string, bool> blockedIPs = new();
+
+    /// <summary>
+    /// X25519 scalar-basepoint multiply — derive a Curve25519 public key from its private half.
+    /// </summary>
+    internal static byte[] DeriveIdentityPublicKey(byte[] privateKey)
+    {
+        if (privateKey == null || privateKey.Length != 32)
+            throw new ArgumentException("Identity private key must be 32 bytes.", nameof(privateKey));
+        var priv = new Org.BouncyCastle.Crypto.Parameters.X25519PrivateKeyParameters(privateKey, 0);
+        return priv.GeneratePublicKey().GetEncoded();
+    }
+
+    /// <summary>
+    /// SHA-256(pubkey) truncated to 8 bytes, hex-encoded. Human-manageable identifier for block
+    /// lists — 16 chars, collision-resistant for realistic mesh sizes.
+    /// </summary>
+    internal static string ComputeFingerprint(byte[] publicKey)
+    {
+        if (publicKey == null || publicKey.Length == 0) return null;
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(publicKey, hash);
+        return Convert.ToHexString(hash[..8]).ToLowerInvariant();
+    }
+
+    /// <summary>SHA-256(pubkey)[..8] hex of our own identity key, or null pre-Run.</summary>
+    internal string OwnFingerprint => ownIdentityPublicKey != null ? ComputeFingerprint(ownIdentityPublicKey) : null;
+
+    /// <summary>Fingerprint of the peer at <paramref name="meshIP"/>, or null if we don't know
+    /// their identity yet (identity hasn't been echoed via mediation, or the peer is on an older
+    /// build that doesn't advertise one). Live — updates as the identity is filled in.</summary>
+    internal string GetPeerFingerprintByMeshIP(string meshIP)
+    {
+        if (string.IsNullOrEmpty(meshIP)) return null;
+        if (!peerInfoByMeshIP.TryGetValue(meshIP, out var info) || string.IsNullOrEmpty(info.identityPublicKey))
+            return null;
+        try { return ComputeFingerprint(Convert.FromBase64String(info.identityPublicKey)); }
+        catch { return null; }
+    }
+
+    /// <summary>Base64 of our own identity public key, ready to drop into <see cref="MediationMessage.IdentityPublicKey"/>. Null pre-Run.</summary>
+    private string OwnIdentityPublicKeyB64 => ownIdentityPublicKey != null ? Convert.ToBase64String(ownIdentityPublicKey) : null;
+
+    /// <summary>Snapshot of currently-blocked fingerprints. Safe to iterate without external locking.</summary>
+    internal IReadOnlyCollection<string> BlockedFingerprints
+    {
+        get { lock (blockedFingerprintsLock) return blockedFingerprints?.ToArray() ?? Array.Empty<string>(); }
+    }
+
+    /// <summary>Add a fingerprint to the block list. Takes effect immediately on all enforcement sites
+    /// and actively tears down any live tunnel to a peer that matches — user expectation is that
+    /// clicking Block disconnects the peer now, not on next reconnect. Also records the peer's
+    /// last-known endpoint in <see cref="blockedEndpoints"/> so the shared UDP dispatcher can drop
+    /// stray packets from that source (mediation-brokered hole-punch retries, orphan tunnels, etc.).</summary>
+    internal void AddBlockedFingerprint(string fingerprint)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint)) return;
+        string normalized = fingerprint.Trim().ToLowerInvariant();
+        lock (blockedFingerprintsLock) blockedFingerprints?.Add(normalized);
+
+        // Sweep peerInfoByMeshIP for anyone matching the fingerprint, cache their endpoints for
+        // packet-level dropping, and tear their tunnel down.
+        var matches = new List<string>();
+        foreach (var kv in peerInfoByMeshIP)
+        {
+            if (string.IsNullOrEmpty(kv.Value.identityPublicKey)) continue;
+            try
+            {
+                if (ComputeFingerprint(Convert.FromBase64String(kv.Value.identityPublicKey)) == normalized)
+                {
+                    matches.Add(kv.Key);
+                    if (!string.IsNullOrEmpty(kv.Value.endpoint))
+                    {
+                        blockedEndpoints[kv.Value.endpoint] = true;
+                        // Also cache the source IP alone. Symmetric peers vary their external port
+                        // per-destination, so subsequent hole-punch attempts land from a fresh port
+                        // that the endpoint-precise blocklist doesn't cover.
+                        int colonIdx = kv.Value.endpoint.LastIndexOf(':');
+                        if (colonIdx > 0)
+                            blockedIPs[kv.Value.endpoint.Substring(0, colonIdx)] = true;
+                    }
+                }
+            }
+            catch { }
+        }
+        foreach (var meshIP in matches)
+        {
+            context.Log(LogLevel.Info, $"[Mesh] Blocking {meshIP} — tearing down live tunnel");
+            RemoveDeadPeer(meshIP);
+        }
+    }
+
+    /// <summary>Set to true by <see cref="RemoveBlockedFingerprint"/> whenever an unblock happens.
+    /// The primary loop picks this up and re-sends a MeshJoinRequest to mediation so the server
+    /// knows to broadcast a fresh MeshIntroduceRequest for us — otherwise the previously-blocked
+    /// peer stays absent from our WireGuard peer set (we tore them down at block time) and no
+    /// new introduction fires until one side rejoins entirely.</summary>
+    private volatile bool rediscoveryRequestedAfterUnblock;
+
+    /// <summary>Remove a fingerprint from the block list. Also drops any cached endpoints that
+    /// were pointing to the newly-unblocked peer so the dispatcher stops filtering their packets.</summary>
+    internal bool RemoveBlockedFingerprint(string fingerprint)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint)) return false;
+        string normalized = fingerprint.Trim().ToLowerInvariant();
+        bool removed;
+        lock (blockedFingerprintsLock) removed = blockedFingerprints?.Remove(normalized) ?? false;
+        if (removed)
+        {
+            // Rebuild blockedEndpoints from remaining blocked fingerprints — cheaper than tracking
+            // reverse mappings and safer than trying to match by fingerprint at unblock time.
+            var stillBlocked = new HashSet<string>();
+            lock (blockedFingerprintsLock)
+            {
+                if (blockedFingerprints != null)
+                    foreach (var fp in blockedFingerprints) stillBlocked.Add(fp);
+            }
+            var keep = new HashSet<string>();
+            var keepIPs = new HashSet<string>();
+            foreach (var kv in peerInfoByMeshIP)
+            {
+                if (string.IsNullOrEmpty(kv.Value.identityPublicKey) || string.IsNullOrEmpty(kv.Value.endpoint)) continue;
+                try
+                {
+                    string fp = ComputeFingerprint(Convert.FromBase64String(kv.Value.identityPublicKey));
+                    if (stillBlocked.Contains(fp))
+                    {
+                        keep.Add(kv.Value.endpoint);
+                        int colonIdx = kv.Value.endpoint.LastIndexOf(':');
+                        if (colonIdx > 0) keepIPs.Add(kv.Value.endpoint.Substring(0, colonIdx));
+                    }
+                }
+                catch { }
+            }
+            foreach (var ep in blockedEndpoints.Keys.ToArray())
+                if (!keep.Contains(ep)) blockedEndpoints.TryRemove(ep, out _);
+            foreach (var ip in blockedIPs.Keys.ToArray())
+                if (!keepIPs.Contains(ip)) blockedIPs.TryRemove(ip, out _);
+            // Flag rediscovery so the main loop nudges mediation. We tore the unblocked peer's
+            // WG registration down at block time, so nothing on our side will spontaneously
+            // rebuild the tunnel — we need mediation to broadcast a fresh introduction.
+            rediscoveryRequestedAfterUnblock = true;
+        }
+        return removed;
+    }
+
+    /// <summary>True if <paramref name="publicKey"/> resolves to a fingerprint on our block list.</summary>
+    private bool IsBlocked(byte[] publicKey)
+    {
+        if (publicKey == null || publicKey.Length == 0) return false;
+        string fp = ComputeFingerprint(publicKey);
+        lock (blockedFingerprintsLock) return blockedFingerprints != null && blockedFingerprints.Contains(fp);
+    }
+
+    /// <summary>True if the peer identified by <paramref name="publicKeyBase64"/> is blocked.</summary>
+    private bool IsBlocked(string publicKeyBase64)
+    {
+        if (string.IsNullOrEmpty(publicKeyBase64)) return false;
+        try { return IsBlocked(Convert.FromBase64String(publicKeyBase64)); }
+        catch { return false; }
+    }
+    private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion, string identityPublicKey)> peerInfoByMeshIP = new();
+
+    /// <summary>Peers we've seen within the recent-past window — powers the Firewall pane's
+    /// "known peers" list so users can block someone who was here a moment ago but isn't now.
+    /// Keyed by mesh IP; value is (peerID, fingerprint, lastSeen). Pruned in
+    /// <see cref="GetMeshState"/>. Fingerprint is cached here so the Block button stays enabled
+    /// during the 15-min grace after RemoveDeadPeer clears peerInfoByMeshIP — otherwise the peer
+    /// briefly appears as "no fingerprint yet" and can't be blocked in the window the user cares
+    /// about most (right after they left).</summary>
+    private readonly ConcurrentDictionary<string, (string peerID, string fingerprint, DateTime lastSeen)> recentlySeenPeers = new();
+    private static readonly TimeSpan RecentlySeenWindow = TimeSpan.FromMinutes(15);
+    private const int RecentlySeenCap = 50;
+
+    /// <summary>Touch a peer in the recently-seen tracker whenever we cache their info. Called
+    /// from all <see cref="peerInfoByMeshIP"/> write sites so peers who briefly appeared stay
+    /// visible in the Firewall pane for a grace window.</summary>
+    private void MarkRecentlySeen(string meshIP, string peerID)
+    {
+        if (string.IsNullOrEmpty(meshIP) || meshIP == this.meshIP) return;
+        // Preserve any previously-cached fingerprint. We may be called from a write path that
+        // doesn't have identityPublicKey (heartbeat roster fallback, ack), and losing a
+        // previously-known fingerprint would disable the Block button in the Firewall pane.
+        string existingFingerprint = null;
+        if (recentlySeenPeers.TryGetValue(meshIP, out var prev))
+            existingFingerprint = prev.fingerprint;
+        // If we have a fresh identityPublicKey in peerInfoByMeshIP, compute the fingerprint from
+        // that (source of truth); else keep whatever was cached.
+        if (peerInfoByMeshIP.TryGetValue(meshIP, out var info) && !string.IsNullOrEmpty(info.identityPublicKey))
+        {
+            try { existingFingerprint = ComputeFingerprint(Convert.FromBase64String(info.identityPublicKey)); }
+            catch { /* keep prior */ }
+        }
+        recentlySeenPeers[meshIP] = (peerID, existingFingerprint, DateTime.UtcNow);
+    }
+
+    /// <summary>Drop entries older than <see cref="RecentlySeenWindow"/> and enforce
+    /// <see cref="RecentlySeenCap"/>. Called from <see cref="GetMeshState"/>.</summary>
+    private void PruneRecentlySeen()
+    {
+        var cutoff = DateTime.UtcNow - RecentlySeenWindow;
+        foreach (var kv in recentlySeenPeers)
+        {
+            if (kv.Value.lastSeen < cutoff) recentlySeenPeers.TryRemove(kv.Key, out _);
+        }
+        if (recentlySeenPeers.Count > RecentlySeenCap)
+        {
+            var toDrop = recentlySeenPeers
+                .OrderBy(kv => kv.Value.lastSeen)
+                .Take(recentlySeenPeers.Count - RecentlySeenCap)
+                .Select(kv => kv.Key)
+                .ToList();
+            foreach (var k in toDrop) recentlySeenPeers.TryRemove(k, out _);
+        }
+    }
+
+    /// <summary>Build the Firewall pane's "known peers" list — recently-seen entries plus their
+    /// fingerprint (from peerInfoByMeshIP) and current tunnel status.</summary>
+    private List<MeshState.KnownPeer> BuildKnownPeers()
+    {
+        PruneRecentlySeen();
+        // Merge sources: recentlySeenPeers (peers that appeared in the last window, including
+        // ones no longer active) + peerInfoByMeshIP (all peers we currently know about, from
+        // heartbeat acks / roster / connection begins). Using only recentlySeenPeers was fragile
+        // because it depends on writes flowing through MarkRecentlySeen and can be aged out
+        // even for peers we're actively connected to if their touch write pathway hits a lull.
+        var seen = new Dictionary<string, (string peerID, bool isConnected)>();
+        foreach (var kv in recentlySeenPeers)
+        {
+            if (kv.Key == meshIP) continue;
+            seen[kv.Key] = (kv.Value.peerID, completedTunnelMeshIPs.Contains(kv.Key));
+        }
+        foreach (var kv in peerInfoByMeshIP)
+        {
+            if (kv.Key == meshIP) continue;
+            if (!seen.ContainsKey(kv.Key))
+                seen[kv.Key] = (kv.Value.peerID, completedTunnelMeshIPs.Contains(kv.Key));
+        }
+        var result = new List<MeshState.KnownPeer>();
+        foreach (var kv in seen)
+        {
+            string peerMeshIP = kv.Key;
+            string fp = null;
+            // Prefer live peerInfoByMeshIP; fall back to the cached fingerprint on recentlySeenPeers
+            // for peers that were just removed (RemoveDeadPeer wiped peerInfoByMeshIP but the user
+            // should still be able to block them during the 15-min grace).
+            if (peerInfoByMeshIP.TryGetValue(peerMeshIP, out var info) && !string.IsNullOrEmpty(info.identityPublicKey))
+            {
+                try { fp = ComputeFingerprint(Convert.FromBase64String(info.identityPublicKey)); }
+                catch { fp = null; }
+            }
+            if (fp == null && recentlySeenPeers.TryGetValue(peerMeshIP, out var seenEntry))
+                fp = seenEntry.fingerprint;
+            result.Add(new MeshState.KnownPeer
+            {
+                MeshIP = peerMeshIP,
+                PeerID = kv.Value.peerID,
+                Fingerprint = fp,
+                IsConnected = kv.Value.isConnected
+            });
+        }
+        result.Sort((a, b) => string.Compare(a.MeshIP, b.MeshIP, StringComparison.Ordinal));
+        return result;
+    }
     /// <summary>LAN endpoint info parallel to peerInfoByMeshIP, used for same-LAN pair detection.</summary>
     private readonly ConcurrentDictionary<string, (string localIP, int localPort)> peerLanByMeshIP = new();
     // Initialized in Run() once `context` is available — instance field initializers can't
@@ -203,7 +488,7 @@ internal class MeshProtocolEngine
     /// </summary>
     public void Run(WireGuardTunnel wireguardTunnel, string meshIP, UdpClient udpClient, WireGuardUdpProxy udpProxy, Guid peerID)
     {
-        Run(wireguardTunnel, new DaemonContext(), meshIP, udpClient, udpProxy, peerID);
+        Run(wireguardTunnel, new DaemonContext(), meshIP, udpClient, udpProxy, peerID, TunnelOptions.IdentityPrivateKey, TunnelOptions.BlockedFingerprints);
     }
 
     /// <summary>
@@ -212,10 +497,13 @@ internal class MeshProtocolEngine
     /// (<see cref="Embedded.EmbeddedContext"/>) and call this overload. Daemon delegates here
     /// from the legacy overload above.
     /// </summary>
-    public void Run(IMeshHost host, IMeshDaemonContext context, string meshIP, UdpClient udpClient, WireGuardUdpProxy udpProxy, Guid peerID)
+    public void Run(IMeshHost host, IMeshDaemonContext context, string meshIP, UdpClient udpClient, WireGuardUdpProxy udpProxy, Guid peerID, byte[] identityPrivateKey = null, HashSet<string> blockedFingerprints = null)
     {
         this.host = host;
         this.context = context;
+        this.identityPrivateKey = identityPrivateKey;
+        this.ownIdentityPublicKey = identityPrivateKey != null ? DeriveIdentityPublicKey(identityPrivateKey) : null;
+        this.blockedFingerprints = blockedFingerprints ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // Resolve TimeSpan/int fields that previously had inline initializers reading from
         // TunnelOptions statics. Field initializers can't read instance fields, so they are
@@ -427,10 +715,12 @@ internal class MeshProtocolEngine
                         int nt = pObj.TryGetProperty("natType", out JsonElement ntEl) ? ntEl.GetInt32() : -1;
                         int pminV = pObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
                         int pmaxV = pObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
+                        string idPub = pObj.TryGetProperty("identityPublicKey", out JsonElement idEl) ? idEl.GetString() : null;
 
                         if (!string.IsNullOrEmpty(mip))
                         {
-                            peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt, pminV, pmaxV);
+                            peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt, pminV, pmaxV, idPub);
+                            MarkRecentlySeen(mip, pid);
                         }
 
                         if (!string.IsNullOrEmpty(joinResponse.IntroducerPeerID) &&
@@ -579,6 +869,16 @@ internal class MeshProtocolEngine
                             try
                             {
                                 byte[] data = udpClient.Receive(ref ep);
+
+                                // Blocked-peer packet drop: if the source endpoint matches a peer
+                                // we've blocked, discard silently. Prevents stray hole-punch retries
+                                // or orphan tunnels from processing traffic after a block.
+                                if (blockedEndpoints.ContainsKey($"{ep.Address}:{ep.Port}") ||
+                                    blockedIPs.ContainsKey(ep.Address.ToString()))
+                                {
+                                    context.Log(LogLevel.Debug, $"[Mesh] Dispatcher dropping packet from blocked source {ep.Address}:{ep.Port}");
+                                    continue;
+                                }
 
                                 // WireGuard packets (binary, message type 1-4): forward directly to the
                                 // proxy ONCE instead of dispatching to every tunnel. This avoids O(N)
@@ -776,11 +1076,20 @@ internal class MeshProtocolEngine
 
                     // Periodic peer discovery: if we have no WireGuard peers and no pending
                     // connections, re-send MeshJoinRequest to discover newly available peers.
-                    if (tcpClient.Connected && activePeerTunnels.Count == 0 &&
-                        pendingConnectionRequests.Count == 0 && pendingTunnelCount == 0 &&
-                        DateTime.UtcNow - lastPeerDiscovery > peerDiscoveryInterval)
+                    // Also fire immediately after an unblock so the server broadcasts a fresh
+                    // MeshIntroduceRequest — we tore the unblocked peer's tunnel down at block
+                    // time, and no other path rebuilds it without server participation.
+                    bool triggerRediscovery = rediscoveryRequestedAfterUnblock;
+                    if (triggerRediscovery) rediscoveryRequestedAfterUnblock = false;
+                    if (tcpClient.Connected &&
+                        (triggerRediscovery ||
+                         (activePeerTunnels.Count == 0 &&
+                          pendingConnectionRequests.Count == 0 && pendingTunnelCount == 0 &&
+                          DateTime.UtcNow - lastPeerDiscovery > peerDiscoveryInterval)))
                     {
-                        context.Log(LogLevel.Debug, "[Mesh] No active peers — sending periodic discovery request");
+                        context.Log(LogLevel.Debug, triggerRediscovery
+                            ? "[Mesh] Unblock detected — sending discovery request to prompt fresh introduction"
+                            : "[Mesh] No active peers — sending periodic discovery request");
                         try
                         {
                             var discoveryRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
@@ -792,7 +1101,8 @@ internal class MeshProtocolEngine
                                 AuthToken = authToken,
                                 ProtocolVersion = MediationProtocol.ClientVersion,
                                 PeerMinVersion = MediationProtocol.PeerMinVersion,
-                                PeerMaxVersion = MediationProtocol.PeerMaxVersion
+                                PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+                                IdentityPublicKey = OwnIdentityPublicKeyB64
                             };
                             string discoveryJson = discoveryRequest.Serialize();
                             byte[] discoveryBuffer = Encoding.ASCII.GetBytes(discoveryJson);
@@ -973,9 +1283,11 @@ internal class MeshProtocolEngine
                                                     string pid2 = pe2.TryGetProperty("peerID", out JsonElement pidEl2) ? pidEl2.GetString() : null;
                                                     int pminV2 = pe2.TryGetProperty("peerMinVersion", out JsonElement pminEl2) ? pminEl2.GetInt32() : 1;
                                                     int pmaxV2 = pe2.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
+                                                    string idPub2 = pe2.TryGetProperty("identityPublicKey", out JsonElement idEl2) ? idEl2.GetString() : null;
                                                     if (!string.IsNullOrEmpty(mip2))
                                                     {
-                                                        peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2, pminV2, pmaxV2);
+                                                        peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2, pminV2, pmaxV2, idPub2);
+                                                        MarkRecentlySeen(mip2, pid2);
                                                         context.Log(LogLevel.Debug, $"[Mesh] Cached peer info: {mip2} = NAT:{(NATType)nt2}, endpoint:{ep2}");
                                                     }
                                                 }
@@ -985,6 +1297,21 @@ internal class MeshProtocolEngine
                                         else if (parsedMsg.ID == MediationMessageType.ConnectionBegin)
                                         {
                                             context.Log(LogLevel.Debug, $"[Mesh] Reconnect: received ConnectionBegin for connection {parsedMsg.ConnectionID}");
+                                            // Mirror HandleConnectionBegin's version + block guards. Without these,
+                                            // the reconnect path builds a fresh Tunnel and fires InjectConnectionBegin
+                                            // (256 symmetric probe sockets) at a peer we already know we won't
+                                            // connect to — pure waste, and the tunnel object hangs around until
+                                            // its 60s connection timer trips onConnectionFailure.
+                                            if (IsIncompatible(parsedMsg.PeerID, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion))
+                                            {
+                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect: ignoring ConnectionBegin for {parsedMsg.PeerID} — peer-protocol range v{parsedMsg.PeerMinVersion}-v{parsedMsg.PeerMaxVersion} previously refused");
+                                                continue;
+                                            }
+                                            if (IsBlocked(parsedMsg.IdentityPublicKey))
+                                            {
+                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect: ignoring ConnectionBegin for {parsedMsg.PeerID} — peer fingerprint is on local block list");
+                                                continue;
+                                            }
                                             // Store peer's mesh IP
                                             if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
                                             {
@@ -996,7 +1323,8 @@ internal class MeshProtocolEngine
                                                     string cacheEndpoint = !string.IsNullOrEmpty(parsedMsg.ExternalEndpointString)
                                                         ? parsedMsg.ExternalEndpointString
                                                         : parsedMsg.EndpointString;
-                                                    peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion);
+                                                    peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey);
+                                                    MarkRecentlySeen(parsedMsg.PrivateAddressString, parsedMsg.PeerID);
                                                 }
                                             }
 
@@ -1105,9 +1433,22 @@ internal class MeshProtocolEngine
                                         }
                                         else if (parsedMsg.ID == MediationMessageType.MeshIntroduceRequest)
                                         {
-                                            if (IsIncompatible(parsedMsg.PeerID, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion))
+                                            if (IsIncompatible(parsedMsg.PeerID, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion) || IsBlocked(parsedMsg.IdentityPublicKey))
                                             {
-                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect: declining introducer role for {parsedMsg.PeerID} — peer-protocol range v{parsedMsg.PeerMinVersion}-v{parsedMsg.PeerMaxVersion} previously refused");
+                                                string reason = IsBlocked(parsedMsg.IdentityPublicKey)
+                                                    ? "peer fingerprint is on local block list"
+                                                    : $"peer-protocol range v{parsedMsg.PeerMinVersion}-v{parsedMsg.PeerMaxVersion} previously refused";
+                                                context.Log(LogLevel.Debug, $"[Mesh] Reconnect: declining introducer role for {parsedMsg.PeerID} — {reason}");
+                                                // Ack so the server clears its pending record and stops retrying us.
+                                                // Without this, we get a MeshIntroduceRequest every poll interval.
+                                                try
+                                                {
+                                                    var declineAck = new MediationMessage(MediationMessageType.MeshIntroduceAck) { PeerID = parsedMsg.PeerID };
+                                                    byte[] declineAckBuf = Encoding.ASCII.GetBytes(declineAck.Serialize());
+                                                    reconnectedStream.Write(declineAckBuf, 0, declineAckBuf.Length);
+                                                    reconnectedStream.Flush();
+                                                }
+                                                catch { }
                                                 continue;
                                             }
                                             isIntroducer = true;
@@ -1118,7 +1459,8 @@ internal class MeshProtocolEngine
                                             // Clear stale deferred messages — this MeshIntroduce supersedes them.
                                             if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
                                             {
-                                                peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion);
+                                                peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey);
+                                                MarkRecentlySeen(parsedMsg.PrivateAddressString, parsedMsg.PeerID);
                                                 completedTunnelMeshIPs.Remove(parsedMsg.PrivateAddressString);
                                                 deferredIntroductions.Remove(parsedMsg.PrivateAddressString);
                                             }
@@ -1135,10 +1477,12 @@ internal class MeshProtocolEngine
                                                     string exPeerID = pe.TryGetProperty("peerID", out JsonElement pidEl2) ? pidEl2.GetString() : null;
                                                     int exPeerMinVersion = pe.TryGetProperty("peerMinVersion", out JsonElement pminEl2) ? pminEl2.GetInt32() : 1;
                                                     int exPeerMaxVersion = pe.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
+                                                    string exIdentityPublicKey = pe.TryGetProperty("identityPublicKey", out JsonElement idEl3) ? idEl3.GetString() : null;
 
                                                     if (string.IsNullOrEmpty(exMeshIP)) continue;
 
-                                                    peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType, exPeerMinVersion, exPeerMaxVersion);
+                                                    peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType, exPeerMinVersion, exPeerMaxVersion, exIdentityPublicKey);
+                                                    MarkRecentlySeen(exMeshIP, exPeerID);
 
                                                     if (host.GetPeer(IPAddress.Parse(exMeshIP)) == null)
                                                     {
@@ -1150,6 +1494,11 @@ internal class MeshProtocolEngine
                                                         IsIncompatible(parsedMsg.PeerID, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion))
                                                     {
                                                         context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: skipping pair {parsedMsg.PeerID} <-> {exPeerID} — one or both previously refused on peer-protocol range");
+                                                        continue;
+                                                    }
+                                                    if (IsBlocked(exIdentityPublicKey) || IsBlocked(parsedMsg.IdentityPublicKey))
+                                                    {
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect introducer: skipping pair {parsedMsg.PeerID} <-> {exPeerID} — one or both are on local block list");
                                                         continue;
                                                     }
 
@@ -1245,7 +1594,8 @@ internal class MeshProtocolEngine
                                                             IntroducerMeshIP = meshIP,
                                                             RelayMeshIP = chosenRelay,
                                                             PeerMinVersion = parsedMsg.PeerMinVersion,
-                                                            PeerMaxVersion = parsedMsg.PeerMaxVersion
+                                                            PeerMaxVersion = parsedMsg.PeerMaxVersion,
+                                                            IdentityPublicKey = parsedMsg.IdentityPublicKey
                                                         };
                                                         try
                                                         {
@@ -1270,7 +1620,8 @@ internal class MeshProtocolEngine
                                                                 IntroducerMeshIP = meshIP,
                                                                 RelayMeshIP = chosenRelay,
                                                                 PeerMinVersion = exPeerMinVersion,
-                                                                PeerMaxVersion = exPeerMaxVersion
+                                                                PeerMaxVersion = exPeerMaxVersion,
+                                                                IdentityPublicKey = exIdentityPublicKey
                                                             };
 
                                                             if (completedTunnelMeshIPs.Contains(parsedMsg.PrivateAddressString))
@@ -1309,7 +1660,8 @@ internal class MeshProtocolEngine
                                                         NATType = parsedMsg.NATType,
                                                         PrivateAddressString = parsedMsg.PrivateAddressString,
                                                         PeerMinVersion = parsedMsg.PeerMinVersion,
-                                                        PeerMaxVersion = parsedMsg.PeerMaxVersion
+                                                        PeerMaxVersion = parsedMsg.PeerMaxVersion,
+                                                        IdentityPublicKey = parsedMsg.IdentityPublicKey
                                                     };
                                                     try
                                                     {
@@ -1334,7 +1686,8 @@ internal class MeshProtocolEngine
                                                             NATType = (NATType)exNatType,
                                                             PrivateAddressString = exMeshIP,
                                                             PeerMinVersion = exPeerMinVersion,
-                                                            PeerMaxVersion = exPeerMaxVersion
+                                                            PeerMaxVersion = exPeerMaxVersion,
+                                                            IdentityPublicKey = exIdentityPublicKey
                                                         };
 
                                                         if (completedTunnelMeshIPs.Contains(parsedMsg.PrivateAddressString))
@@ -1407,7 +1760,8 @@ internal class MeshProtocolEngine
                                                 AuthToken = authToken,
                                                 ProtocolVersion = MediationProtocol.ClientVersion,
                                                 PeerMinVersion = MediationProtocol.PeerMinVersion,
-                                                PeerMaxVersion = MediationProtocol.PeerMaxVersion
+                                                PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+                                                IdentityPublicKey = OwnIdentityPublicKeyB64
                                             };
                                             byte[] rdBytes = Encoding.ASCII.GetBytes(rediscovery.Serialize());
                                             reconnectedStreamLocal.Write(rdBytes, 0, rdBytes.Length);
@@ -1444,26 +1798,52 @@ internal class MeshProtocolEngine
                             }
                         }
 
-                        // Isolation detection: reconnect to mediation if all WireGuard peers are dead
+                        // Isolation detection: reconnect to mediation if all WireGuard peers are dead.
+                        // Also fire immediately on the unblock flag so a just-unblocked peer can
+                        // reconnect without waiting for the next check window.
                         if (reconnectedTcpClient == null &&
-                            DateTime.UtcNow - lastIsolationCheck > isolationCheckInterval)
+                            (rediscoveryRequestedAfterUnblock ||
+                             DateTime.UtcNow - lastIsolationCheck > isolationCheckInterval))
                         {
                             lastIsolationCheck = DateTime.UtcNow;
 
                             var allWgPeers = host.GetAllPeers();
                             bool hasActivePeers = allWgPeers.Any(p =>
                                 (DateTime.UtcNow - p.LastActivity).TotalSeconds < RelayGatewayTimeoutSeconds);
+                            // Additionally, if we have zero completedTunnelMeshIPs, we're isolated
+                            // regardless of WG LastActivity. A hole-punched-but-never-completed
+                            // tunnel can leave WG peer objects with fresh LastActivity (initialized
+                            // to creation time) but no working WG session — hasActivePeers alone
+                            // wouldn't fire and the peer sits stuck in mesh-control-only forever.
+                            bool hasAnyCompletedTunnel = completedTunnelMeshIPs.Count > 0;
+                            // Also treat "we lost our introducer and haven't taken over" as isolation.
+                            // A non-introducer with no introducer pointer can still have working peer
+                            // tunnels but is cut off from re-discovery for any new peers. Reconnect
+                            // to mediation so the server can pick a fresh introducer for the network.
+                            bool lostIntroducer = !isIntroducer && string.IsNullOrEmpty(introducerMeshIP);
+                            // Post-unblock: force reconnect to mediation so it broadcasts a fresh
+                            // introduction for the previously-blocked peer. Consume the flag here
+                            // (the primary loop consumes it via its own path); the OR-write below
+                            // is enough because we bypass the grace period on the very first check.
+                            bool unblockRediscovery = rediscoveryRequestedAfterUnblock;
+                            if (unblockRediscovery) rediscoveryRequestedAfterUnblock = false;
+                            bool isIsolated = !hasAnyCompletedTunnel || !hasActivePeers || lostIntroducer || unblockRediscovery;
 
-                            if (!hasActivePeers && pendingTunnelCount == 0)
+                            if (isIsolated && pendingTunnelCount == 0)
                             {
-                                if (isolationDetectedAt == null)
+                                if (isolationDetectedAt == null && !unblockRediscovery)
                                 {
                                     isolationDetectedAt = DateTime.UtcNow;
                                     context.Log(LogLevel.Debug, $"[Mesh] Isolation detected — no active WireGuard peers. Will reconnect in {IsolationGracePeriodSeconds}s if not resolved.");
                                 }
-                                else if ((DateTime.UtcNow - isolationDetectedAt.Value).TotalSeconds >= IsolationGracePeriodSeconds)
+                                // Skip the grace period when an unblock triggered this — the user
+                                // just took an action expecting the tunnel to come back promptly.
+                                else if (unblockRediscovery ||
+                                         (isolationDetectedAt.HasValue && (DateTime.UtcNow - isolationDetectedAt.Value).TotalSeconds >= IsolationGracePeriodSeconds))
                                 {
-                                    context.Log(LogLevel.Debug, "[Mesh] Isolation persisted — reconnecting to mediation server for peer discovery");
+                                    context.Log(LogLevel.Debug, unblockRediscovery
+                                        ? "[Mesh] Unblock detected — reconnecting to mediation server immediately"
+                                        : "[Mesh] Isolation persisted — reconnecting to mediation server for peer discovery");
                                     try
                                     {
                                         var mediationEP = context.Options.MediationEndpoint;
@@ -1548,7 +1928,8 @@ internal class MeshProtocolEngine
                                             AuthToken = authToken,
                                             ProtocolVersion = MediationProtocol.ClientVersion,
                                             PeerMinVersion = MediationProtocol.PeerMinVersion,
-                                            PeerMaxVersion = MediationProtocol.PeerMaxVersion
+                                            PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+                                            IdentityPublicKey = OwnIdentityPublicKeyB64
                                         };
                                         byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                                         reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
@@ -1776,7 +2157,8 @@ internal class MeshProtocolEngine
             AuthToken = authToken,
             ProtocolVersion = MediationProtocol.ClientVersion,
             PeerMinVersion = MediationProtocol.PeerMinVersion,
-            PeerMaxVersion = MediationProtocol.PeerMaxVersion
+            PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+            IdentityPublicKey = OwnIdentityPublicKeyB64
         };
         byte[] sendBuffer = Encoding.ASCII.GetBytes(joinRequest.Serialize());
         stream.Write(sendBuffer, 0, sendBuffer.Length);
@@ -1833,6 +2215,13 @@ internal class MeshProtocolEngine
             // Fast-path: binary ping/pong (0xFF prefix) — no JSON parsing
             if (buffer.Length >= 2 && buffer[0] == 0xFF)
             {
+                // Any binary control packet is proof the sender can reach us — feeds the
+                // two-way liveness check that gates ProcessMeshConnectionBegin teardowns.
+                // Without this, non-introducer ↔ non-introducer pairs have no source of
+                // "inbound" evidence (only the introducer sends MeshHeartbeat), so any
+                // re-introduce tears down a perfectly working tunnel.
+                lastHeartbeatReceivedFrom[remoteEndPoint.Address.ToString()] = DateTime.UtcNow;
+
                 if (buffer[1] == (byte)'P')
                 {
                     byte[] meshIPBytes = Encoding.UTF8.GetBytes(meshIP ?? "");
@@ -1939,23 +2328,38 @@ internal class MeshProtocolEngine
                             if (!peerInfoByMeshIP.TryGetValue(rMeshIP, out var existing) ||
                                 string.IsNullOrEmpty(existing.peerID) || existing.endpoint == null)
                             {
-                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt, 1, 1);
+                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt, 1, 1, null);
+                                MarkRecentlySeen(rMeshIP, rPeerID);
                             }
                         }
                     }
 
                     // Treat the introducer's roster as authoritative — catches dropouts
                     // whose MeshPeerRemoved/MeshPeerLeave was lost on the UDP path.
+                    // BUT: a brand-new peer being hole-punched won't appear in *anyone's*
+                    // roster yet, since roster gossip lags tunnel-establishment. Synthesizing
+                    // a removal for such a peer tears them down mid-hole-punch, causing an
+                    // infinite retry loop. Guard by:
+                    //   - Skipping peers we have an in-flight ConnectionRequest for.
+                    //   - Skipping peers with an in-flight tunnel attempt (peerMeshIPs entry).
+                    //   - Skipping peers whose tunnel just completed (recent tunnelCompletedAt).
                     if (!isIntroducer && controlMsg.IsIntroducer &&
                         !string.IsNullOrEmpty(introducerMeshIP) &&
                         heartbeatSenderIP == introducerMeshIP)
                     {
+                        var rosterGrace = TimeSpan.FromSeconds(30);
+                        var now2 = DateTime.UtcNow;
+                        var inFlightMeshIPs = new HashSet<string>(peerMeshIPs.Values);
                         foreach (var knownIP in peerInfoByMeshIP.Keys.ToArray())
                         {
                             if (knownIP == meshIP) continue;
                             if (knownIP == introducerMeshIP) continue;
                             if (rosterIPs.Contains(knownIP)) continue;
                             string pid = peerInfoByMeshIP.TryGetValue(knownIP, out var ki) ? ki.peerID : "";
+                            if (!string.IsNullOrEmpty(pid) && pendingConnectionRequests.ContainsKey(pid)) continue;
+                            if (inFlightMeshIPs.Contains(knownIP)) continue;
+                            if (tunnelCompletedAt.TryGetValue(knownIP, out var completedAt) &&
+                                now2 - completedAt < rosterGrace) continue;
                             context.Log(LogLevel.Info, $"[Mesh] Synthesizing MeshPeerRemoved for {knownIP} — absent from introducer's roster");
                             meshPeerRemovedQueue.Enqueue(new MediationMessage(MediationMessageType.MeshPeerRemoved)
                             {
@@ -2070,7 +2474,12 @@ internal class MeshProtocolEngine
             var hello = new MediationMessage(MediationMessageType.MeshVersionHello)
             {
                 PeerMinVersion = MediationProtocol.PeerMinVersion,
-                PeerMaxVersion = MediationProtocol.PeerMaxVersion
+                PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+                // Piggyback our identity pubkey. The mediation-borne carriers (MeshConnectionBegin,
+                // MeshIntroduceRequest, ConnectionBegin) are all one-shot UDP and can be lost;
+                // MeshVersionHello is already retried on the ping loop so re-sending here fills
+                // in any peers who missed the identity from the original path.
+                IdentityPublicKey = OwnIdentityPublicKeyB64
             };
             byte[] bytes = Encoding.UTF8.GetBytes(hello.Serialize());
             MeshSend(bytes, bytes.Length, new IPEndPoint(IPAddress.Parse(remoteMeshIP), MeshControlPort));
@@ -2102,8 +2511,42 @@ internal class MeshProtocolEngine
             RemoveDeadPeer(remoteMeshIP);
             return;
         }
+        bool alreadyNegotiated = peerNegotiatedVersion.ContainsKey(remoteMeshIP);
         peerNegotiatedVersion[remoteMeshIP] = selected;
-        context.Log(LogLevel.Debug, $"[Mesh] Peer {remoteMeshIP} negotiated peer-protocol v{selected}");
+        // Only log the negotiation the first time — otherwise a retry loop on the sender's side
+        // (they're looking for something they haven't received) prints this every ping tick and
+        // spams the log for as long as the loop runs.
+        if (!alreadyNegotiated)
+            context.Log(LogLevel.Debug, $"[Mesh] Peer {remoteMeshIP} negotiated peer-protocol v{selected}");
+        // Fill in identity pubkey from the hello if we don't have one yet — the original carrier
+        // (MeshConnectionBegin) can be lost on UDP, leaving peerInfoByMeshIP with no identity and
+        // the Firewall pane showing "no fingerprint yet" indefinitely.
+        if (!string.IsNullOrEmpty(msg.IdentityPublicKey) &&
+            peerInfoByMeshIP.TryGetValue(remoteMeshIP, out var existing) &&
+            string.IsNullOrEmpty(existing.identityPublicKey))
+        {
+            peerInfoByMeshIP[remoteMeshIP] = (existing.peerID, existing.endpoint, existing.natType, existing.peerMinVersion, existing.peerMaxVersion, msg.IdentityPublicKey);
+        }
+        // Reciprocate with a short cooldown. Their retry loop may be firing because they lack our
+        // identity — a one-shot reply is a stronger guarantee than "first-ever receive." The
+        // cooldown prevents ping-pong spam when both sides are healthy but a stray hello arrives.
+        if (ShouldReciprocateHello(remoteMeshIP))
+        {
+            SendMeshVersionHello(remoteMeshIP);
+        }
+    }
+
+    private readonly ConcurrentDictionary<string, DateTime> lastHelloReciprocateAt = new();
+    private static readonly TimeSpan HelloReciprocateCooldown = TimeSpan.FromSeconds(20);
+
+    private bool ShouldReciprocateHello(string peerMeshIP)
+    {
+        var now = DateTime.UtcNow;
+        if (lastHelloReciprocateAt.TryGetValue(peerMeshIP, out var last) &&
+            now - last < HelloReciprocateCooldown)
+            return false;
+        lastHelloReciprocateAt[peerMeshIP] = now;
+        return true;
     }
 
     // Helper method to process a MeshConnectionBegin message:
@@ -2126,6 +2569,11 @@ internal class MeshProtocolEngine
             context.Log(LogLevel.Debug, $"[Mesh] Skipping MeshConnectionBegin for {remotePeerID} — peer-protocol range v{cbMsg.PeerMinVersion}-v{cbMsg.PeerMaxVersion} previously refused");
             return;
         }
+        if (IsBlocked(cbMsg.IdentityPublicKey))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Skipping MeshConnectionBegin for {remotePeerID} — peer fingerprint is on local block list");
+            return;
+        }
         // Relay mode only needs mesh IP + introducer IP, not endpoint
         if (!cbMsg.IsRelay && string.IsNullOrEmpty(remoteEndpoint))
         {
@@ -2137,7 +2585,8 @@ internal class MeshProtocolEngine
         // knows NAT types of peers that joined after this peer's initial connection.
         if (!string.IsNullOrEmpty(remoteMeshIP))
         {
-            peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType, cbMsg.PeerMinVersion, cbMsg.PeerMaxVersion);
+            peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType, cbMsg.PeerMinVersion, cbMsg.PeerMaxVersion, cbMsg.IdentityPublicKey);
+            MarkRecentlySeen(remoteMeshIP, remotePeerID);
         }
 
         // Skip if a connection attempt is already in progress for this peer.
@@ -2200,19 +2649,27 @@ internal class MeshProtocolEngine
 
         if ((alreadyTracked || wasRelayed) && !string.IsNullOrEmpty(remoteMeshIP))
         {
-            // Skip the teardown if the existing tunnel is demonstrably alive: a recent pong
-            // proves mesh-control is flowing. The introducer's repair MeshConnectionBegin can
-            // race with the latency-ping warm-up window (both peers connected, but neither has
-            // pinged the other yet, so the introducer thinks they're disconnected). Tearing
-            // down a working tunnel here used to drop active game traffic for ~5s while a
-            // fresh tunnel re-established.
+            // Skip the teardown if the existing tunnel is demonstrably alive in BOTH directions:
+            // - Recent pong proves we can reach them and get a reply (outbound-ok, inbound-ok on our side).
+            // - Recent heartbeat/ack from them proves they can reach us (inbound-ok on our side).
+            // One-way liveness can be fooled by asymmetric UDP loss (e.g. symmetric NAT mapping
+            // expired inbound but outbound still holes-punches on new pings). The introducer's
+            // repair MeshConnectionBegin exists precisely for this case — honour it when we can't
+            // prove the peer has heard from us recently.
             var tunnelHealthyWindow = TimeSpan.FromSeconds(20);
-            bool tunnelHealthy = peerLastPong.TryGetValue(remoteMeshIP, out var lastPong) &&
-                                 DateTime.UtcNow - lastPong < tunnelHealthyWindow;
-            if (tunnelHealthy)
+            var now = DateTime.UtcNow;
+            bool hasRecentPong = peerLastPong.TryGetValue(remoteMeshIP, out var lastPong) &&
+                                 now - lastPong < tunnelHealthyWindow;
+            bool hasRecentInbound = lastHeartbeatReceivedFrom.TryGetValue(remoteMeshIP, out var lastInbound) &&
+                                    now - lastInbound < tunnelHealthyWindow;
+            if (hasRecentPong && hasRecentInbound)
             {
-                context.Log(LogLevel.Debug, $"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel is healthy (last pong {(int)(DateTime.UtcNow - lastPong).TotalSeconds}s ago)");
+                context.Log(LogLevel.Debug, $"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel is healthy (last pong {(int)(now - lastPong).TotalSeconds}s ago, last inbound {(int)(now - lastInbound).TotalSeconds}s ago)");
                 return;
+            }
+            if (hasRecentPong && !hasRecentInbound)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Re-introducing {remotePeerID} ({remoteMeshIP}) — outbound liveness OK but no recent inbound (last {(lastHeartbeatReceivedFrom.ContainsKey(remoteMeshIP) ? (int)(now - lastInbound).TotalSeconds + "s ago" : "never")}), asymmetric loss likely");
             }
 
             // Clean up the old connection (direct or relay) to allow reconnect
@@ -2483,11 +2940,17 @@ internal class MeshProtocolEngine
             int peerNatTypeInt = peerObj.TryGetProperty("natType", out JsonElement natEl) ? natEl.GetInt32() : -1;
             int peerMinVersion = peerObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
             int peerMaxVersion = peerObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
+            string peerIdentityPublicKey = peerObj.TryGetProperty("identityPublicKey", out JsonElement idElD) ? idElD.GetString() : null;
 
             if (targetPeerID == peerID.ToString()) continue;
             if (activePeerTunnels.ContainsKey(targetPeerID) || (peerMeshIP != null && activePeerTunnels.ContainsKey(peerMeshIP))) continue;
             if (pendingConnectionRequests.ContainsKey(targetPeerID)) continue;
             if (detectedNatType == NATType.Symmetric && (NATType)peerNatTypeInt == NATType.Symmetric) continue;
+            if (IsBlocked(peerIdentityPublicKey))
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Skipping ConnectionRequest to {targetPeerID} — peer fingerprint is on local block list");
+                continue;
+            }
             // Pre-flight version check: if the mediation server echoed a range with no overlap,
             // record it now so the introducer-retry loop and other paths short-circuit too.
             {
@@ -2875,6 +3338,16 @@ internal class MeshProtocolEngine
             {
                 heartbeatAcks[ackMeshIP] = new HashSet<string>(ackMsg.ConnectedMeshIPs);
                 metricHeartbeatAcksReceived++;
+                // Re-populate completedTunnelMeshIPs if this peer is acking us — their heartbeat
+                // ack is proof the tunnel between us is bidirectionally alive. Something else (an
+                // MIR rejoin, a stale-tunnel sweep miss) may have wiped this even when the WG
+                // path is healthy, and without re-adding it RepairBrokenLinks will refuse to fire
+                // pair repairs against this peer indefinitely ("missing completed tunnel").
+                if (!completedTunnelMeshIPs.Contains(ackMeshIP))
+                {
+                    completedTunnelMeshIPs.Add(ackMeshIP);
+                    tunnelCompletedAt[ackMeshIP] = DateTime.UtcNow;
+                }
             }
             if (!string.IsNullOrEmpty(ackMeshIP) && !string.IsNullOrEmpty(ackMsg.PeerID))
             {
@@ -2882,7 +3355,9 @@ internal class MeshProtocolEngine
                 string existingEndpoint = hasExisting ? existing.endpoint : null;
                 int existingMinV = hasExisting ? existing.peerMinVersion : 1;
                 int existingMaxV = hasExisting ? existing.peerMaxVersion : 1;
-                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType, existingMinV, existingMaxV);
+                string existingIdKey = hasExisting ? existing.identityPublicKey : null;
+                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType, existingMinV, existingMaxV, existingIdKey);
+                MarkRecentlySeen(ackMeshIP, ackMsg.PeerID);
             }
         }
 
@@ -2987,6 +3462,7 @@ internal class MeshProtocolEngine
                 if (pendingConnectionRequests.ContainsKey(kvp.Value.peerID)) continue;
                 if (activePeerTunnels.ContainsKey(kvp.Value.peerID) || activePeerTunnels.ContainsKey(peerMeshIP)) continue;
                 if (IsIncompatible(kvp.Value.peerID, kvp.Value.peerMinVersion, kvp.Value.peerMaxVersion)) continue;
+                if (IsBlocked(kvp.Value.identityPublicKey)) continue;
 
                 context.Log(LogLevel.Debug, $"[Mesh] Heartbeat: peer {peerMeshIP} has no completed tunnel — requesting reconnection via mediation");
                 try
@@ -3027,6 +3503,11 @@ internal class MeshProtocolEngine
             context.Log(LogLevel.Debug, $"[Mesh] Ignoring ConnectionBegin for {msg.PeerID} — peer-protocol range v{msg.PeerMinVersion}-v{msg.PeerMaxVersion} previously refused");
             return;
         }
+        if (IsBlocked(msg.IdentityPublicKey))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Ignoring ConnectionBegin for {msg.PeerID} — peer fingerprint is on local block list");
+            return;
+        }
 
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
         {
@@ -3038,7 +3519,8 @@ internal class MeshProtocolEngine
                 string cacheEndpoint = !string.IsNullOrEmpty(msg.ExternalEndpointString)
                     ? msg.ExternalEndpointString
                     : msg.EndpointString;
-                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion);
+                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey);
+                MarkRecentlySeen(msg.PrivateAddressString, msg.PeerID);
             }
 
             // Tear down any tunnel for the same mesh IP before creating a new one. Late-completing
@@ -3268,9 +3750,12 @@ internal class MeshProtocolEngine
     /// </summary>
     private bool HandleMeshIntroduceRequest(MediationMessage msg)
     {
-        if (IsIncompatible(msg.PeerID, msg.PeerMinVersion, msg.PeerMaxVersion))
+        if (IsIncompatible(msg.PeerID, msg.PeerMinVersion, msg.PeerMaxVersion) || IsBlocked(msg.IdentityPublicKey))
         {
-            context.Log(LogLevel.Debug, $"[Mesh] Declining introducer role for {msg.PeerID} — peer-protocol range v{msg.PeerMinVersion}-v{msg.PeerMaxVersion} previously refused");
+            string reason = IsBlocked(msg.IdentityPublicKey)
+                ? "peer fingerprint is on local block list"
+                : $"peer-protocol range v{msg.PeerMinVersion}-v{msg.PeerMaxVersion} previously refused";
+            context.Log(LogLevel.Debug, $"[Mesh] Declining introducer role for {msg.PeerID} — {reason}");
             try
             {
                 var ack = new MediationMessage(MediationMessageType.MeshIntroduceAck) { PeerID = msg.PeerID };
@@ -3284,14 +3769,22 @@ internal class MeshProtocolEngine
         isIntroducer = true;
         context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID}");
 
-        // Cache the new peer's info. Clear completedTunnelMeshIPs (it's reconnecting with fresh
-        // NAT traversal) and any stale deferred messages.
+        // Cache the new peer's info. Clear completedTunnelMeshIPs only if the tunnel is
+        // demonstrably stale — a peer whose rejoin was triggered by isolation from a *different*
+        // peer (block/repair cycle) may still have a working tunnel to us, and wiping the flag
+        // makes RepairBrokenLinks skip the pair repair path indefinitely with
+        // "missing completed tunnel."
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
         {
-            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion);
+            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey);
+            MarkRecentlySeen(msg.PrivateAddressString, msg.PeerID);
             if (!string.IsNullOrEmpty(msg.LocalIP))
                 peerLanByMeshIP[msg.PrivateAddressString] = (msg.LocalIP, msg.LocalPort);
-            completedTunnelMeshIPs.Remove(msg.PrivateAddressString);
+            var tunnelHealthyWindow = TimeSpan.FromSeconds(30);
+            bool tunnelIsFresh = lastHeartbeatReceivedFrom.TryGetValue(msg.PrivateAddressString, out var lastInbound) &&
+                                 DateTime.UtcNow - lastInbound < tunnelHealthyWindow;
+            if (!tunnelIsFresh)
+                completedTunnelMeshIPs.Remove(msg.PrivateAddressString);
             deferredIntroductions.Remove(msg.PrivateAddressString);
         }
 
@@ -3309,6 +3802,7 @@ internal class MeshProtocolEngine
                 int existingPeerLocalPort = peerElement.TryGetProperty("localPort", out JsonElement lpEl) ? lpEl.GetInt32() : 0;
                 int existingPeerMinVersion = peerElement.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
                 int existingPeerMaxVersion = peerElement.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
+                string existingPeerIdentityPublicKey = peerElement.TryGetProperty("identityPublicKey", out JsonElement idElP) ? idElP.GetString() : null;
 
                 if (string.IsNullOrEmpty(existingPeerMeshIP))
                 {
@@ -3322,8 +3816,14 @@ internal class MeshProtocolEngine
                     context.Log(LogLevel.Debug, $"[Mesh] Skipping introduction pair {msg.PeerID} <-> {existingPeerID} — one or both previously refused on peer-protocol range");
                     continue;
                 }
+                if (IsBlocked(existingPeerIdentityPublicKey) || IsBlocked(msg.IdentityPublicKey))
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh] Skipping introduction pair {msg.PeerID} <-> {existingPeerID} — one or both are on local block list");
+                    continue;
+                }
 
-                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType, existingPeerMinVersion, existingPeerMaxVersion);
+                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType, existingPeerMinVersion, existingPeerMaxVersion, existingPeerIdentityPublicKey);
+                MarkRecentlySeen(existingPeerMeshIP, existingPeerID);
                 if (!string.IsNullOrEmpty(existingPeerLocalIP))
                     peerLanByMeshIP[existingPeerMeshIP] = (existingPeerLocalIP, existingPeerLocalPort);
 
@@ -3435,7 +3935,8 @@ internal class MeshProtocolEngine
                         IntroducerMeshIP = meshIP,
                         RelayMeshIP = chosenRelay,
                         PeerMinVersion = msg.PeerMinVersion,
-                        PeerMaxVersion = msg.PeerMaxVersion
+                        PeerMaxVersion = msg.PeerMaxVersion,
+                        IdentityPublicKey = msg.IdentityPublicKey
                     };
                     try
                     {
@@ -3460,7 +3961,8 @@ internal class MeshProtocolEngine
                             IntroducerMeshIP = meshIP,
                             RelayMeshIP = chosenRelay,
                             PeerMinVersion = existingPeerMinVersion,
-                            PeerMaxVersion = existingPeerMaxVersion
+                            PeerMaxVersion = existingPeerMaxVersion,
+                            IdentityPublicKey = existingPeerIdentityPublicKey
                         };
 
                         if (completedTunnelMeshIPs.Contains(msg.PrivateAddressString))
@@ -3516,7 +4018,8 @@ internal class MeshProtocolEngine
                     NATType = msg.NATType,
                     PrivateAddressString = msg.PrivateAddressString,
                     PeerMinVersion = msg.PeerMinVersion,
-                    PeerMaxVersion = msg.PeerMaxVersion
+                    PeerMaxVersion = msg.PeerMaxVersion,
+                    IdentityPublicKey = msg.IdentityPublicKey
                 };
 
                 MediationMessage connBeginToNew = null;
@@ -3530,7 +4033,8 @@ internal class MeshProtocolEngine
                         NATType = (NATType)existingPeerNatType,
                         PrivateAddressString = existingPeerMeshIP,
                         PeerMinVersion = existingPeerMinVersion,
-                        PeerMaxVersion = existingPeerMaxVersion
+                        PeerMaxVersion = existingPeerMaxVersion,
+                        IdentityPublicKey = existingPeerIdentityPublicKey
                     };
                 }
 
@@ -3771,6 +4275,17 @@ internal class MeshProtocolEngine
 
         if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
         {
+            // Same guard as the primary-loop variant: don't claim takeover of an introducer
+            // we've blocked — we can't reach them by design, but they're likely fine for others.
+            if (!string.IsNullOrEmpty(introducerMeshIP) &&
+                peerInfoByMeshIP.TryGetValue(introducerMeshIP, out var introInfoMc) &&
+                IsBlocked(introInfoMc.identityPublicKey))
+            {
+                introducerMissedProbes = 0;
+                introducerProbeAckReceived = true;
+                lastIntroducerProbe = DateTime.UtcNow;
+                return;
+            }
             // Random election delay: makes simultaneous takeover races unlikely.
             // During the wait, if a new heartbeat with IsIntroducer=true arrives from
             // a different peer, the listener updates introducerMeshIP and we abort.
@@ -3877,7 +4392,8 @@ internal class MeshProtocolEngine
                     AuthToken = authToken,
                     ProtocolVersion = MediationProtocol.ClientVersion,
                     PeerMinVersion = MediationProtocol.PeerMinVersion,
-                    PeerMaxVersion = MediationProtocol.PeerMaxVersion
+                    PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+                    IdentityPublicKey = OwnIdentityPublicKeyB64
                 };
                 byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                 reconnectedStream.Write(joinBytes, 0, joinBytes.Length);
@@ -4015,6 +4531,17 @@ internal class MeshProtocolEngine
 
         if (introducerMissedProbes >= IntroducerMissedProbeThreshold)
         {
+            // If we've blocked the current introducer, we can't reach them by design — don't
+            // try to take over. The introducer is likely fine from other peers' perspective;
+            // us claiming would just cause split-brain. Live isolated from the block target.
+            if (peerInfoByMeshIP.TryGetValue(introducerMeshIP, out var introInfo) &&
+                IsBlocked(introInfo.identityPublicKey))
+            {
+                introducerMissedProbes = 0;
+                introducerProbeAckReceived = true;
+                lastIntroducerProbe = DateTime.UtcNow;
+                return;
+            }
             // Random election delay: with multiple eligible peers, makes simultaneous takeover
             // attempts statistically rare. During the wait, a heartbeat from a new introducer
             // (handled in the listener) updates introducerMeshIP and we abort.
@@ -4052,7 +4579,8 @@ internal class MeshProtocolEngine
                         AuthToken = authToken,
                         ProtocolVersion = MediationProtocol.ClientVersion,
                         PeerMinVersion = MediationProtocol.PeerMinVersion,
-                        PeerMaxVersion = MediationProtocol.PeerMaxVersion
+                        PeerMaxVersion = MediationProtocol.PeerMaxVersion,
+                        IdentityPublicKey = OwnIdentityPublicKeyB64
                     };
                     byte[] joinBytes = Encoding.ASCII.GetBytes(joinReq.Serialize());
                     stream.Write(joinBytes, 0, joinBytes.Length);
@@ -4130,6 +4658,16 @@ internal class MeshProtocolEngine
             {
                 pingSentTicks[peerIP] = System.Diagnostics.Stopwatch.GetTimestamp();
                 try { MeshSend(pingPacket, pingPacket.Length, new IPEndPoint(peer.PrivateAddress, MeshControlPort)); } catch { }
+                // Retry MeshVersionHello if we haven't negotiated a version with this peer yet OR
+                // if we still don't have their identity pubkey cached. The initial carriers
+                // (post-tunnel hello, MeshConnectionBegin) are one-shot UDP and can be lost;
+                // without a retry the peer never learns our version and the Firewall pane stays
+                // "no fingerprint yet" forever.
+                bool needVersion = !peerNegotiatedVersion.ContainsKey(peerIP);
+                bool needIdentity = peerInfoByMeshIP.TryGetValue(peerIP, out var pinfo) &&
+                                    string.IsNullOrEmpty(pinfo.identityPublicKey);
+                if (needVersion || needIdentity)
+                    SendMeshVersionHello(peerIP);
             }
             // Also ping any relayed IPs in this peer's AllowedIPs
             if (!string.IsNullOrEmpty(peer.AllowedIPs))
@@ -4153,6 +4691,78 @@ internal class MeshProtocolEngine
             {
                 peerLatencyMs.TryRemove(kvp.Key, out _);
                 peerLastPong.TryRemove(kvp.Key, out _);
+            }
+        }
+
+        // Silent-tunnel sweep: fills the gap in liveness detection that only exists for
+        // non-introducer ↔ non-introducer pairs. The introducer's heartbeat/ack path is the
+        // authoritative detector for tunnels *it* participates in — running the sweep on those
+        // would pre-empt heartbeat-based removal every time (sweep is 30s, heartbeats need
+        // deadThreshold × heartbeatInterval to declare dead), which would blind the introducer's
+        // roster/relay-reselection logic. So: only sweep when we're NOT the introducer AND the
+        // peer being checked isn't the introducer either — that's the exact non-heartbeat gap.
+        if (!isIntroducer)
+        {
+            var silentTunnelCutoff = TimeSpan.FromSeconds(30);
+            var utcNow = DateTime.UtcNow;
+            var toRemove = new List<string>();
+            foreach (var completedIP in completedTunnelMeshIPs.ToArray())
+            {
+                if (completedIP == meshIP) continue;
+                if (completedIP == introducerMeshIP) continue; // introducer probes its own liveness
+                // Grace-period newly-completed tunnels — pings may not have started yet.
+                if (tunnelCompletedAt.TryGetValue(completedIP, out var completedAt) &&
+                    utcNow - completedAt < silentTunnelCutoff) continue;
+                bool hasRecentPong = peerLastPong.TryGetValue(completedIP, out var pongAt) &&
+                                     utcNow - pongAt < silentTunnelCutoff;
+                if (hasRecentPong) continue;
+                DateTime lastWg = DateTime.MinValue;
+                try
+                {
+                    var wgPeer = host?.GetPeer(IPAddress.Parse(completedIP));
+                    if (wgPeer != null) lastWg = wgPeer.LastActivity;
+                }
+                catch { }
+                bool hasRecentWg = lastWg != DateTime.MinValue && utcNow - lastWg < silentTunnelCutoff;
+                if (hasRecentWg) continue;
+                toRemove.Add(completedIP);
+            }
+            foreach (var deadIP in toRemove)
+            {
+                context.Log(LogLevel.Warning, $"[Mesh] Tearing down silent tunnel to {deadIP} — no pong or WG activity for {(int)silentTunnelCutoff.TotalSeconds}s");
+                RemoveDeadPeer(deadIP);
+            }
+
+            // Introducer-specific silent sweep. The general sweep above skips the introducer
+            // because the introducer's OWN heartbeat/ack path is authoritative for tunnels it
+            // participates in — but that only helps if the introducer is actually running and
+            // reachable. If they're not (they blocked us, they crashed, we can't reach them for
+            // any reason) our probe path either bails out (symmetric daemon peers) or its
+            // takeover election kicks in but is inhibited by our own filters (e.g. we blocked
+            // them). Result: the introducer's tunnel silently dies and nothing tears it down,
+            // so we never hit `completedTunnelMeshIPs.Count == 0` for the isolation trigger.
+            // Use a longer window (2× heartbeat interval + slack) so normal heartbeat cadence
+            // doesn't false-fire it.
+            if (!string.IsNullOrEmpty(introducerMeshIP) &&
+                completedTunnelMeshIPs.Contains(introducerMeshIP))
+            {
+                var introducerSilenceWindow = TimeSpan.FromSeconds(Math.Max(60, context.Options.HeartbeatIntervalSeconds * 3));
+                bool graced = tunnelCompletedAt.TryGetValue(introducerMeshIP, out var introCompletedAt) &&
+                              utcNow - introCompletedAt < introducerSilenceWindow;
+                bool hasRecentInbound = lastHeartbeatReceivedFrom.TryGetValue(introducerMeshIP, out var lastInbound) &&
+                                        utcNow - lastInbound < introducerSilenceWindow;
+                bool hasRecentPong = peerLastPong.TryGetValue(introducerMeshIP, out var introPong) &&
+                                     utcNow - introPong < introducerSilenceWindow;
+                if (!graced && !hasRecentInbound && !hasRecentPong)
+                {
+                    context.Log(LogLevel.Warning, $"[Mesh] Introducer {introducerMeshIP} silent for >{(int)introducerSilenceWindow.TotalSeconds}s — tearing down so isolation-recovery can re-discover");
+                    string deadIntroducerIP = introducerMeshIP;
+                    RemoveDeadPeer(deadIntroducerIP);
+                    // Clear introducer pointer so isolation-recovery can pick a fresh one on
+                    // reconnect. Without this, subsequent join responses may reuse the same
+                    // pointer and we'd re-elect an unreachable peer.
+                    if (introducerMeshIP == deadIntroducerIP) introducerMeshIP = null;
+                }
             }
         }
 
@@ -4390,14 +5000,17 @@ internal class MeshProtocolEngine
                 LastErrorKind = lastErrorKind,
                 MediationProtocolVersion = MediationProtocol.ClientVersion,
                 PeerProtocolMinVersion = MediationProtocol.PeerMinVersion,
-                PeerProtocolMaxVersion = MediationProtocol.PeerMaxVersion
+                PeerProtocolMaxVersion = MediationProtocol.PeerMaxVersion,
+                OwnFingerprint = OwnFingerprint,
+                BlockedFingerprints = BlockedFingerprints.ToList(),
+                KnownPeers = BuildKnownPeers()
             };
 
             // Snapshot shared collections to avoid cross-thread enumeration issues
             var completedSnapshot = completedTunnelMeshIPs.ToArray();
             var relayedPairsSnapshot = relayedPairs.ToArray();
             var peerInfoSnapshot = peerInfoByMeshIP.ToArray();
-            var peerInfoDict = new Dictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion)>();
+            var peerInfoDict = new Dictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion, string identityPublicKey)>();
             foreach (var kv in peerInfoSnapshot)
                 peerInfoDict[kv.Key] = kv.Value;
 
@@ -4452,11 +5065,17 @@ internal class MeshProtocolEngine
                 string peerId = null;
                 string endpoint = null;
                 NATType natType = NATType.Unknown;
+                string peerFingerprint = null;
                 if (peerInfoDict.TryGetValue(peerMeshIP, out var info))
                 {
                     peerId = info.peerID;
                     endpoint = info.endpoint;
                     natType = info.natType;
+                    if (!string.IsNullOrEmpty(info.identityPublicKey))
+                    {
+                        try { peerFingerprint = ComputeFingerprint(Convert.FromBase64String(info.identityPublicKey)); }
+                        catch { peerFingerprint = null; }
+                    }
                 }
 
                 DateTime lastActivity = DateTime.MinValue;
@@ -4479,11 +5098,25 @@ internal class MeshProtocolEngine
                 // Determine connection status.
                 // A peer is "completed" if our callback recorded it, OR if WireGuard
                 // already has it as a reachable peer (callback may have been lost).
+                // BUT completedTunnelMeshIPs is only cleared on RemoveDeadPeer, which fires from
+                // introducer heartbeat failure or graceful leave — a silently-dead tunnel between
+                // two non-introducer peers keeps the flag set forever, showing "Connected" with
+                // no latency. Require some form of *recent* liveness so the UI reflects reality.
+                var livenessWindow = TimeSpan.FromSeconds(20);
+                var utcNow = DateTime.UtcNow;
+                bool hasRecentPong = peerLastPong.TryGetValue(peerMeshIP, out var pongAt) &&
+                                     utcNow - pongAt < livenessWindow;
+                bool hasRecentWgActivity = lastActivity != DateTime.MinValue &&
+                                           utcNow - lastActivity < livenessWindow;
+                bool isLive = hasRecentPong || hasRecentWgActivity;
+
                 string status;
-                bool isCompleted = completedSet.Contains(peerMeshIP)
+                bool trackedAsCompleted = completedSet.Contains(peerMeshIP)
                     || (reachableMeshIPs.Contains(peerMeshIP) && activePeerIDs.Contains(peerMeshIP));
+                bool isCompleted = trackedAsCompleted && isLive;
                 bool isPending = !isCompleted && (
-                    (!string.IsNullOrEmpty(peerId) && pendingPeerIDs.Contains(peerId))
+                    trackedAsCompleted  // marked completed but silent — treat as reconnecting
+                    || (!string.IsNullOrEmpty(peerId) && pendingPeerIDs.Contains(peerId))
                     || activePeerIDs.Contains(peerMeshIP)
                     || (!string.IsNullOrEmpty(peerId) && activePeerIDs.Contains(peerId)));
 
@@ -4506,7 +5139,8 @@ internal class MeshProtocolEngine
                     LatencyMs = latency,
                     RelayedVia = relayedVia.TryGetValue(peerMeshIP, out var gw) ? gw : null,
                     Status = status,
-                    PeerProtocolVersion = peerNegotiatedVersion.TryGetValue(peerMeshIP, out var pver) ? pver : -1
+                    PeerProtocolVersion = peerNegotiatedVersion.TryGetValue(peerMeshIP, out var pver) ? pver : -1,
+                    Fingerprint = peerFingerprint
                 };
 
                 state.ConnectedPeers.Add(peerInfo);
@@ -4545,8 +5179,16 @@ internal class MeshProtocolEngine
         }
         catch (Exception ex)
         {
-            context.Log(LogLevel.Error, $"[Mesh] Error building mesh state: {ex.Message}");
-            return new MeshState
+            // Full ToString() so the stack trace goes to the log — the truncated .Message alone
+            // was making it impossible to figure out why the state build kept throwing after some
+            // uptime, and the fallback below was silently dropping KnownPeers/BlockedFingerprints
+            // so the Firewall pane went blank forever.
+            context.Log(LogLevel.Error, $"[Mesh] Error building mesh state: {ex}");
+            // Populate the Firewall-relevant fields in the fallback too. Even when the main
+            // state build fails, these are cheap to compute and safe (no cross-thread reads of
+            // volatile collections beyond what's already protected). Without them the GUI's
+            // Firewall pane clears entirely on the first fallback and never recovers.
+            var fallback = new MeshState
             {
                 NetworkID = context.Options.NetworkID,
                 OwnMeshIP = meshIP,
@@ -4554,14 +5196,24 @@ internal class MeshProtocolEngine
                 IsIntroducer = isIntroducer,
                 NATType = detectedNatType.ToString(),
                 UptimeSeconds = (long)(DateTime.UtcNow - meshStartTime).TotalSeconds,
-                ConnectionState = context.ConnectionState.ToString()
+                ConnectionState = context.ConnectionState.ToString(),
+                MediationProtocolVersion = MediationProtocol.ClientVersion,
+                PeerProtocolMinVersion = MediationProtocol.PeerMinVersion,
+                PeerProtocolMaxVersion = MediationProtocol.PeerMaxVersion,
+                OwnFingerprint = OwnFingerprint,
             };
+            try { fallback.BlockedFingerprints = BlockedFingerprints.ToList(); } catch { }
+            try { fallback.KnownPeers = BuildKnownPeers(); } catch { }
+            return fallback;
         }
     }
 
     private void NotifyEndpoint(string toIP, string remoteIP, string newRelay)
     {
         if (!peerInfoByMeshIP.TryGetValue(remoteIP, out var info)) return;
+        // Don't send a relay-reselect notification if either end of the pair is blocked.
+        if (IsBlocked(info.identityPublicKey)) return;
+        if (peerInfoByMeshIP.TryGetValue(toIP, out var toInfo) && IsBlocked(toInfo.identityPublicKey)) return;
         var cb = new MediationMessage(MediationMessageType.MeshConnectionBegin)
         {
             PeerID = info.peerID,
@@ -4572,7 +5224,8 @@ internal class MeshProtocolEngine
             IntroducerMeshIP = meshIP,
             RelayMeshIP = newRelay,
             PeerMinVersion = info.peerMinVersion,
-            PeerMaxVersion = info.peerMaxVersion
+            PeerMaxVersion = info.peerMaxVersion,
+            IdentityPublicKey = info.identityPublicKey
         };
         try { byte[] cbBytes = Encoding.UTF8.GetBytes(cb.Serialize()); MeshSend(cbBytes, cbBytes.Length, new IPEndPoint(IPAddress.Parse(toIP), MeshControlPort)); }
         catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to notify {toIP} of reselect: {ex.Message}"); }
@@ -4606,14 +5259,24 @@ internal class MeshProtocolEngine
                         lastRepairAttempt.Remove(pairKey);
                     continue;
                 }
+                context.Log(LogLevel.Debug, $"[Mesh] Repair check: {ipA} <-> {ipB} aReportsB={aReportsB} bReportsA={bReportsA}");
 
-                // Skip repair if either peer is known incompatible on peer-protocol range.
+                // Skip repair if either peer is known incompatible on peer-protocol range
+                // or on the local block list.
                 if (peerInfoByMeshIP.TryGetValue(ipA, out var repairInfoA) &&
-                    IsIncompatible(repairInfoA.peerID, repairInfoA.peerMinVersion, repairInfoA.peerMaxVersion))
+                    (IsIncompatible(repairInfoA.peerID, repairInfoA.peerMinVersion, repairInfoA.peerMaxVersion) ||
+                     IsBlocked(repairInfoA.identityPublicKey)))
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh] Repair skip: {ipA} is incompatible/blocked by us");
                     continue;
+                }
                 if (peerInfoByMeshIP.TryGetValue(ipB, out var repairInfoB) &&
-                    IsIncompatible(repairInfoB.peerID, repairInfoB.peerMinVersion, repairInfoB.peerMaxVersion))
+                    (IsIncompatible(repairInfoB.peerID, repairInfoB.peerMinVersion, repairInfoB.peerMaxVersion) ||
+                     IsBlocked(repairInfoB.identityPublicKey)))
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh] Repair skip: {ipB} is incompatible/blocked by us");
                     continue;
+                }
 
                 if (!aReportsB || !bReportsA)
                 {
@@ -4627,12 +5290,18 @@ internal class MeshProtocolEngine
                     bool bTooNew = tunnelCompletedAt.TryGetValue(ipB, out var bAt) &&
                                    DateTime.UtcNow - bAt < newPeerGrace;
                     if (aTooNew || bTooNew)
+                    {
+                        context.Log(LogLevel.Debug, $"[Mesh] Repair skip: {ipA} <-> {ipB} within {newPeerGrace.TotalSeconds}s grace (aTooNew={aTooNew} bTooNew={bTooNew})");
                         continue;
+                    }
 
                     // Cooldown check
                     if (lastRepairAttempt.TryGetValue(pairKey, out var lastAttempt) &&
                         DateTime.UtcNow - lastAttempt < repairCooldown)
+                    {
+                        context.Log(LogLevel.Debug, $"[Mesh] Repair skip: {ipA} <-> {ipB} in cooldown ({(int)(DateTime.UtcNow - lastAttempt).TotalSeconds}s / {(int)repairCooldown.TotalSeconds}s)");
                         continue;
+                    }
 
                     // For relayed pairs, re-assert the existing relay assignment.
                     if (relayedPairs.Contains(pairKey))
@@ -4704,7 +5373,8 @@ internal class MeshProtocolEngine
                                 IntroducerMeshIP = meshIP,
                                 RelayMeshIP = assignedRelay,
                                 PeerMinVersion = relayInfoB.peerMinVersion,
-                                PeerMaxVersion = relayInfoB.peerMaxVersion
+                                PeerMaxVersion = relayInfoB.peerMaxVersion,
+                                IdentityPublicKey = relayInfoB.identityPublicKey
                             };
                             try
                             {
@@ -4726,7 +5396,8 @@ internal class MeshProtocolEngine
                                 IntroducerMeshIP = meshIP,
                                 RelayMeshIP = assignedRelay,
                                 PeerMinVersion = relayInfoA.peerMinVersion,
-                                PeerMaxVersion = relayInfoA.peerMaxVersion
+                                PeerMaxVersion = relayInfoA.peerMaxVersion,
+                                IdentityPublicKey = relayInfoA.identityPublicKey
                             };
                             try
                             {
@@ -4746,7 +5417,10 @@ internal class MeshProtocolEngine
                     // entry is cleared and we should wait for the new tunnel to complete before
                     // attempting repair — otherwise we'd send stale endpoint/NAT info.
                     if (!completedTunnelMeshIPs.Contains(ipA) || !completedTunnelMeshIPs.Contains(ipB))
+                    {
+                        context.Log(LogLevel.Debug, $"[Mesh] Repair skip: {ipA} <-> {ipB} — missing completed tunnel (A={completedTunnelMeshIPs.Contains(ipA)}, B={completedTunnelMeshIPs.Contains(ipB)})");
                         continue;
+                    }
 
                     bool hasA = peerInfoByMeshIP.TryGetValue(ipA, out var infoA);
                     bool hasB = peerInfoByMeshIP.TryGetValue(ipB, out var infoB);
@@ -4773,56 +5447,12 @@ internal class MeshProtocolEngine
                         peerLanByMeshIP.ContainsKey(ipA) && peerLanByMeshIP.ContainsKey(ipB);
                     if (sameLanPair) bothSymmetric = false;
 
-                    // Escalation: after MaxRepairAttempts, use mediation server for fresh NAT traversal
-                    if (attempts > context.Options.MaxRepairAttempts)
-                    {
-                        context.Log(LogLevel.Debug, $"[Mesh] Repair escalation ({attempts} attempts): {ipA} <-> {ipB} — requesting fresh NAT traversal via mediation");
-                        if (mediationClient != null && mediationClient.Connected)
-                        {
-                            if (!string.IsNullOrEmpty(infoA.peerID) && !pendingConnectionRequests.ContainsKey(infoA.peerID))
-                            {
-                                try
-                                {
-                                    var req = new MediationMessage(MediationMessageType.ConnectionRequest)
-                                    {
-                                        PeerID = infoA.peerID,
-                                        NATType = detectedNatType
-                                    };
-                                    byte[] buf = Encoding.ASCII.GetBytes(req.Serialize());
-                                    mediationStream.Write(buf, 0, buf.Length);
-                                    mediationStream.Flush();
-                                    pendingConnectionRequests[infoA.peerID] = DateTime.UtcNow;
-                                    repairCount++;
-                                }
-                                catch (Exception ex)
-                                {
-                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send escalation ConnectionRequest for {ipA}: {ex.Message}");
-                                }
-                            }
-                            if (!string.IsNullOrEmpty(infoB.peerID) && !pendingConnectionRequests.ContainsKey(infoB.peerID))
-                            {
-                                try
-                                {
-                                    var req = new MediationMessage(MediationMessageType.ConnectionRequest)
-                                    {
-                                        PeerID = infoB.peerID,
-                                        NATType = detectedNatType
-                                    };
-                                    byte[] buf = Encoding.ASCII.GetBytes(req.Serialize());
-                                    mediationStream.Write(buf, 0, buf.Length);
-                                    mediationStream.Flush();
-                                    pendingConnectionRequests[infoB.peerID] = DateTime.UtcNow;
-                                    repairCount++;
-                                }
-                                catch (Exception ex)
-                                {
-                                    context.Log(LogLevel.Error, $"[Mesh] Failed to send escalation ConnectionRequest for {ipB}: {ex.Message}");
-                                }
-                            }
-                        }
-                        lastRepairAttempt[pairKey] = DateTime.UtcNow;
-                    }
-                    else if (bothSymmetric)
+                    // No mediation-escalation branch. In steady state the target peers are
+                    // disconnected from mediation, so the ConnectionRequest just bounces
+                    // "ServerNotAvailable" — burning repair attempts without accomplishing
+                    // anything. Direct MeshConnectionBegin over our WG tunnels to each peer is
+                    // the actual working path and re-fires on every subsequent repair cycle.
+                    if (bothSymmetric)
                     {
                         string chosenRelay = relayAssignments.TryGetValue(pairKey, out var existing) ? existing : null;
                         string priorBothSym = chosenRelay;
@@ -4883,7 +5513,8 @@ internal class MeshProtocolEngine
                             IntroducerMeshIP = meshIP,
                             RelayMeshIP = chosenRelay,
                             PeerMinVersion = infoB.peerMinVersion,
-                            PeerMaxVersion = infoB.peerMaxVersion
+                            PeerMaxVersion = infoB.peerMaxVersion,
+                            IdentityPublicKey = infoB.identityPublicKey
                         };
                         try
                         {
@@ -4907,7 +5538,8 @@ internal class MeshProtocolEngine
                             IntroducerMeshIP = meshIP,
                             RelayMeshIP = chosenRelay,
                             PeerMinVersion = infoA.peerMinVersion,
-                            PeerMaxVersion = infoA.peerMaxVersion
+                            PeerMaxVersion = infoA.peerMaxVersion,
+                            IdentityPublicKey = infoA.identityPublicKey
                         };
                         try
                         {
@@ -4958,7 +5590,8 @@ internal class MeshProtocolEngine
                                 NATType = infoB.natType,
                                 PrivateAddressString = ipB,
                                 PeerMinVersion = infoB.peerMinVersion,
-                                PeerMaxVersion = infoB.peerMaxVersion
+                                PeerMaxVersion = infoB.peerMaxVersion,
+                                IdentityPublicKey = infoB.identityPublicKey
                             };
                             try
                             {
@@ -4982,7 +5615,8 @@ internal class MeshProtocolEngine
                                 NATType = infoA.natType,
                                 PrivateAddressString = ipA,
                                 PeerMinVersion = infoA.peerMinVersion,
-                                PeerMaxVersion = infoA.peerMaxVersion
+                                PeerMaxVersion = infoA.peerMaxVersion,
+                                IdentityPublicKey = infoA.identityPublicKey
                             };
                             try
                             {
@@ -5014,7 +5648,8 @@ internal class MeshProtocolEngine
                     peerInfoByMeshIP.TryGetValue(ip, out var lostPeerInfo) &&
                     !string.IsNullOrEmpty(lostPeerInfo.peerID) &&
                     !pendingConnectionRequests.ContainsKey(lostPeerInfo.peerID) &&
-                    !IsIncompatible(lostPeerInfo.peerID, lostPeerInfo.peerMinVersion, lostPeerInfo.peerMaxVersion))
+                    !IsIncompatible(lostPeerInfo.peerID, lostPeerInfo.peerMinVersion, lostPeerInfo.peerMaxVersion) &&
+                    !IsBlocked(lostPeerInfo.identityPublicKey))
                 {
                     try
                     {

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.NetworkInformation;
 
@@ -47,6 +48,20 @@ internal static class TunnelOptions
     /// If null, a new one will be generated and saved on first run.
     /// </summary>
     public static Guid? PeerID = null;
+
+    /// <summary>
+    /// Persistent 32-byte Curve25519 identity private key. Separate from the WireGuard transport
+    /// key — this identifies the peer across sessions and modes. Fingerprints derived from the
+    /// corresponding public key (SHA-256 truncated to 8 bytes, hex) are what block lists index by.
+    /// Persisted in config.toml. Generated on first run if absent.
+    /// </summary>
+    public static byte[] IdentityPrivateKey = null;
+
+    /// <summary>
+    /// Persistent block list — SHA-256(pubkey)[..8] hex fingerprints of peers this node refuses to
+    /// connect to. Enforced locally (block is our own preference, not gossiped).
+    /// </summary>
+    public static HashSet<string> BlockedFingerprints = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// Interval for sending heartbeat messages from the introducer to all peers (in seconds).

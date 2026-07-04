@@ -20,7 +20,10 @@ internal class Tunnel : IDisposable
     //TODO: entire class should get reviewed and eventually split up into smaller classes
 
     // Connection constants
-    private const int HOLE_PUNCH_THRESHOLD = 1;  // Number of hole punch packets required before confirming connection
+    private const int HOLE_PUNCH_THRESHOLD = 3;  // Number of hole punch packets required before confirming connection.
+                                                 // A single stray packet from a symmetric peer can land on a probe
+                                                 // whose NAT mapping expires immediately after — declaring success
+                                                 // there gets us stuck with a "one-way" tunnel
 
     private UdpClient udpClient;
     private CancellationTokenSource udpClientTaskCancellationToken = new CancellationTokenSource();

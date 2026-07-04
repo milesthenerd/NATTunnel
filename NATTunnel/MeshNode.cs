@@ -35,6 +35,7 @@ public class MeshNode : IDisposable
 
     private readonly Guid peerID;
     private readonly byte[] staticPrivateKey;
+    private readonly HashSet<string> blockedFingerprints;
 
     private MeshProtocolEngine engine;
     private EmbeddedMeshHost host;
@@ -161,6 +162,65 @@ public class MeshNode : IDisposable
     public event Action<MeshPeer, byte[]> MessageReceived;
 
     /// <summary>
+    /// Fires whenever a peer is blocked or unblocked via <see cref="BlockPeer"/>/<see cref="UnblockPeer"/>.
+    /// Embedder subscribes to persist the updated <see cref="BlockedFingerprints"/> to storage.
+    /// </summary>
+    public event Action BlockListChanged;
+
+    /// <summary>
+    /// This node's own identity fingerprint (SHA-256 truncated to 8 bytes, hex, 16 chars).
+    /// Users share this with peers who want to block them.
+    /// </summary>
+    public string Fingerprint => MeshProtocolEngine.ComputeFingerprint(
+        MeshProtocolEngine.DeriveIdentityPublicKey(staticPrivateKey));
+
+    /// <summary>
+    /// Snapshot of the current block list. Iterate freely without locking.
+    /// </summary>
+    public IReadOnlyCollection<string> BlockedFingerprints
+    {
+        get { lock (blockedFingerprints) return blockedFingerprints.ToArray(); }
+    }
+
+    /// <summary>
+    /// Add a peer fingerprint to the block list. Takes effect immediately — no reconnect required.
+    /// Fires <see cref="BlockListChanged"/> after the update.
+    /// </summary>
+    public void BlockPeer(string fingerprint)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint)) return;
+        string normalized = fingerprint.Trim().ToLowerInvariant();
+        bool changed;
+        lock (blockedFingerprints) changed = blockedFingerprints.Add(normalized);
+        engine?.AddBlockedFingerprint(normalized);
+        if (changed) try { BlockListChanged?.Invoke(); } catch { }
+    }
+
+    /// <summary>
+    /// Remove a fingerprint from the block list. Fires <see cref="BlockListChanged"/> if it was present.
+    /// </summary>
+    public bool UnblockPeer(string fingerprint)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint)) return false;
+        string normalized = fingerprint.Trim().ToLowerInvariant();
+        bool removed;
+        lock (blockedFingerprints) removed = blockedFingerprints.Remove(normalized);
+        if (removed)
+        {
+            engine?.RemoveBlockedFingerprint(normalized);
+            try { BlockListChanged?.Invoke(); } catch { }
+        }
+        return removed;
+    }
+
+    /// <summary>
+    /// Compute the fingerprint (SHA-256(pubkey)[..8] hex) for a 32-byte Curve25519 public key.
+    /// Useful for turning a peer's <see cref="MeshPeer.Identity"/> into a blockable string.
+    /// </summary>
+    public static string ComputeFingerprint(byte[] publicKey) =>
+        MeshProtocolEngine.ComputeFingerprint(publicKey);
+
+    /// <summary>
     /// Construct a mesh node from a <see cref="MeshConfig"/>. Validates the config eagerly;
     /// throws <see cref="ArgumentException"/> if a required field is missing or malformed.
     /// </summary>
@@ -198,6 +258,14 @@ public class MeshNode : IDisposable
         {
             using var kp = KeyPair.Generate();
             this.staticPrivateKey = (byte[])kp.PrivateKey.Clone();
+        }
+
+        this.blockedFingerprints = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (config.PersistentBlockedFingerprints != null)
+        {
+            foreach (var fp in config.PersistentBlockedFingerprints)
+                if (!string.IsNullOrWhiteSpace(fp))
+                    this.blockedFingerprints.Add(fp.Trim().ToLowerInvariant());
         }
 
         this.nextLoopbackPort = config.LoopbackPortRangeStart;
@@ -287,7 +355,7 @@ public class MeshNode : IDisposable
         {
             try
             {
-                engine.Run(host, context, meshIP, udpClient, udpProxy: null, peerID);
+                engine.Run(host, context, meshIP, udpClient, udpProxy: null, peerID, staticPrivateKey, blockedFingerprints);
             }
             catch (Exception ex)
             {
@@ -334,7 +402,7 @@ public class MeshNode : IDisposable
             return;
         }
 
-        var connected = new MeshPeer(remotePeerID, tunnel, proxy, isRelayed: false, publicEndpointOverride: null);
+        var connected = new MeshPeer(remotePeerID, tunnel, proxy, isRelayed: false, publicEndpointOverride: null, remoteMeshIP: remoteMeshIP, engineFingerprintLookup: ip => engine?.GetPeerFingerprintByMeshIP(ip));
         connectedPeers[remotePeerID] = connected;
         WirePeerEvents(connected, proxy, remotePeerID, isRelayed: false, gatewayLabel: null);
 
@@ -421,7 +489,7 @@ public class MeshNode : IDisposable
             return;
         }
 
-        var connected = new MeshPeer(remotePeerID, gatewayProxy.Tunnel, proxy, isRelayed: true, publicEndpointOverride: remotePublicEndpoint);
+        var connected = new MeshPeer(remotePeerID, gatewayProxy.Tunnel, proxy, isRelayed: true, publicEndpointOverride: remotePublicEndpoint, remoteMeshIP: remoteMeshIP.ToString(), engineFingerprintLookup: ip => engine?.GetPeerFingerprintByMeshIP(ip));
         connectedPeers[remotePeerID] = connected;
         WirePeerEvents(connected, proxy, remotePeerID, isRelayed: true, gatewayLabel: gatewayMeshIP.ToString());
 
@@ -926,6 +994,18 @@ public class MeshNode : IDisposable
         public byte[] Identity { get; internal set; } = Array.Empty<byte>();
 
         /// <summary>
+        /// The peer's blockable fingerprint — SHA-256(their Curve25519 identity pubkey) truncated
+        /// to 8 bytes, hex-encoded, 16 characters. Pass to <see cref="MeshNode.BlockPeer"/> to
+        /// block them. Null if we haven't received the peer's identity yet (rare — usually
+        /// populated by the time <see cref="MeshNode.PeerConnected"/> fires, but the identity
+        /// travels one-shot on UDP so it can arrive slightly later on lossy paths).
+        /// </summary>
+        public string Fingerprint => engineFingerprintLookup?.Invoke(remoteMeshIP);
+
+        private readonly string remoteMeshIP;
+        private readonly Func<string, string> engineFingerprintLookup;
+
+        /// <summary>
         /// The remote peer's public (NAT-translated) IP and port.
         ///
         /// For relayed peers, this is the remote peer's public endpoint as reported by the
@@ -952,13 +1032,15 @@ public class MeshNode : IDisposable
         internal int ReliableSeqCounter;
         internal readonly ConcurrentDictionary<uint, TaskCompletionSource<bool>> PendingReliable = new();
 
-        internal MeshPeer(string peerID, Tunnel tunnel, MeshPeerProxy proxy, bool isRelayed, IPEndPoint publicEndpointOverride)
+        internal MeshPeer(string peerID, Tunnel tunnel, MeshPeerProxy proxy, bool isRelayed, IPEndPoint publicEndpointOverride, string remoteMeshIP, Func<string, string> engineFingerprintLookup)
         {
             PeerID = peerID;
             Tunnel = tunnel;
             Proxy = proxy;
             IsRelayed = isRelayed;
             relayedPublicEndpoint = publicEndpointOverride;
+            this.remoteMeshIP = remoteMeshIP;
+            this.engineFingerprintLookup = engineFingerprintLookup;
         }
     }
 }

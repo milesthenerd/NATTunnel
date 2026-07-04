@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -34,6 +35,18 @@ public static class Config
     /// Text string for "peerID" in the config (persistent mesh peer identity).
     /// </summary>
     private const string PeerID = "peerID";
+
+    /// <summary>
+    /// Text string for "identityPrivateKey" in the config (32-byte Curve25519 private key, base64).
+    /// Semantically separate from the WireGuard transport key — this is the peer's stable identity
+    /// across sessions and modes, and what block-list fingerprints derive from.
+    /// </summary>
+    private const string IdentityPrivateKey = "identityPrivateKey";
+
+    /// <summary>
+    /// Text string for "blockedFingerprints" in the config (array of hex fingerprints).
+    /// </summary>
+    private const string BlockedFingerprints = "blockedFingerprints";
 
     /// <summary>
     /// Text string for "heartbeatInterval" in the config (introducer heartbeat interval in seconds).
@@ -202,6 +215,55 @@ public static class Config
             Program.Log(LogLevel.Error, $"[Config] Warning: Failed to parse {PeerID}: {e.Message}");
         }
 
+        // Parse optional identity private key (32-byte Curve25519, base64)
+        try
+        {
+            if (model.ContainsKey(IdentityPrivateKey))
+            {
+                string keyString = (string)model[IdentityPrivateKey];
+                byte[] parsedKey = Convert.FromBase64String(keyString);
+                if (parsedKey.Length == 32)
+                {
+                    TunnelOptions.IdentityPrivateKey = parsedKey;
+                    Program.Log(LogLevel.Debug, "[Config] Loaded persistent identity key");
+                }
+                else
+                {
+                    Program.Log(LogLevel.Error, $"[Config] Warning: {IdentityPrivateKey} must decode to 32 bytes (got {parsedKey.Length}), ignoring");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Program.Log(LogLevel.Error, $"[Config] Warning: Failed to parse {IdentityPrivateKey}: {e.Message}");
+        }
+
+        // Parse optional blocked-fingerprints list
+        try
+        {
+            if (!model.ContainsKey(BlockedFingerprints))
+            {
+                Program.Log(LogLevel.Debug, $"[Config] {BlockedFingerprints} key not present in config — no blocks loaded");
+            }
+            else if (model[BlockedFingerprints] is System.Collections.IEnumerable seq && !(model[BlockedFingerprints] is string))
+            {
+                foreach (var entry in seq)
+                {
+                    if (entry is string s && !string.IsNullOrWhiteSpace(s))
+                        TunnelOptions.BlockedFingerprints.Add(s.Trim().ToLowerInvariant());
+                }
+                Program.Log(LogLevel.Debug, $"[Config] Loaded {TunnelOptions.BlockedFingerprints.Count} blocked fingerprint(s)");
+            }
+            else
+            {
+                Program.Log(LogLevel.Warning, $"[Config] {BlockedFingerprints} is present but not iterable (got {model[BlockedFingerprints]?.GetType().Name}) — ignoring");
+            }
+        }
+        catch (Exception e)
+        {
+            Program.Log(LogLevel.Error, $"[Config] Warning: Failed to parse {BlockedFingerprints}: {e.Message}");
+        }
+
         // Parse optional timeout and interval settings
         TryParseConfigInt(model, HeartbeatInterval, (val) => TunnelOptions.HeartbeatIntervalSeconds = val);
         TryParseConfigInt(model, ProbeInterval, (val) => TunnelOptions.ProbeIntervalSeconds = val);
@@ -273,6 +335,69 @@ public static class Config
         else
         {
             File.AppendAllText(configPath, $"\n\n#{PeerID}: Persistent mesh peer identity (auto-generated, do not edit)\n{PeerID} = \"{peerID}\"\n");
+        }
+    }
+
+    /// <summary>
+    /// Saves the identity private key (base64) to config.toml so it persists across restarts.
+    /// </summary>
+    public static void SaveIdentityKey(byte[] privateKey)
+    {
+        string configPath = GetConfigFilePath();
+        if (configPath == null || !File.Exists(configPath) || privateKey == null || privateKey.Length != 32) return;
+
+        string encoded = Convert.ToBase64String(privateKey);
+        string[] lines = File.ReadAllLines(configPath);
+        bool found = false;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].TrimStart().StartsWith(IdentityPrivateKey + " ") || lines[i].TrimStart().StartsWith(IdentityPrivateKey + "="))
+            {
+                lines[i] = $"{IdentityPrivateKey} = \"{encoded}\"";
+                found = true;
+                break;
+            }
+        }
+
+        if (found)
+        {
+            File.WriteAllLines(configPath, lines);
+        }
+        else
+        {
+            File.AppendAllText(configPath, $"\n\n#{IdentityPrivateKey}: Persistent Curve25519 identity key (auto-generated, do not edit)\n{IdentityPrivateKey} = \"{encoded}\"\n");
+        }
+    }
+
+    /// <summary>
+    /// Saves the block list to config.toml as a TOML array of hex fingerprints.
+    /// </summary>
+    public static void SaveBlockedFingerprints(IEnumerable<string> fingerprints)
+    {
+        string configPath = GetConfigFilePath();
+        if (configPath == null || !File.Exists(configPath)) return;
+
+        var items = fingerprints?.Where(f => !string.IsNullOrWhiteSpace(f)).Select(f => $"\"{f}\"") ?? Array.Empty<string>();
+        string arrayLiteral = $"[{string.Join(", ", items)}]";
+        string[] lines = File.ReadAllLines(configPath);
+        bool found = false;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].TrimStart().StartsWith(BlockedFingerprints + " ") || lines[i].TrimStart().StartsWith(BlockedFingerprints + "="))
+            {
+                lines[i] = $"{BlockedFingerprints} = {arrayLiteral}";
+                found = true;
+                break;
+            }
+        }
+
+        if (found)
+        {
+            File.WriteAllLines(configPath, lines);
+        }
+        else
+        {
+            File.AppendAllText(configPath, $"\n\n#{BlockedFingerprints}: Peers this node refuses to connect to (SHA-256(pubkey)[..8] hex)\n{BlockedFingerprints} = {arrayLiteral}\n");
         }
     }
 
@@ -567,6 +692,19 @@ public static class Config
                 lines[lines.Length - 1] = $"{field.key} = {field.value}";
                 modified = true;
             }
+        }
+
+        // Ensure the blockedFingerprints key exists so subsequent SaveBlockedFingerprints calls
+        // take the update-in-place path instead of appending. Without this, first-block append
+        // + subsequent overwrite via SaveAllSettings has a window where the assignment line can
+        // get lost (leaving only the comment header) and blocks silently drop across restarts.
+        bool blockedFpExists = lines.Any(line => line.TrimStart().StartsWith(BlockedFingerprints + " ") || line.TrimStart().StartsWith(BlockedFingerprints + "="));
+        if (!blockedFpExists)
+        {
+            Array.Resize(ref lines, lines.Length + 2);
+            lines[lines.Length - 2] = $"# Peers this node refuses to connect to (SHA-256(pubkey)[..8] hex)";
+            lines[lines.Length - 1] = $"{BlockedFingerprints} = []";
+            modified = true;
         }
 
         if (modified)

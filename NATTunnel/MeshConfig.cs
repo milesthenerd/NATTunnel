@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace NATTunnel;
 
@@ -50,6 +51,14 @@ public class MeshConfig
     /// Store in your host app's secure storage; treat as a secret.
     /// </summary>
     public byte[] PersistentStaticPrivateKey { get; set; }
+
+    /// <summary>
+    /// Fingerprints (SHA-256(identityPubKey)[..8] hex) of peers this node refuses to connect to.
+    /// Load from your host app's storage on startup; subscribe to
+    /// <see cref="MeshNode.BlockListChanged"/> to persist mutations back. Blocks are local — this
+    /// node's own preference, not gossiped to other peers.
+    /// </summary>
+    public IEnumerable<string> PersistentBlockedFingerprints { get; set; }
 
     /// <summary>
     /// Whether this node is willing to act as a relay for other symmetric-NAT pairs. True by

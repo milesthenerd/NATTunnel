@@ -206,6 +206,20 @@
                             FontSize="12"
                             Cursor="Hand" />
 
+                    <Button x:Name="FirewallButton"
+                            Content="Firewall"
+                            Click="Firewall_Click"
+                            Height="32"
+                            Margin="0,8,0,0"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="#3E3E42"
+                            Foreground="{StaticResource TextPrimaryBrush}"
+                            BorderBrush="{StaticResource BorderBrushStatic}"
+                            BorderThickness="1"
+                            FontSize="12"
+                            Cursor="Hand" />
+
                     <Button x:Name="StopButton"
                             Content="Stop"
                             Click="Stop_Click"
