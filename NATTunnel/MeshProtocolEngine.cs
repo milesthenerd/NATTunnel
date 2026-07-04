@@ -160,6 +160,61 @@ internal class MeshProtocolEngine
     /// <summary>Base64 of our own identity public key, ready to drop into <see cref="MediationMessage.IdentityPublicKey"/>. Null pre-Run.</summary>
     private string OwnIdentityPublicKeyB64 => ownIdentityPublicKey != null ? Convert.ToBase64String(ownIdentityPublicKey) : null;
 
+    /// <summary>Mediation server's IPv6 address (AAAA record), resolved once per process.
+    /// Null when the primary mediation endpoint is already v6 (the normal NAT test covers it)
+    /// or when no AAAA record / hostname is available.</summary>
+    private IPAddress mediationV6Address;
+    private bool mediationV6Resolved;
+
+    /// <summary>
+    /// Sends the NAT test packets a second time over IPv6 so the server observes our public
+    /// v6 endpoint the same way it observes v4 — including any port rewriting a v6 firewall
+    /// or NAT66 middlebox does in practice. Fire-and-forget: no v6 route just means the
+    /// server never sees the packets and we advertise no v6 endpoint.
+    /// </summary>
+    private void SendNatTestV6(byte[] natTestBuffer, int portOne, int portTwo)
+    {
+        try
+        {
+            if (!mediationV6Resolved)
+            {
+                mediationV6Resolved = true;
+                // Use the resolved endpoint (the connect loop filled it); if the primary mediation
+                // connection is already v6, the normal NAT test covers it — no separate v6 probe.
+                var mediationEP = endpoint;
+                string host = context.Options.MediationHost;
+                // Only run the v6 NAT test when this machine has a genuinely global v6 route.
+                // A link-local/ULA-only machine (very common — Windows assigns link-local to
+                // every NIC) can send the probe from a non-routable source; the packet may even
+                // reach mediation, but the observed endpoint is useless peer-to-peer and would
+                // wrongly make the peer look v6-reachable. Gate on a real global v6 source.
+                if (mediationEP != null && mediationEP.Address.AddressFamily != AddressFamily.InterNetworkV6 &&
+                    !string.IsNullOrEmpty(host) && !IPAddress.TryParse(host, out _))
+                {
+                    var v6Source = Tunnel.GetGlobalIPv6Candidate();
+                    if (v6Source == null)
+                    {
+                        context.Log(LogLevel.Debug, "[Mesh] No native global IPv6 route — skipping v6 NAT test");
+                    }
+                    else
+                    {
+                        mediationV6Address = Dns.GetHostAddresses(host)
+                            .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
+                        if (mediationV6Address != null)
+                            context.Log(LogLevel.Debug, $"[Mesh] Global IPv6 source {v6Source} + mediation AAAA present — running v6 NAT test");
+                    }
+                }
+            }
+            if (mediationV6Address == null) return;
+            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(mediationV6Address, portOne));
+            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(mediationV6Address, portTwo));
+        }
+        catch (Exception ex)
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] v6 NAT test skipped: {ex.Message}");
+        }
+    }
+
     /// <summary>Snapshot of currently-blocked fingerprints. Safe to iterate without external locking.</summary>
     internal IReadOnlyCollection<string> BlockedFingerprints
     {
@@ -190,13 +245,13 @@ internal class MeshProtocolEngine
                     matches.Add(kv.Key);
                     if (!string.IsNullOrEmpty(kv.Value.endpoint))
                     {
-                        blockedEndpoints[kv.Value.endpoint] = true;
+                        blockedEndpoints[EndpointUtils.NormalizeEndpointString(kv.Value.endpoint)] = true;
                         // Also cache the source IP alone. Symmetric peers vary their external port
                         // per-destination, so subsequent hole-punch attempts land from a fresh port
                         // that the endpoint-precise blocklist doesn't cover.
-                        int colonIdx = kv.Value.endpoint.LastIndexOf(':');
-                        if (colonIdx > 0)
-                            blockedIPs[kv.Value.endpoint.Substring(0, colonIdx)] = true;
+                        string blockedHost = EndpointUtils.GetHost(kv.Value.endpoint);
+                        if (blockedHost != null)
+                            blockedIPs[blockedHost] = true;
                     }
                 }
             }
@@ -244,9 +299,9 @@ internal class MeshProtocolEngine
                     string fp = ComputeFingerprint(Convert.FromBase64String(kv.Value.identityPublicKey));
                     if (stillBlocked.Contains(fp))
                     {
-                        keep.Add(kv.Value.endpoint);
-                        int colonIdx = kv.Value.endpoint.LastIndexOf(':');
-                        if (colonIdx > 0) keepIPs.Add(kv.Value.endpoint.Substring(0, colonIdx));
+                        keep.Add(EndpointUtils.NormalizeEndpointString(kv.Value.endpoint));
+                        string keepHost = EndpointUtils.GetHost(kv.Value.endpoint);
+                        if (keepHost != null) keepIPs.Add(keepHost);
                     }
                 }
                 catch { }
@@ -278,7 +333,7 @@ internal class MeshProtocolEngine
         try { return IsBlocked(Convert.FromBase64String(publicKeyBase64)); }
         catch { return false; }
     }
-    private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion, string identityPublicKey)> peerInfoByMeshIP = new();
+    private readonly ConcurrentDictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion, string identityPublicKey, string endpointV6)> peerInfoByMeshIP = new();
 
     /// <summary>Peers we've seen within the recent-past window — powers the Firewall pane's
     /// "known peers" list so users can block someone who was here a moment ago but isn't now.
@@ -483,6 +538,47 @@ internal class MeshProtocolEngine
     private string lastErrorKind;
 
     /// <summary>
+    /// Resolves the mediation endpoint. Uses <see cref="MeshOptions.MediationEndpoint"/> directly
+    /// when the caller pre-resolved it (embedded mode); otherwise resolves
+    /// <see cref="MeshOptions.MediationHost"/> via DNS at connect time (daemon mode), preferring
+    /// IPv4 with an IPv6 fallback. Returns null on failure instead of throwing — the connect loop
+    /// treats that as a retryable config error (idles with lastErrorKind="ConfigError") so an
+    /// unresolvable host doesn't crash the daemon and a later fix recovers without a restart.
+    /// </summary>
+    private IPEndPoint ResolveMediationEndpoint()
+    {
+        if (context.Options.MediationEndpoint != null)
+            return context.Options.MediationEndpoint;
+
+        string host = context.Options.MediationHost;
+        if (string.IsNullOrEmpty(host))
+        {
+            lastError = "No mediation server configured.";
+            lastErrorKind = "ConfigError";
+            return null;
+        }
+        try
+        {
+            var addresses = Dns.GetHostAddresses(host);
+            var ip = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                     ?? addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
+            if (ip == null)
+            {
+                lastError = $"Mediation server '{host}' did not resolve to any IP address.";
+                lastErrorKind = "ConfigError";
+                return null;
+            }
+            return new IPEndPoint(ip, context.Options.MediationPort);
+        }
+        catch (Exception ex)
+        {
+            lastError = $"Could not resolve mediation server '{host}': {ex.Message}";
+            lastErrorKind = "ConfigError";
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Daemon entry point. Defaults to <see cref="DaemonContext"/> + the WireGuard tunnel as
     /// host. Delegates to the context-aware overload after constructing the daemon context.
     /// </summary>
@@ -545,8 +641,8 @@ internal class MeshProtocolEngine
             return;
         }
 
-        // Mediation endpoint is engine-lifetime (read once from config).
-        endpoint = context.Options.MediationEndpoint;
+        // Mediation endpoint is resolved per connect attempt inside the loop below (DNS is
+        // deferred so an unresolvable host idles rather than crashes).
 
         // Compute auth token once — doesn't depend on mediation state.
         authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
@@ -581,6 +677,20 @@ internal class MeshProtocolEngine
 
                 context.ConnectionState = MeshConnectionState.Connecting;
                 context.DisconnectRequested = false;
+
+                // Resolve the mediation endpoint now (DNS is deferred to connect time). On failure
+                // — unresolvable host, bad config — idle in a Disconnected/ConfigError state the GUI
+                // surfaces via /status, then retry so a corrected config recovers without a restart.
+                endpoint = ResolveMediationEndpoint();
+                if (endpoint == null)
+                {
+                    context.ConnectionState = MeshConnectionState.Disconnected;
+                    context.Log(LogLevel.Error, $"[Mesh] {lastError} — retrying in 10s (fix the mediationEndpoint in config).");
+                    for (int i = 0; i < 100 && !context.ShutdownRequested && !context.ConnectRequested; i++)
+                        System.Threading.Thread.Sleep(100);
+                    continue;
+                }
+
                 {
                     int handshakeDelay = 5;
                     for (int attempt = 1; ; attempt++)
@@ -589,8 +699,9 @@ internal class MeshProtocolEngine
                         if (context.DisconnectRequested) break;
                         try
                         {
-                            // 1. TCP connect (with 5s timeout so DisconnectRequested is checked promptly)
-                            tcpClient = new TcpClient();
+                            // 1. TCP connect (with 5s timeout so DisconnectRequested is checked promptly).
+                            // Address family must match the endpoint — the parameterless ctor is IPv4-only.
+                            tcpClient = new TcpClient(endpoint.Address.AddressFamily);
                             tcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
                             var connectResult = tcpClient.BeginConnect(endpoint.Address, endpoint.Port, null, null);
                             bool connected = connectResult.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(5));
@@ -633,7 +744,7 @@ internal class MeshProtocolEngine
                                     System.Threading.Thread.Sleep(100);
                                 context.ConnectRequested = false;
                                 context.ReloadConfig();
-                                endpoint = context.Options.MediationEndpoint;
+                                // endpoint is re-resolved at the top of the outer connect loop.
                                 authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
                                     Encoding.UTF8.GetBytes(context.Options.NetworkID + ":" + context.Options.NetworkSecret)));
                                 // Clear the error so a fresh reconnect attempt starts clean.
@@ -672,7 +783,7 @@ internal class MeshProtocolEngine
                     context.ConnectRequested = false;
                     // Reload config in case settings changed while idle
                     context.ReloadConfig();
-                    endpoint = context.Options.MediationEndpoint;
+                    // endpoint is re-resolved at the top of the outer connect loop.
                     authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
                         Encoding.UTF8.GetBytes(context.Options.NetworkID + ":" + context.Options.NetworkSecret)));
                     continue; // Back to outer connect loop
@@ -716,10 +827,11 @@ internal class MeshProtocolEngine
                         int pminV = pObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
                         int pmaxV = pObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
                         string idPub = pObj.TryGetProperty("identityPublicKey", out JsonElement idEl) ? idEl.GetString() : null;
+                        string epV6 = pObj.TryGetProperty("endpointV6", out JsonElement epV6El) ? epV6El.GetString() : null;
 
                         if (!string.IsNullOrEmpty(mip))
                         {
-                            peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt, pminV, pmaxV, idPub);
+                            peerInfoByMeshIP[mip] = (pid, ep, (NATType)nt, pminV, pmaxV, idPub, epV6);
                             MarkRecentlySeen(mip, pid);
                         }
 
@@ -869,14 +981,20 @@ internal class MeshProtocolEngine
                             try
                             {
                                 byte[] data = udpClient.Receive(ref ep);
+                                // Dual-stack sockets report IPv4 senders as ::ffff:a.b.c.d — unwrap
+                                // so endpoint comparisons downstream match plain-v4 endpoints.
+                                ep = EndpointUtils.Normalize(ep);
 
                                 // Blocked-peer packet drop: if the source endpoint matches a peer
                                 // we've blocked, discard silently. Prevents stray hole-punch retries
                                 // or orphan tunnels from processing traffic after a block.
-                                if (blockedEndpoints.ContainsKey($"{ep.Address}:{ep.Port}") ||
-                                    blockedIPs.ContainsKey(ep.Address.ToString()))
+                                // Normalized so v4-mapped sources on a dual-stack socket still match
+                                // block entries stored as plain IPv4.
+                                string sourceEndpoint = EndpointUtils.Format(ep);
+                                if (blockedEndpoints.ContainsKey(sourceEndpoint) ||
+                                    blockedIPs.ContainsKey(EndpointUtils.Normalize(ep.Address).ToString()))
                                 {
-                                    context.Log(LogLevel.Debug, $"[Mesh] Dispatcher dropping packet from blocked source {ep.Address}:{ep.Port}");
+                                    context.Log(LogLevel.Debug, $"[Mesh] Dispatcher dropping packet from blocked source {sourceEndpoint}");
                                     continue;
                                 }
 
@@ -1284,9 +1402,10 @@ internal class MeshProtocolEngine
                                                     int pminV2 = pe2.TryGetProperty("peerMinVersion", out JsonElement pminEl2) ? pminEl2.GetInt32() : 1;
                                                     int pmaxV2 = pe2.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
                                                     string idPub2 = pe2.TryGetProperty("identityPublicKey", out JsonElement idEl2) ? idEl2.GetString() : null;
+                                                    string epV62 = pe2.TryGetProperty("endpointV6", out JsonElement epV6El2) ? epV6El2.GetString() : null;
                                                     if (!string.IsNullOrEmpty(mip2))
                                                     {
-                                                        peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2, pminV2, pmaxV2, idPub2);
+                                                        peerInfoByMeshIP[mip2] = (pid2, ep2, (NATType)nt2, pminV2, pmaxV2, idPub2, epV62);
                                                         MarkRecentlySeen(mip2, pid2);
                                                         context.Log(LogLevel.Debug, $"[Mesh] Cached peer info: {mip2} = NAT:{(NATType)nt2}, endpoint:{ep2}");
                                                     }
@@ -1323,7 +1442,7 @@ internal class MeshProtocolEngine
                                                     string cacheEndpoint = !string.IsNullOrEmpty(parsedMsg.ExternalEndpointString)
                                                         ? parsedMsg.ExternalEndpointString
                                                         : parsedMsg.EndpointString;
-                                                    peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey);
+                                                    peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, cacheEndpoint, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey, parsedMsg.EndpointV6String);
                                                     MarkRecentlySeen(parsedMsg.PrivateAddressString, parsedMsg.PeerID);
                                                 }
                                             }
@@ -1459,7 +1578,7 @@ internal class MeshProtocolEngine
                                             // Clear stale deferred messages — this MeshIntroduce supersedes them.
                                             if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString))
                                             {
-                                                peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey);
+                                                peerInfoByMeshIP[parsedMsg.PrivateAddressString] = (parsedMsg.PeerID, parsedMsg.EndpointString, parsedMsg.NATType, parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey, parsedMsg.EndpointV6String);
                                                 MarkRecentlySeen(parsedMsg.PrivateAddressString, parsedMsg.PeerID);
                                                 completedTunnelMeshIPs.Remove(parsedMsg.PrivateAddressString);
                                                 deferredIntroductions.Remove(parsedMsg.PrivateAddressString);
@@ -1478,10 +1597,11 @@ internal class MeshProtocolEngine
                                                     int exPeerMinVersion = pe.TryGetProperty("peerMinVersion", out JsonElement pminEl2) ? pminEl2.GetInt32() : 1;
                                                     int exPeerMaxVersion = pe.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
                                                     string exIdentityPublicKey = pe.TryGetProperty("identityPublicKey", out JsonElement idEl3) ? idEl3.GetString() : null;
+                                                    string exEndpointV6 = pe.TryGetProperty("endpointV6", out JsonElement epV6El3) ? epV6El3.GetString() : null;
 
                                                     if (string.IsNullOrEmpty(exMeshIP)) continue;
 
-                                                    peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType, exPeerMinVersion, exPeerMaxVersion, exIdentityPublicKey);
+                                                    peerInfoByMeshIP[exMeshIP] = (exPeerID, exEndpoint, (NATType)exNatType, exPeerMinVersion, exPeerMaxVersion, exIdentityPublicKey, exEndpointV6);
                                                     MarkRecentlySeen(exMeshIP, exPeerID);
 
                                                     if (host.GetPeer(IPAddress.Parse(exMeshIP)) == null)
@@ -1846,8 +1966,8 @@ internal class MeshProtocolEngine
                                         : "[Mesh] Isolation persisted — reconnecting to mediation server for peer discovery");
                                     try
                                     {
-                                        var mediationEP = context.Options.MediationEndpoint;
-                                        reconnectedTcpClient = new TcpClient();
+                                        var mediationEP = endpoint; // already resolved by the connect loop
+                                        reconnectedTcpClient = new TcpClient(mediationEP.Address.AddressFamily);
                                         reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
                                         reconnectedTcpClient.Connect(mediationEP);
                                         if (context.Options.TlsEnabled)
@@ -1908,6 +2028,7 @@ internal class MeshProtocolEngine
                                             byte[] natTestBuf = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
                                             udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortOne));
                                             udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortTwo));
+                                            SendNatTestV6(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo);
                                         }
 
                                         // Read NATTypeResponse
@@ -2077,8 +2198,7 @@ internal class MeshProtocolEngine
                         context.Log(LogLevel.Debug, "[Mesh] Reconnect requested — re-entering connect loop");
                         // Reload config from disk in case settings were changed via GUI/settings
                         context.ReloadConfig();
-                        // Refresh local variables that were captured from TunnelOptions at startup
-                        endpoint = context.Options.MediationEndpoint;
+                        // endpoint is re-resolved at the top of the outer connect loop.
                         authToken = Convert.ToBase64String(System.Security.Cryptography.SHA256.HashData(
                             Encoding.UTF8.GetBytes(context.Options.NetworkID + ":" + context.Options.NetworkSecret)));
                         continue; // Back to outer connect loop
@@ -2138,6 +2258,7 @@ internal class MeshProtocolEngine
             byte[] natTestBuffer = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
             udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortOne));
             udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortTwo));
+            SendNatTestV6(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo);
         }
 
         var natTypeResponse = ReadOneTcpMessage();
@@ -2328,7 +2449,10 @@ internal class MeshProtocolEngine
                             if (!peerInfoByMeshIP.TryGetValue(rMeshIP, out var existing) ||
                                 string.IsNullOrEmpty(existing.peerID) || existing.endpoint == null)
                             {
-                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt, 1, 1, null);
+                                // Compact roster string carries no v6 endpoint — preserve any we
+                                // already learned for this peer rather than dropping it.
+                                string priorV6 = existing.endpointV6;
+                                peerInfoByMeshIP[rMeshIP] = (rPeerID, rEndpoint, (NATType)rNatInt, 1, 1, null, priorV6);
                                 MarkRecentlySeen(rMeshIP, rPeerID);
                             }
                         }
@@ -2525,7 +2649,7 @@ internal class MeshProtocolEngine
             peerInfoByMeshIP.TryGetValue(remoteMeshIP, out var existing) &&
             string.IsNullOrEmpty(existing.identityPublicKey))
         {
-            peerInfoByMeshIP[remoteMeshIP] = (existing.peerID, existing.endpoint, existing.natType, existing.peerMinVersion, existing.peerMaxVersion, msg.IdentityPublicKey);
+            peerInfoByMeshIP[remoteMeshIP] = (existing.peerID, existing.endpoint, existing.natType, existing.peerMinVersion, existing.peerMaxVersion, msg.IdentityPublicKey, existing.endpointV6);
         }
         // Reciprocate with a short cooldown. Their retry loop may be firing because they lack our
         // identity — a one-shot reply is a stronger guarantee than "first-ever receive." The
@@ -2585,7 +2709,7 @@ internal class MeshProtocolEngine
         // knows NAT types of peers that joined after this peer's initial connection.
         if (!string.IsNullOrEmpty(remoteMeshIP))
         {
-            peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType, cbMsg.PeerMinVersion, cbMsg.PeerMaxVersion, cbMsg.IdentityPublicKey);
+            peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpoint, remotePeerNatType, cbMsg.PeerMinVersion, cbMsg.PeerMaxVersion, cbMsg.IdentityPublicKey, cbMsg.EndpointV6String);
             MarkRecentlySeen(remoteMeshIP, remotePeerID);
         }
 
@@ -3356,7 +3480,8 @@ internal class MeshProtocolEngine
                 int existingMinV = hasExisting ? existing.peerMinVersion : 1;
                 int existingMaxV = hasExisting ? existing.peerMaxVersion : 1;
                 string existingIdKey = hasExisting ? existing.identityPublicKey : null;
-                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType, existingMinV, existingMaxV, existingIdKey);
+                string existingV6 = hasExisting ? existing.endpointV6 : null;
+                peerInfoByMeshIP[ackMeshIP] = (ackMsg.PeerID, existingEndpoint, ackMsg.NATType, existingMinV, existingMaxV, existingIdKey, existingV6);
                 MarkRecentlySeen(ackMeshIP, ackMsg.PeerID);
             }
         }
@@ -3519,7 +3644,7 @@ internal class MeshProtocolEngine
                 string cacheEndpoint = !string.IsNullOrEmpty(msg.ExternalEndpointString)
                     ? msg.ExternalEndpointString
                     : msg.EndpointString;
-                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey);
+                peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, cacheEndpoint, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey, msg.EndpointV6String);
                 MarkRecentlySeen(msg.PrivateAddressString, msg.PeerID);
             }
 
@@ -3776,7 +3901,7 @@ internal class MeshProtocolEngine
         // "missing completed tunnel."
         if (!string.IsNullOrEmpty(msg.PrivateAddressString))
         {
-            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey);
+            peerInfoByMeshIP[msg.PrivateAddressString] = (msg.PeerID, msg.EndpointString, msg.NATType, msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey, msg.EndpointV6String);
             MarkRecentlySeen(msg.PrivateAddressString, msg.PeerID);
             if (!string.IsNullOrEmpty(msg.LocalIP))
                 peerLanByMeshIP[msg.PrivateAddressString] = (msg.LocalIP, msg.LocalPort);
@@ -3803,6 +3928,7 @@ internal class MeshProtocolEngine
                 int existingPeerMinVersion = peerElement.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
                 int existingPeerMaxVersion = peerElement.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
                 string existingPeerIdentityPublicKey = peerElement.TryGetProperty("identityPublicKey", out JsonElement idElP) ? idElP.GetString() : null;
+                string existingPeerEndpointV6 = peerElement.TryGetProperty("endpointV6", out JsonElement epV6ElP) ? epV6ElP.GetString() : null;
 
                 if (string.IsNullOrEmpty(existingPeerMeshIP))
                 {
@@ -3822,7 +3948,7 @@ internal class MeshProtocolEngine
                     continue;
                 }
 
-                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType, existingPeerMinVersion, existingPeerMaxVersion, existingPeerIdentityPublicKey);
+                peerInfoByMeshIP[existingPeerMeshIP] = (existingPeerID, existingPeerEndpoint, (NATType)existingPeerNatType, existingPeerMinVersion, existingPeerMaxVersion, existingPeerIdentityPublicKey, existingPeerEndpointV6);
                 MarkRecentlySeen(existingPeerMeshIP, existingPeerID);
                 if (!string.IsNullOrEmpty(existingPeerLocalIP))
                     peerLanByMeshIP[existingPeerMeshIP] = (existingPeerLocalIP, existingPeerLocalPort);
@@ -3850,15 +3976,21 @@ internal class MeshProtocolEngine
                     }
                 }
 
+                // When both peers have a usable IPv6 endpoint, connect directly over v6 regardless
+                // of NAT type: v6 has no NAT to traverse, so the symmetric-relay dance is
+                // unnecessary — only a mutual firewall punch is needed, which the direct path does.
+                bool bothHaveV6 = !string.IsNullOrEmpty(msg.EndpointV6String) &&
+                                  !string.IsNullOrEmpty(existingPeerEndpointV6);
+
                 // Same-LAN short-circuit for symmetric pairs.
-                string msgPublicIP = msg.EndpointString?.Split(':')[0];
-                string exPublicIP = existingPeerEndpoint?.Split(':')[0];
+                string msgPublicIP = EndpointUtils.GetHost(msg.EndpointString);
+                string exPublicIP = EndpointUtils.GetHost(existingPeerEndpoint);
                 bool sameLan = !string.IsNullOrEmpty(msgPublicIP) &&
                                msgPublicIP == exPublicIP &&
                                !string.IsNullOrEmpty(msg.LocalIP) &&
                                !string.IsNullOrEmpty(existingPeerLocalIP);
 
-                if (!sameLan && msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric)
+                if (!bothHaveV6 && !sameLan && msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric)
                 {
                     string chosenRelay = PickRelay(existingPeerMeshIP, msg.PrivateAddressString) ?? (context.Options.AllowRelayThrough ? meshIP : null);
                     if (string.IsNullOrEmpty(chosenRelay))
@@ -3993,43 +4125,77 @@ internal class MeshProtocolEngine
                     continue;
                 }
 
-                // Hole-punch path: if both share a public IP, use LAN endpoints; otherwise external.
+                // Hole-punch path: prefer v6 when both have it; else if both share a public IP use
+                // LAN endpoints; otherwise external.
                 string newPeerEndpointForExisting = msg.EndpointString;
                 string existingPeerEndpointForNew = existingPeerEndpoint;
 
-                string newPeerPublicIP = msg.EndpointString?.Split(':')[0];
-                string existingPeerPublicIP = existingPeerEndpoint?.Split(':')[0];
-
-                if (newPeerPublicIP == existingPeerPublicIP &&
-                    !string.IsNullOrEmpty(msg.LocalIP) && !string.IsNullOrEmpty(existingPeerLocalIP))
+                if (bothHaveV6)
                 {
-                    newPeerEndpointForExisting = $"{msg.LocalIP}:{msg.LocalPort}";
-                    existingPeerEndpointForNew = $"{existingPeerLocalIP}:{existingPeerLocalPort}";
-                    context.Log(LogLevel.Debug, $"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
+                    newPeerEndpointForExisting = msg.EndpointV6String;
+                    existingPeerEndpointForNew = existingPeerEndpointV6;
+                    context.Log(LogLevel.Debug, $"[Mesh] Both peers have IPv6 — using v6 endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
+                }
+                else
+                {
+                    string newPeerPublicIP = EndpointUtils.GetHost(msg.EndpointString);
+                    string existingPeerPublicIP = EndpointUtils.GetHost(existingPeerEndpoint);
+
+                    if (newPeerPublicIP == existingPeerPublicIP &&
+                        !string.IsNullOrEmpty(msg.LocalIP) && !string.IsNullOrEmpty(existingPeerLocalIP))
+                    {
+                        newPeerEndpointForExisting = EndpointUtils.Format(msg.LocalIP, msg.LocalPort);
+                        existingPeerEndpointForNew = EndpointUtils.Format(existingPeerLocalIP, existingPeerLocalPort);
+                        context.Log(LogLevel.Debug, $"[Mesh] Same-NAT detected! Using LAN endpoints: {newPeerEndpointForExisting} <-> {existingPeerEndpointForNew}");
+                    }
+                }
+
+                // Only skip the pair when BOTH endpoints are known AND they're different address
+                // families (a genuine v4-only ↔ v6-only mismatch that no relay can bridge). When an
+                // endpoint is merely empty/not-yet-known, do NOT skip — an endpoint can propagate
+                // moments later (e.g. a symmetric peer whose external port isn't observed yet), and
+                // the original behavior was to send to whichever side has an endpoint. Each
+                // connBegin below is independently gated on its own endpoint being present.
+                if (!string.IsNullOrEmpty(newPeerEndpointForExisting) &&
+                    !string.IsNullOrEmpty(existingPeerEndpointForNew) &&
+                    !EndpointUtils.SameFamily(newPeerEndpointForExisting, existingPeerEndpointForNew))
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh] Skipping introduction pair {msg.PeerID} <-> {existingPeerID} — no shared reachable address family (v4/v6 mismatch)");
+                    continue;
                 }
 
                 // ExternalEndpointString always carries the external endpoint so the receiver
-                // caches something safe to forward to peers outside this LAN.
-                var connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                // caches something safe to forward to peers outside this LAN. When we substituted
+                // v6, the external is the v6 endpoint (there's no NAT-external distinction on v6).
+                string newPeerExternal = bothHaveV6 ? msg.EndpointV6String : msg.EndpointString;
+                string existingPeerExternal = bothHaveV6 ? existingPeerEndpointV6 : existingPeerEndpoint;
+
+                // Only introduce the new peer to the existing peer if we have an endpoint for the
+                // new peer (restores the original always-when-present behavior).
+                MediationMessage connBeginToExisting = null;
+                if (!string.IsNullOrEmpty(newPeerEndpointForExisting))
                 {
-                    PeerID = msg.PeerID,
-                    EndpointString = newPeerEndpointForExisting,
-                    ExternalEndpointString = msg.EndpointString,
-                    NATType = msg.NATType,
-                    PrivateAddressString = msg.PrivateAddressString,
-                    PeerMinVersion = msg.PeerMinVersion,
-                    PeerMaxVersion = msg.PeerMaxVersion,
-                    IdentityPublicKey = msg.IdentityPublicKey
-                };
+                    connBeginToExisting = new MediationMessage(MediationMessageType.MeshConnectionBegin)
+                    {
+                        PeerID = msg.PeerID,
+                        EndpointString = newPeerEndpointForExisting,
+                        ExternalEndpointString = newPeerExternal,
+                        NATType = msg.NATType,
+                        PrivateAddressString = msg.PrivateAddressString,
+                        PeerMinVersion = msg.PeerMinVersion,
+                        PeerMaxVersion = msg.PeerMaxVersion,
+                        IdentityPublicKey = msg.IdentityPublicKey
+                    };
+                }
 
                 MediationMessage connBeginToNew = null;
-                if (!string.IsNullOrEmpty(msg.PrivateAddressString) && !string.IsNullOrEmpty(existingPeerEndpoint))
+                if (!string.IsNullOrEmpty(msg.PrivateAddressString) && !string.IsNullOrEmpty(existingPeerEndpointForNew))
                 {
                     connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                     {
                         PeerID = existingPeerID,
                         EndpointString = existingPeerEndpointForNew,
-                        ExternalEndpointString = existingPeerEndpoint,
+                        ExternalEndpointString = existingPeerExternal,
                         NATType = (NATType)existingPeerNatType,
                         PrivateAddressString = existingPeerMeshIP,
                         PeerMinVersion = existingPeerMinVersion,
@@ -4042,16 +4208,19 @@ internal class MeshProtocolEngine
 
                 if (tunnelToNewReady)
                 {
-                    try
+                    if (connBeginToExisting != null)
                     {
-                        byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
-                        MeshSend(toExistingBytes, toExistingBytes.Length,
-                            new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
-                        context.Log(LogLevel.Debug, $"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
-                    }
-                    catch (Exception ex)
-                    {
-                        context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                        try
+                        {
+                            byte[] toExistingBytes = Encoding.UTF8.GetBytes(connBeginToExisting.Serialize());
+                            MeshSend(toExistingBytes, toExistingBytes.Length,
+                                new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
+                            context.Log(LogLevel.Debug, $"[Mesh] Sent MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID})");
+                        }
+                        catch (Exception ex)
+                        {
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                        }
                     }
 
                     if (connBeginToNew != null)
@@ -4077,8 +4246,11 @@ internal class MeshProtocolEngine
                         deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
 
                     // Reuse IntroducerMeshIP field to tag the routing target for the existing peer.
-                    connBeginToExisting.IntroducerMeshIP = existingPeerMeshIP;
-                    deferredIntroductions[msg.PrivateAddressString].Add(connBeginToExisting);
+                    if (connBeginToExisting != null)
+                    {
+                        connBeginToExisting.IntroducerMeshIP = existingPeerMeshIP;
+                        deferredIntroductions[msg.PrivateAddressString].Add(connBeginToExisting);
+                    }
 
                     if (connBeginToNew != null)
                         deferredIntroductions[msg.PrivateAddressString].Add(connBeginToNew);
@@ -4314,8 +4486,8 @@ internal class MeshProtocolEngine
             try
             {
                 context.Log(LogLevel.Warning, "[Mesh] Election delay elapsed — reconnecting to mediation to claim introducer role");
-                var mediationEP = context.Options.MediationEndpoint;
-                reconnectedTcpClient = new TcpClient();
+                var mediationEP = endpoint; // already resolved by the connect loop
+                reconnectedTcpClient = new TcpClient(mediationEP.Address.AddressFamily);
                 reconnectedTcpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true);
                 reconnectedTcpClient.Connect(mediationEP);
                 if (context.Options.TlsEnabled)
@@ -4372,6 +4544,7 @@ internal class MeshProtocolEngine
                     byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
                     udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortOne));
                     udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortTwo));
+                    SendNatTestV6(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.NATTestPortTwo);
                 }
 
                 var natTypeRespR2 = ReadReconMessage2();
@@ -5010,7 +5183,7 @@ internal class MeshProtocolEngine
             var completedSnapshot = completedTunnelMeshIPs.ToArray();
             var relayedPairsSnapshot = relayedPairs.ToArray();
             var peerInfoSnapshot = peerInfoByMeshIP.ToArray();
-            var peerInfoDict = new Dictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion, string identityPublicKey)>();
+            var peerInfoDict = new Dictionary<string, (string peerID, string endpoint, NATType natType, int peerMinVersion, int peerMaxVersion, string identityPublicKey, string endpointV6)>();
             foreach (var kv in peerInfoSnapshot)
                 peerInfoDict[kv.Key] = kv.Value;
 
@@ -5440,8 +5613,8 @@ internal class MeshProtocolEngine
                     // Same-LAN exception: skip relay if both endpoints share a public IP and
                     // we have LAN info for both. Direct LAN connection should work even when
                     // both are symmetric.
-                    string aPublicIP = infoA.endpoint?.Split(':')[0];
-                    string bPublicIP = infoB.endpoint?.Split(':')[0];
+                    string aPublicIP = EndpointUtils.GetHost(infoA.endpoint);
+                    string bPublicIP = EndpointUtils.GetHost(infoB.endpoint);
                     bool sameLanPair = bothSymmetric &&
                         !string.IsNullOrEmpty(aPublicIP) && aPublicIP == bPublicIP &&
                         peerLanByMeshIP.ContainsKey(ipA) && peerLanByMeshIP.ContainsKey(ipB);
@@ -5569,16 +5742,31 @@ internal class MeshProtocolEngine
 
                         context.Log($"[Mesh] Heartbeat: {ipA} <-> {ipB} disconnected — re-introducing (attempt {attempts}{(sameLanPair ? ", same-LAN" : "")})");
 
-                        // For same-LAN pairs, substitute LAN endpoints so peers retry over the
+                        // Prefer v6 when both peers have it (no NAT — direct connect is reliable);
+                        // else for same-LAN pairs substitute LAN endpoints so peers retry over the
                         // local network instead of the public endpoints that don't hairpin.
-                        string endpointForA = infoB.endpoint;
-                        string endpointForB = infoA.endpoint;
-                        if (sameLanPair)
+                        // Each side is handed the *other* peer's endpoint.
+                        bool repairBothHaveV6 = !string.IsNullOrEmpty(infoA.endpointV6) &&
+                                                !string.IsNullOrEmpty(infoB.endpointV6);
+                        string endpointForA = repairBothHaveV6 ? infoB.endpointV6 : infoB.endpoint;
+                        string endpointForB = repairBothHaveV6 ? infoA.endpointV6 : infoA.endpoint;
+                        if (!repairBothHaveV6 && sameLanPair)
                         {
                             if (peerLanByMeshIP.TryGetValue(ipB, out var lanB))
-                                endpointForA = $"{lanB.localIP}:{lanB.localPort}";
+                                endpointForA = EndpointUtils.Format(lanB.localIP, lanB.localPort);
                             if (peerLanByMeshIP.TryGetValue(ipA, out var lanA))
-                                endpointForB = $"{lanA.localIP}:{lanA.localPort}";
+                                endpointForB = EndpointUtils.Format(lanA.localIP, lanA.localPort);
+                        }
+
+                        // Only skip when BOTH endpoints are known and of different families (a real
+                        // v4↔v6 mismatch). An empty endpoint isn't a mismatch — the per-side sends
+                        // below already gate on presence, and skipping the whole pair on an empty
+                        // endpoint would break normal repair for a peer whose endpoint isn't cached yet.
+                        if (!string.IsNullOrEmpty(endpointForA) && !string.IsNullOrEmpty(endpointForB) &&
+                            !EndpointUtils.SameFamily(endpointForA, endpointForB))
+                        {
+                            context.Log(LogLevel.Debug, $"[Mesh] Skipping repair for {ipA} <-> {ipB} — no shared address family (v4/v6 mismatch)");
+                            continue;
                         }
 
                         if (!string.IsNullOrEmpty(endpointForA))

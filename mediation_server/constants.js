@@ -73,7 +73,9 @@ const Config = {
     NAT_TEST_PORT_ONE: 6511,
     NAT_TEST_PORT_TWO: 6512,
     DEFAULT_TIMEOUT: 60, // seconds (increased to 60 to prevent mesh peers from timing out between discovery polls)
-    BIND_ADDRESS: "0.0.0.0",
+    // "::" binds dual-stack (IPv4 + IPv6); the server falls back to "0.0.0.0" on hosts
+    // with IPv6 disabled. Override with the BIND_ADDRESS env var.
+    BIND_ADDRESS: process.env.BIND_ADDRESS || "::",
     MESH_CONTROL_PORT: 51888,   // UDP port used for peer-to-peer mesh introduction messages over WireGuard
 
     // TLS configuration. TLS is always on.

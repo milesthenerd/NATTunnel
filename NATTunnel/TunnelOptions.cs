@@ -12,14 +12,18 @@ namespace NATTunnel;
 internal static class TunnelOptions
 {
     /// <summary>
-    /// The public IP address and port of the mediation server, resolved at config load.
-    /// The mediation server coordinates NAT traversal and hole punching between peers.
+    /// The mediation server's hostname (or IP literal), no port — resolved lazily by the engine
+    /// at connect time, NOT at config load. Deferring the DNS resolve means an unresolvable host
+    /// no longer crashes daemon startup; the engine idles in a config-error state instead.
     /// </summary>
-    public static IPEndPoint MediationEndpoint = new IPEndPoint(IPAddress.Parse("150.136.173.157"), 6510);
+    public static string MediationHost = "sync.milesthenerd.net";
+
+    /// <summary>The mediation server's port, paired with <see cref="MediationHost"/>.</summary>
+    public static int MediationPort = 6510;
 
     /// <summary>
     /// The original <c>host:port</c> string the user supplied for the mediation endpoint
-    /// (a DNS hostname or an IPv4 literal).
+    /// (a DNS hostname or an IP literal). Kept for display and AAAA resolution.
     /// </summary>
     public static string MediationEndpointString = "sync.milesthenerd.net:6510";
 

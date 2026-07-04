@@ -43,7 +43,7 @@ class NetworkRegistry {
      * @param {string} meshIP - Peer's mesh IP address (optional)
      * @returns {object[]} List of other peers in the same network
      */
-    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1, identityPublicKey = null) {
+    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1, identityPublicKey = null, endpointV6 = null) {
         if (!networkID || !peerID) {
             throw new Error('networkID and peerID are required');
         }
@@ -75,6 +75,7 @@ class NetworkRegistry {
             existingPeer.peerMinVersion = peerMinVersion;
             existingPeer.peerMaxVersion = peerMaxVersion;
             existingPeer.identityPublicKey = identityPublicKey;
+            existingPeer.endpointV6 = endpointV6;
             existingPeer.joinTime = Date.now();
         } else {
             // Add new peer
@@ -89,6 +90,7 @@ class NetworkRegistry {
                 peerMinVersion,
                 peerMaxVersion,
                 identityPublicKey,
+                endpointV6,
                 joinTime: Date.now()
             });
             console.log(`[NetworkRegistry] Peer ${peerID} joined network ${networkID} (meshIP: ${meshIP}, total active: ${network.size})`);
@@ -105,6 +107,7 @@ class NetworkRegistry {
             peerMinVersion,
             peerMaxVersion,
             identityPublicKey,
+            endpointV6,
             connected: true,
             joinTime: Date.now()
         });
@@ -122,7 +125,8 @@ class NetworkRegistry {
                     localPort: peer.localPort,
                     peerMinVersion: peer.peerMinVersion,
                     peerMaxVersion: peer.peerMaxVersion,
-                    identityPublicKey: peer.identityPublicKey
+                    identityPublicKey: peer.identityPublicKey,
+                    endpointV6: peer.endpointV6
                 });
             }
         }
@@ -224,6 +228,7 @@ class NetworkRegistry {
                 peerMinVersion: member.peerMinVersion,
                 peerMaxVersion: member.peerMaxVersion,
                 identityPublicKey: member.identityPublicKey,
+                endpointV6: member.endpointV6,
                 connected: member.connected
             });
         }

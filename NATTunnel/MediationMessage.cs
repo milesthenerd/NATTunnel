@@ -40,6 +40,15 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string ExternalEndpointString { get; set; }
     /// <summary>
+    /// The peer's publicly-observed IPv6 endpoint ("[addr]:port"), as seen by the mediation
+    /// server during the IPv6 NAT test. Additive field — omitted when the peer has no v6 route,
+    /// and ignored by older builds. Lets the server/introducer hand a v6 endpoint to a peer
+    /// whose primary (v4) family can't reach the other side. The port reflects whatever a v6
+    /// firewall/NAT actually assigned — never assumed equal to the local port.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string EndpointV6String { get; set; }
+    /// <summary>
     ///First port for nat type detection returned by the server
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -237,7 +246,9 @@ internal class MediationMessage
     /// </summary>
     public IPEndPoint GetEndpoint()
     {
-        return IPEndPoint.Parse(EndpointString);
+        return EndpointUtils.TryParseEndpoint(EndpointString, out IPEndPoint ep)
+            ? ep
+            : throw new FormatException($"Invalid endpoint string: '{EndpointString}'");
     }
 
     /// <summary>
@@ -245,7 +256,7 @@ internal class MediationMessage
     /// </summary>
     public void SetEndpoint(IPEndPoint serverEndpoint)
     {
-        EndpointString = serverEndpoint.ToString();
+        EndpointString = EndpointUtils.Format(serverEndpoint);
     }
 
     /// <summary>

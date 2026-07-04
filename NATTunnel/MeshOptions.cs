@@ -13,7 +13,23 @@ namespace NATTunnel;
 internal sealed class MeshOptions
 {
     // ── Mediation ──
+    /// <summary>
+    /// Pre-resolved mediation endpoint, when the caller resolved DNS itself (embedded mode does).
+    /// Null in daemon mode, where the engine resolves <see cref="MediationHost"/>/<see cref="MediationPort"/>
+    /// lazily at connect time so an unresolvable host doesn't crash startup — it idles in a
+    /// config-error state the GUI can surface and the user can fix without a restart.
+    /// </summary>
     public IPEndPoint MediationEndpoint { get; init; }
+
+    /// <summary>
+    /// The mediation server's hostname (or IP literal) as configured, no port. The engine
+    /// resolves this at connect time when <see cref="MediationEndpoint"/> is null. Also used to
+    /// resolve the AAAA record for the IPv6 NAT test.
+    /// </summary>
+    public string MediationHost { get; init; }
+
+    /// <summary>The mediation server's port, paired with <see cref="MediationHost"/>.</summary>
+    public int MediationPort { get; init; }
 
     /// <summary>
     /// UDP port used for the peer-to-peer mesh-control channel (heartbeats, MeshConnectionBegin,
@@ -55,7 +71,10 @@ internal sealed class MeshOptions
     /// </summary>
     public static MeshOptions FromTunnelOptions() => new()
     {
-        MediationEndpoint = TunnelOptions.MediationEndpoint,
+        // Daemon defers DNS resolve to the engine's connect loop — leave MediationEndpoint null.
+        MediationEndpoint = null,
+        MediationHost = TunnelOptions.MediationHost,
+        MediationPort = TunnelOptions.MediationPort,
         NetworkID = TunnelOptions.NetworkID,
         NetworkSecret = TunnelOptions.NetworkSecret,
         TlsEnabled = TunnelOptions.TlsEnabled,

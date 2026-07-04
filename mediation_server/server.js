@@ -5,6 +5,7 @@ const http = require('http');
 const fs = require('fs');
 const { execSync } = require('child_process');
 const { Config, MessageTypes } = require('./constants');
+const { normalizeIP, formatEndpoint, isIPv6 } = require('./ip-utils');
 const ConnectionManager = require('./connection-manager');
 const MessageHandler = require('./message-handler');
 // Browser-facing NAT test (web-nat-test) is opt-in via Config.NAT_TEST_ENABLED.
@@ -114,47 +115,69 @@ class NATServer {
         }
 
         this.tcpServer.on('listening', () => this.logServerInfo('TCP', this.tcpServer));
-        this.tcpServer.on('error', (err) => console.error('TCP Server Error:', err));
+        this.tcpServer.on('error', (err) => {
+            // Dual-stack bind ("::") fails on hosts with IPv6 disabled — retry IPv4-only.
+            if ((err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL') && Config.BIND_ADDRESS === '::') {
+                console.warn(`TCP: IPv6 bind failed (${err.code}) — falling back to IPv4-only`);
+                this.tcpServer.listen(Config.TCP_PORT, '0.0.0.0');
+                return;
+            }
+            console.error('TCP Server Error:', err);
+        });
         this.tcpServer.listen(Config.TCP_PORT, Config.BIND_ADDRESS);
     }
 
     initializeUDPServer() {
-        this.udpServer = this.createUDPSocket('Main UDP');
-        this.udpServer.bind(Config.UDP_PORT);
+        this.bindDualStackSocket('Main UDP', Config.UDP_PORT, (socket) => {
+            this.udpServer = socket;
+            socket.on('message', (msg, info) => this.handleUDPMessage(msg, info));
+            socket.on('listening', () => this.logServerInfo('Main UDP', socket));
+        });
     }
 
     initializeNATTestServers() {
-        this.natTestServer1 = this.createNATTestSocket('NAT Test 1', Config.NAT_TEST_PORT_ONE, true);
-        this.natTestServer2 = this.createNATTestSocket('NAT Test 2', Config.NAT_TEST_PORT_TWO, false);
-
-        this.natTestServer1.bind(Config.NAT_TEST_PORT_ONE);
-        this.natTestServer2.bind(Config.NAT_TEST_PORT_TWO);
+        this.bindDualStackSocket('NAT Test 1', Config.NAT_TEST_PORT_ONE, (socket) => {
+            this.natTestServer1 = socket;
+            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, true));
+            socket.on('listening', () => console.log(`NAT Test 1 listening on port ${Config.NAT_TEST_PORT_ONE}`));
+        });
+        this.bindDualStackSocket('NAT Test 2', Config.NAT_TEST_PORT_TWO, (socket) => {
+            this.natTestServer2 = socket;
+            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, false));
+            socket.on('listening', () => console.log(`NAT Test 2 listening on port ${Config.NAT_TEST_PORT_TWO}`));
+        });
     }
 
-    createUDPSocket(name) {
-        const socket = udp.createSocket({ type: 'udp4', reuseAddr: true });
-
-        socket.on('error', (err) => console.error(`${name} Error:`, err));
-        socket.on('message', (msg, info) => this.handleUDPMessage(msg, info));
-        socket.on('listening', () => this.logServerInfo(name, socket));
-        socket.on('close', () => console.log(`${name} socket closed`));
-
-        return socket;
-    }
-
-    createNATTestSocket(name, port, isFirstPort) {
-        const socket = udp.createSocket({ type: 'udp4', reuseAddr: true });
-
-        socket.on('error', (err) => console.error(`${name} Error:`, err));
-        socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, isFirstPort));
-        socket.on('listening', () => console.log(`${name} listening on port ${port}`));
-        socket.on('close', () => console.log(`${name} socket closed`));
-
-        return socket;
+    /**
+     * Binds a dual-stack UDP socket (IPv4 + IPv6 on one port). udp6 with ipv6Only:false
+     * accepts v4 senders as v4-mapped addresses — message handlers normalize those back
+     * to plain IPv4 via normalizeIP. Falls back to udp4 on hosts with IPv6 disabled
+     * (bind failures surface as async 'error' events, hence the setup-callback shape:
+     * the fallback socket replaces the failed one through the same setup path).
+     */
+    bindDualStackSocket(name, port, setup) {
+        const createAndBind = (type) => {
+            const socket = type === 'udp6'
+                ? udp.createSocket({ type: 'udp6', ipv6Only: false, reuseAddr: true })
+                : udp.createSocket({ type: 'udp4', reuseAddr: true });
+            socket.on('error', (err) => {
+                if (type === 'udp6' && (err.code === 'EAFNOSUPPORT' || err.code === 'EADDRNOTAVAIL')) {
+                    console.warn(`${name}: IPv6 bind failed (${err.code}) — falling back to IPv4-only`);
+                    try { socket.close(); } catch (e) { }
+                    createAndBind('udp4');
+                    return;
+                }
+                console.error(`${name} Error:`, err);
+            });
+            socket.on('close', () => console.log(`${name} socket closed`));
+            setup(socket);
+            socket.bind(port);
+        };
+        createAndBind('udp6');
     }
 
     handleNewTCPConnection(socket) {
-        const clientIP = socket.remoteAddress;
+        const clientIP = normalizeIP(socket.remoteAddress);
 
         // Task 4: Check TCP connection rate limit
         if (!this.checkTCPConnectionRateLimit(clientIP)) {
@@ -164,11 +187,11 @@ class NATServer {
             return;
         }
 
-        console.log(`New connection from ${socket.remoteAddress}:${socket.remotePort}`);
+        console.log(`New connection from ${clientIP}:${socket.remotePort}`);
 
         const socketInfo = this.connectionManager.addSocket(
             socket,
-            socket.remoteAddress,
+            clientIP,
             socket.remotePort,
             Config.DEFAULT_TIMEOUT
         );
@@ -266,48 +289,67 @@ class NATServer {
     }
 
     handleUDPMessage(msg, info) {
+        const address = normalizeIP(info.address);
         // Try to correlate this UDP keepalive to a specific socket by matching
         // both IP and external port. This is needed so addUDPInfo can use localPort
         // as the dedup key — otherwise same-NAT peers (same IP) would clobber each other.
         const socketInfo = this.connectionManager.sockets.find(
-            s => (s.udpIp === info.address || s.ip === info.address) &&
+            s => (s.udpIp === address || s.ip === address) &&
                 (s.externalPortOne === info.port || s.externalPortTwo === info.port)
         );
-        this.connectionManager.updateTimeout(socketInfo || info.address);
+        this.connectionManager.updateTimeout(socketInfo || address);
         const localPort = socketInfo ? socketInfo.localPort : null;
-        this.connectionManager.addUDPInfo(info.address, info.port, localPort);
+        this.connectionManager.addUDPInfo(address, info.port, localPort);
     }
 
     handleNATTestMessage(msg, info, isFirstPort) {
         try {
             const message = JSON.parse(msg);
             if (message.ID === MessageTypes.NATTest) {
-                const socket = this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort);
-                if (socket) {
-                    // Store the UDP source IP separately so we don't clobber the TCP IP.
-                    // Symmetric NAT peers may use different IPs for TCP vs UDP traffic.
-                    // socket.ip stays as the TCP IP (used for socket lifecycle management);
-                    // socket.udpIp tracks the UDP IP (used for peer endpoint tracking).
-                    socket.udpIp = info.address;
-                    // If TCP and UDP IPs match, also update socket.ip (handles ::ffff: normalization)
-                    if (!socket.ip || socket.ip === '0.0.0.0') {
-                        socket.ip = info.address;
-                    }
+                const address = normalizeIP(info.address);
+                const packetIsV6 = isIPv6(address);
 
-                    // Add UDP info for this peer so connection requests work
-                    // Store the external port (as seen by the server) — this is the port
-                    // that other peers need to send to. Also store localPort for lookups.
-                    // For DirectMapping, external == local. For Restricted NAT, they may differ.
-                    console.log(`[Server] Adding UDP info from NAT test: ${info.address}:${info.port} (localPort=${socket.localPort}, tcpIp=${socket.ip})`);
-                    this.connectionManager.addUDPInfo(info.address, info.port, socket.localPort);
+                const socket = this.connectionManager.sockets.find(s => s.clientID === message.ClientID);
+                if (!socket) return;
 
-                    this.connectionManager.checkNATType(
-                        socket.socket,
-                        socket.localPort,
-                        socket.externalPortOne,
-                        socket.externalPortTwo
-                    );
+                // Always record the observed IPv6 endpoint (used as the v6 connect candidate),
+                // regardless of which family is primary. Reflects whatever port a v6 firewall or
+                // NAT66 assigned — no assumption it's unrewritten.
+                if (packetIsV6) {
+                    socket.endpointV6 = formatEndpoint(address, info.port);
+                    console.log(`[Server] Observed IPv6 endpoint for ${message.ClientID}: ${socket.endpointV6}`);
                 }
+
+                // The peer's PRIMARY family is how it reached the mediation server (its TCP
+                // connection). NAT-type detection and the primary v4 endpoint are driven only by
+                // NAT-test packets of that family; the other family is observation-only (its
+                // endpoint is still recorded above for v6). This lets a v6-primary peer get a real
+                // NAT type from its v6 probes instead of defaulting to Unknown.
+                const primaryIsV6 = isIPv6(socket.ip);
+                if (packetIsV6 !== primaryIsV6) {
+                    return; // Secondary-family packet — endpoint noted, but doesn't drive NAT type.
+                }
+
+                this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort);
+
+                // Track the UDP source IP separately so we don't clobber the TCP IP.
+                // Symmetric NAT peers may use different IPs for TCP vs UDP traffic.
+                socket.udpIp = address;
+                if (!socket.ip || socket.ip === '0.0.0.0') {
+                    socket.ip = address;
+                }
+
+                // Add UDP info so connection requests can build this peer's primary endpoint.
+                // Store the external port (as seen by the server) — the port other peers send to.
+                console.log(`[Server] Adding UDP info from NAT test: ${address}:${info.port} (localPort=${socket.localPort}, tcpIp=${socket.ip})`);
+                this.connectionManager.addUDPInfo(address, info.port, socket.localPort);
+
+                this.connectionManager.checkNATType(
+                    socket.socket,
+                    socket.localPort,
+                    socket.externalPortOne,
+                    socket.externalPortTwo
+                );
             }
         } catch (e) {
             console.error('Invalid NAT test message:', e);

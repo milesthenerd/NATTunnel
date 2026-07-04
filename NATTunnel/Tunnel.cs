@@ -114,7 +114,10 @@ internal class Tunnel : IDisposable
         this.lastActivityTime = DateTime.UtcNow;
         this.retryInPlace = retryInPlace;
 
-        endpoint = TunnelOptions.MediationEndpoint;
+        // Legacy direct-connect "check" ping target. Mesh mode drives mediation through the
+        // engine, not per-Tunnel, so this stays null there; the resolved endpoint is no longer a
+        // TunnelOptions static (DNS is deferred to the engine's connect loop).
+        endpoint = null;
 
         // Set mesh IP if provided
         if (ownMeshIP != null)
@@ -123,21 +126,9 @@ internal class Tunnel : IDisposable
             privateIP = this.ownMeshIP;
         }
 
-        // Parse mesh peer endpoint if provided
-        // Format is either "1.2.3.4:PORT" or "::ffff:1.2.3.4:PORT" (IPv6-mapped)
-        if (meshPeerEndpoint != null)
-        {
-            int lastColon = meshPeerEndpoint.LastIndexOf(':');
-            if (lastColon > 0 && int.TryParse(meshPeerEndpoint.Substring(lastColon + 1), out var peerPort))
-            {
-                string ipPart = meshPeerEndpoint.Substring(0, lastColon);
-                // Strip IPv6-mapped IPv4 prefix (::ffff:)
-                if (ipPart.StartsWith("::ffff:", StringComparison.OrdinalIgnoreCase))
-                    ipPart = ipPart.Substring(7);
-                if (IPAddress.TryParse(ipPart, out var peerIp))
-                    this.meshPeerEndpoint = new IPEndPoint(peerIp, peerPort);
-            }
-        }
+        // Parse mesh peer endpoint if provided — handles IPv4, [IPv6]:port, and v4-mapped forms
+        if (meshPeerEndpoint != null && EndpointUtils.TryParseEndpoint(meshPeerEndpoint, out var parsedPeerEp))
+            this.meshPeerEndpoint = parsedPeerEp;
 
         // Use shared UDP client if provided, otherwise create a new one
         if (sharedUdpClient != null)
@@ -147,28 +138,19 @@ internal class Tunnel : IDisposable
         }
         else
         {
-            udpClient = new UdpClient();
-            udpClient.Client.ReceiveBufferSize = 128000;
-
-            // Explicitly bind to a random port (0 = OS assigns ephemeral port)
-            // This ensures we have a local port before WireGuard configuration
-            udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
-
-            // Windows-specific udpClient switch
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                // ReSharper disable once IdentifierTypo - taken from here:
-                // https://docs.microsoft.com/en-us/windows/win32/winsock/winsock-ioctls#sio_udp_connreset-opcode-setting-i-t3
-                const int SIO_UDP_CONNRESET = -1744830452;
-                udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-            }
+            // Bound immediately (port 0 = OS assigns ephemeral) so we have a local port
+            // before WireGuard configuration.
+            udpClient = SocketUtils.CreateUdpClient();
         }
 
-        //Try to send initial msg to mediator
+        //Try to send initial msg to mediator (legacy direct-connect path only)
         try
         {
-            byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
-            udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
+            if (endpoint != null)
+            {
+                byte[] sendBuffer = Encoding.ASCII.GetBytes("check");
+                udpClient.Send(sendBuffer, sendBuffer.Length, endpoint);
+            }
         }
         catch (Exception ex)
         {
@@ -321,21 +303,11 @@ internal class Tunnel : IDisposable
             peerMeshIP = IPAddress.Parse(peerMeshIPString);
         }
 
-        // Parse endpoint — handle both "1.2.3.4:PORT" and "::ffff:1.2.3.4:PORT" formats
-        string parsedIpString = null;
-        int parsedPort = 0;
-        int lastColon = endpointString.LastIndexOf(':');
-        if (lastColon > 0 && int.TryParse(endpointString.Substring(lastColon + 1), out parsedPort))
+        // Parse endpoint — handles IPv4, [IPv6]:port, and v4-mapped forms
+        if (EndpointUtils.TryParseEndpoint(endpointString, out var parsedTargetEp))
         {
-            parsedIpString = endpointString.Substring(0, lastColon);
-            // Strip IPv6-mapped IPv4 prefix (::ffff:)
-            if (parsedIpString.StartsWith("::ffff:", StringComparison.OrdinalIgnoreCase))
-                parsedIpString = parsedIpString.Substring(7);
-            if (IPAddress.TryParse(parsedIpString, out var parsedIp))
-            {
-                targetPeerIp = parsedIp;
-                targetPeerPort = parsedPort;
-            }
+            targetPeerIp = parsedTargetEp.Address;
+            targetPeerPort = parsedTargetEp.Port;
         }
 
         // Set our own NAT type (first time only)
@@ -383,22 +355,24 @@ internal class Tunnel : IDisposable
 
             while (symmetricConnectionUdpProbes.Count < 256)
             {
-                System.Net.Sockets.UdpClient tempUdpClient = new System.Net.Sockets.UdpClient();
-                tempUdpClient.Client.ReceiveBufferSize = 128000;
-                const int SIO_UDP_CONNRESET = -1744830452;
-                tempUdpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-                tempUdpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
+                // Dual-stack like the main socket — v6 peers still need the firewall punched
+                // even though there's no NAT to traverse.
+                System.Net.Sockets.UdpClient tempUdpClient = SocketUtils.CreateUdpClient();
                 var capturedProbe = tempUdpClient;
                 tempUdpClient.BeginReceive(new AsyncCallback((IAsyncResult res) =>
                 {
                     try
                     {
                         if (Volatile.Read(ref disposed) != 0) return;
-                        IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.Any, 0);
+                        IPEndPoint receivedEndpoint = new IPEndPoint(IPAddress.IPv6Any, 0);
                         byte[] receivedBuffer = capturedProbe.EndReceive(res, ref receivedEndpoint);
                         holePunchReceivedCount++;
 
-                        if (receivedEndpoint.Address.Equals(targetPeerIp) && Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
+                        // The probe socket is dual-stack, so a v4 sender arrives as a v4-mapped
+                        // address (::ffff:a.b.c.d) that won't .Equals a plain-v4 targetPeerIp —
+                        // normalize both sides before comparing so the winning probe is recognized.
+                        if (EndpointUtils.Normalize(receivedEndpoint.Address).Equals(EndpointUtils.Normalize(targetPeerIp)) &&
+                            Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
                         {
                             Program.Log(LogLevel.Info, $"[Symmetric NAT] Connection established on probe port {((IPEndPoint)capturedProbe.Client.LocalEndPoint).Port}");
 
@@ -415,7 +389,9 @@ internal class Tunnel : IDisposable
                             // connection establishment.
                             totalBytesReceived += receivedBuffer.Length;
                             UpdateActivity();
-                            ProcessUdpPacketBody(receivedBuffer, receivedEndpoint);
+                            // Normalize the v4-mapped source before dispatching so downstream
+                            // endpoint comparisons match plain-v4 expectations.
+                            ProcessUdpPacketBody(receivedBuffer, EndpointUtils.Normalize(receivedEndpoint));
 
                             // Start a receive loop on the winning probe socket for this tunnel only.
                             // Stored as a field so Dispose can cancel and await it instead of
@@ -424,7 +400,7 @@ internal class Tunnel : IDisposable
                             var capturedCts = winningProbeCts;
                             winningProbeTask = Task.Run(() =>
                             {
-                                IPEndPoint probeEp = new IPEndPoint(IPAddress.Any, 0);
+                                IPEndPoint probeEp = new IPEndPoint(IPAddress.IPv6Any, 0);
                                 while (!capturedCts.Token.IsCancellationRequested)
                                 {
                                     try
@@ -433,7 +409,7 @@ internal class Tunnel : IDisposable
                                         if (Volatile.Read(ref disposed) != 0) break;
                                         totalBytesReceived += data.Length;
                                         UpdateActivity();
-                                        ProcessUdpPacketBody(data, probeEp);
+                                        ProcessUdpPacketBody(data, EndpointUtils.Normalize(probeEp));
                                     }
                                     catch (SocketException) { break; }
                                     catch (ObjectDisposedException) { break; }
@@ -542,7 +518,9 @@ internal class Tunnel : IDisposable
             totalBytesReceived += receiveBuffer.Length;
             UpdateActivity();
 
-            ProcessUdpPacketBody(receiveBuffer, listenEndpoint);
+            // Dual-stack sockets report IPv4 senders as ::ffff:a.b.c.d — unwrap so the
+            // endpoint comparisons downstream match plain-v4 expected endpoints.
+            ProcessUdpPacketBody(receiveBuffer, EndpointUtils.Normalize(listenEndpoint));
         }
 
     }
@@ -1079,8 +1057,68 @@ internal class Tunnel : IDisposable
     }
 
     /// <summary>
-    /// Returns true if the given IP belongs to a network interface with a /32 (host-route)
-    /// netmask, which is how virtual tunnel adapters configure themselves.
+    /// True if this machine has a globally-routable IPv6 source address for reaching the public
+    /// internet. Used to gate the IPv6 NAT test: a machine with only a link-local/ULA/site-local
+    /// v6 address (common — Windows assigns link-local to every interface) has no usable v6 path
+    /// to peers, so it must NOT advertise a v6 endpoint. The connect() picks the source address
+    /// the OS would actually use for a public v6 destination without sending anything; if there's
+    /// no route, it throws and we return false.
+    /// </summary>
+    public static bool HasGlobalIPv6() => GetGlobalIPv6Candidate() != null;
+
+    /// <summary>
+    /// Returns the native global-unicast IPv6 source address the OS would use to reach the public
+    /// internet, or null if none qualifies. Exposed (vs a bare bool) so callers can log exactly
+    /// which address was chosen/rejected when diagnosing v6 reachability.
+    /// </summary>
+    public static IPAddress GetGlobalIPv6Candidate()
+    {
+        if (!Socket.OSSupportsIPv6) return null;
+        try
+        {
+            using var socket = new Socket(AddressFamily.InterNetworkV6, SocketType.Dgram, 0);
+            socket.Connect("2606:4700:4700::1111", 65530); // Cloudflare public DNS (v6)
+            var candidate = (socket.LocalEndPoint as IPEndPoint)?.Address;
+            return IsNativeGlobalIPv6(candidate) ? candidate : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// True only for a NATIVE global-unicast IPv6 address that is actually reachable peer-to-peer.
+    /// Rejects link-local/ULA/site-local AND the pseudo-global tunnel/transition ranges (Teredo,
+    /// 6to4, ISATAP-style, documentation) that present as global unicast but are NOT reliably
+    /// reachable inbound from other peers — advertising one of those makes a peer look v6-reachable
+    /// when it isn't, so a v4-only partner gets handed an unusable v6 endpoint.
+    /// </summary>
+    private static bool IsNativeGlobalIPv6(IPAddress candidate)
+    {
+        if (candidate == null || candidate.AddressFamily != AddressFamily.InterNetworkV6) return false;
+        if (candidate.IsIPv6LinkLocal || candidate.IsIPv6SiteLocal || candidate.IsIPv6UniqueLocal ||
+            candidate.IsIPv6Multicast || IPAddress.IsLoopback(candidate)) return false;
+
+        byte[] b = candidate.GetAddressBytes();
+        // Global unicast is 2000::/3 — the top 3 bits are 001, i.e. first byte 0x20–0x3F.
+        if ((b[0] & 0xE0) != 0x20) return false;
+
+        // Teredo: 2001:0000::/32 (first two bytes 0x2001, next two 0x0000).
+        if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00) return false;
+        // 6to4: 2002::/16.
+        if (b[0] == 0x20 && b[1] == 0x02) return false;
+        // Documentation prefix 2001:db8::/32 — never real.
+        if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return false;
+
+        // A native global address on a virtual tunnel adapter is still not a real peer path.
+        if (IsTunnelAdapterAddress(candidate)) return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Returns true if the given IP belongs to a network interface with a host-route netmask
+    /// (/32 for IPv4, /128 for IPv6), which is how virtual tunnel adapters configure themselves.
     /// </summary>
     private static bool IsTunnelAdapterAddress(IPAddress ip)
     {
@@ -1091,6 +1129,13 @@ internal class Tunnel : IDisposable
                 foreach (var ua in nic.GetIPProperties().UnicastAddresses)
                 {
                     if (!ip.Equals(ua.Address)) continue;
+                    if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+                        // Prefix length is NOT a reliable tunnel-adapter signal for IPv6: a /128 is
+                        // perfectly normal for a real global address (SLAAC/DHCPv6 on Windows hands
+                        // out /128 routinely). The caller (HasGlobalIPv6) already rejects
+                        // link-local/ULA/site-local and has proven a working route via connect(),
+                        // so a genuine global-unicast v6 address here is legitimate — not a tunnel.
+                        return false;
                     // A /32 mask is 255.255.255.255 — convert PrefixLength to be robust across
                     // platforms that may not populate IPv4Mask reliably (Windows does, Linux mostly does).
                     if (ua.PrefixLength == 32) return true;

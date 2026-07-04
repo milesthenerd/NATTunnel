@@ -3,6 +3,7 @@ const { Buffer } = require('buffer');
 const fs = require('fs');
 const path = require('path');
 const NetworkRegistry = require('./network-registry');
+const { normalizeIP, formatEndpoint, sameFamily } = require('./ip-utils');
 
 const SECRETS_FILE = path.join(__dirname, 'network-secrets.json');
 
@@ -94,10 +95,11 @@ class MessageHandler {
 
     handleKeepAlive(socket) {
         // Primary lookup: Use IP:port (most reliable for sockets behind proxies/NAT)
+        const remoteIP = normalizeIP(socket.remoteAddress);
         let socketInfo = null;
-        if (socket.remoteAddress && socket.remotePort) {
+        if (remoteIP && socket.remotePort) {
             socketInfo = this.connectionManager.sockets.find(s =>
-                s.ip === socket.remoteAddress && s.tcpPort === socket.remotePort
+                s.ip === remoteIP && s.tcpPort === socket.remotePort
             );
         }
 
@@ -109,7 +111,7 @@ class MessageHandler {
                 // UDP traffic still comes from original IP, so we don't update UDP info
 
                 // Update the stored TCP IP and port for timeout management
-                socketInfo.ip = socket.remoteAddress;
+                socketInfo.ip = remoteIP;
                 socketInfo.tcpPort = socket.remotePort;
                 // Note: localPort stays the same, it's used to find UDP info later
             }
@@ -329,13 +331,17 @@ class MessageHandler {
             );
         }
 
-        if (!clientUDPInfo) {
+        // A v6-only peer has no v4 UDP info. Tolerate that as long as it has a v6 endpoint —
+        // the pairing logic below connects the two peers over whichever family both share.
+        const clientPeerV6 = (clientPeer && clientPeer.endpointV6) || null;
+        if (!clientUDPInfo && !clientPeerV6) {
             this.sendServerNotAvailable(socket);
             return;
         }
 
-        // Use external port (info.port) for the endpoint — this is what the remote peer sees
-        const clientEndpoint = `${clientUDPInfo.ip}:${clientUDPInfo.port}`;
+        // Use external port (info.port) for the endpoint — this is what the remote peer sees.
+        // Null when the peer is v6-only (no v4 UDP observation).
+        const clientEndpoint = clientUDPInfo ? formatEndpoint(clientUDPInfo.ip, clientUDPInfo.port) : null;
 
         // Store the connection pair
         // Track both clientID (for notification) and socket reference (for precise cleanup).
@@ -386,36 +392,72 @@ class MessageHandler {
                 );
             }
 
-            if (!targetUDPInfo) {
+            // A v6-only target has no v4 UDP info — tolerate it when it has a v6 endpoint.
+            const targetV6 = (targetPeer && targetPeer.endpointV6) || null;
+            if (!targetUDPInfo && !targetV6) {
                 this.sendServerNotAvailable(socket);
                 return;
             }
 
-            // Use external port (info.port) for the endpoint — this is what the remote peer sees
-            const targetEndpoint = `${targetUDPInfo.ip}:${targetUDPInfo.port}`;
+            // Use external port (info.port) for the endpoint — null when the target is v6-only.
+            const targetEndpoint = targetUDPInfo ? formatEndpoint(targetUDPInfo.ip, targetUDPInfo.port) : null;
 
-            // Detect same-NAT peers: if both share the same public IP, use LAN endpoints
-            // so they connect directly over the local network (NAT hairpinning is unreliable).
-            // Only substitute the LAN endpoint for a peer when the *other* peer is also on the
-            // same NAT — an external peer must never receive a LAN endpoint it can't reach.
-            const sameNAT = clientUDPInfo.ip === targetUDPInfo.ip;
-            const clientLANEndpoint = (sameNAT && clientSocketInfo.localIP)
-                ? `${clientSocketInfo.localIP}:${clientSocketInfo.localPort}` : null;
-            const targetLANEndpoint = (sameNAT && targetSocket.localIP)
-                ? `${targetSocket.localIP}:${targetSocket.localPort}` : null;
+            // Prefer IPv6 when BOTH peers advertised a usable v6 endpoint: no NAT to traverse,
+            // so a direct connection lands more reliably. Each side is handed the other's v6
+            // endpoint. Falls through to the v4 path (including same-NAT LAN substitution) when
+            // either peer lacks v6.
+            const clientV6 = clientPeerV6;
+            const useV6 = clientV6 && targetV6;
 
-            if (sameNAT && clientLANEndpoint && targetLANEndpoint) {
-                console.log(`[MessageHandler] Same-NAT detected! Using LAN endpoints: ${clientLANEndpoint} <-> ${targetLANEndpoint}`);
+            let endpointForClient;
+            let endpointForTarget;
+            if (useV6) {
+                endpointForClient = targetV6;
+                endpointForTarget = clientV6;
+                console.log(`[MessageHandler] Both peers have IPv6 — using v6 endpoints: ${clientV6} <-> ${targetV6}`);
+            } else {
+                // Detect same-NAT peers: if both share the same public IP, use LAN endpoints
+                // so they connect directly over the local network (NAT hairpinning is unreliable).
+                // Only substitute the LAN endpoint for a peer when the *other* peer is also on the
+                // same NAT — an external peer must never receive a LAN endpoint it can't reach.
+                // Requires v4 UDP info on both sides (a v6-only peer has none).
+                const sameNAT = clientUDPInfo && targetUDPInfo &&
+                    normalizeIP(clientUDPInfo.ip) === normalizeIP(targetUDPInfo.ip);
+                const clientLANEndpoint = (sameNAT && clientSocketInfo.localIP)
+                    ? formatEndpoint(clientSocketInfo.localIP, clientSocketInfo.localPort) : null;
+                const targetLANEndpoint = (sameNAT && targetSocket.localIP)
+                    ? formatEndpoint(targetSocket.localIP, targetSocket.localPort) : null;
+
+                if (sameNAT && clientLANEndpoint && targetLANEndpoint) {
+                    console.log(`[MessageHandler] Same-NAT detected! Using LAN endpoints: ${clientLANEndpoint} <-> ${targetLANEndpoint}`);
+                }
+
+                // Each peer gets: if the remote peer is on the same NAT and has a LAN IP, use it;
+                // otherwise use the remote peer's external endpoint.
+                endpointForClient = targetLANEndpoint || targetEndpoint;
+                endpointForTarget = clientLANEndpoint || clientEndpoint;
             }
 
-            // Each peer gets: if the remote peer is on the same NAT and has a LAN IP, use it;
-            // otherwise use the remote peer's external endpoint.
-            const endpointForClient = targetLANEndpoint || targetEndpoint;
-            const endpointForTarget = clientLANEndpoint || clientEndpoint;
+            // The two chosen endpoints must be the same address family — a v4 peer can't reach a
+            // v6 endpoint or vice versa. Catches a v4-only peer paired with a v6-only peer, and a
+            // mismatch where each has an endpoint but of different families. Relay can't bridge
+            // families, so there's nothing to do.
+            if (!sameFamily(endpointForClient, endpointForTarget)) {
+                console.log(`[MessageHandler] Cannot connect ${clientSocketInfo.clientID} <-> ${message.PeerID} — no shared address family (v4/v6 mismatch)`);
+                this.sendServerNotAvailable(socket);
+                return;
+            }
 
             // Get NAT types
             const clientNatType = message.NATType !== undefined ? message.NATType : -1;
             const targetNatType = targetSocket.natType !== undefined ? targetSocket.natType : -1;
+
+            // ExternalEndpointString carries the endpoint the receiver can forward to peers
+            // outside this LAN. Each peer is told the OTHER peer's external endpoint. When we
+            // paired over v6, that's the v6 endpoint (no NAT-external distinction on v6);
+            // otherwise the v4 external. May be null for a v6-only peer paired over v6.
+            const targetExternalForClient = useV6 ? targetV6 : targetEndpoint;
+            const clientExternalForTarget = useV6 ? clientV6 : clientEndpoint;
 
             // Send ConnectionBegin to initiating peer.
             // ExternalEndpointString always carries the external endpoint so the receiver
@@ -424,7 +466,7 @@ class MessageHandler {
             const clientMessage = {
                 ID: MessageTypes.ConnectionBegin,
                 EndpointString: endpointForClient,
-                ExternalEndpointString: targetEndpoint,
+                ExternalEndpointString: targetExternalForClient,
                 NATType: targetNatType,
                 OwnNATType: clientNatType,  // Initiating peer's own NAT type
                 ConnectionID: connectionId,
@@ -442,7 +484,7 @@ class MessageHandler {
             const serverMessage = {
                 ID: MessageTypes.ConnectionBegin,
                 EndpointString: endpointForTarget,
-                ExternalEndpointString: clientEndpoint,
+                ExternalEndpointString: clientExternalForTarget,
                 NATType: clientNatType,
                 OwnNATType: targetNatType,  // Target peer's own NAT type
                 ConnectionID: connectionId,
@@ -456,9 +498,10 @@ class MessageHandler {
 
             targetSocket.socket.write(Buffer.from(JSON.stringify(serverMessage)));
 
-            // Store endpoint info for mesh peer tunnels that will connect later
-            this.connectionManager.currentConnectionPairs[connectionId].client_endpoint = clientEndpoint;
-            this.connectionManager.currentConnectionPairs[connectionId].server_endpoint = targetEndpoint;
+            // Store endpoint info for mesh peer tunnels that will connect later. Records the
+            // family actually used to pair (v6 when both had it), falling back to the v4 external.
+            this.connectionManager.currentConnectionPairs[connectionId].client_endpoint = clientExternalForTarget;
+            this.connectionManager.currentConnectionPairs[connectionId].server_endpoint = targetExternalForClient;
             this.connectionManager.currentConnectionPairs[connectionId].client_localPort = clientSocketInfo.localPort;
             this.connectionManager.currentConnectionPairs[connectionId].server_localPort = targetSocket.localPort;
             this.connectionManager.currentConnectionPairs[connectionId].client_natType = clientNatType;
@@ -604,7 +647,7 @@ class MessageHandler {
 
         // Primary: Lookup by IP:port
         if (socket.remoteAddress && socket.remotePort) {
-            const remoteAddr = socket.remoteAddress;
+            const remoteAddr = normalizeIP(socket.remoteAddress);
             const remotePort = socket.remotePort;
             socketInfo = this.connectionManager.sockets.find(s => s.ip === remoteAddr && s.tcpPort === remotePort);
         }
@@ -618,8 +661,9 @@ class MessageHandler {
         if (!socketInfo) {
             socketInfo = this.connectionManager.sockets.find(s => s.socket === socket);
             if (socketInfo) {
-                if (socketInfo.ip !== socket.remoteAddress || socketInfo.tcpPort !== socket.remotePort) {
-                    socketInfo.ip = socket.remoteAddress;
+                const remoteAddr = normalizeIP(socket.remoteAddress);
+                if (socketInfo.ip !== remoteAddr || socketInfo.tcpPort !== socket.remotePort) {
+                    socketInfo.ip = remoteAddr;
                     socketInfo.tcpPort = socket.remotePort;
                 }
             }
@@ -649,20 +693,11 @@ class MessageHandler {
         // Mesh peers stay connected to receive peer updates and connection coordination
         this.connectionManager.updateTimeout(socketInfo);  // Pass socketInfo object directly
 
-        // Use the UDP IP (where the peer actually sends UDP from) for the endpoint.
-        // For symmetric NAT, the UDP IP may differ from the TCP IP.
-        // Fall back to TCP IP if no UDP IP is available yet.
-        let peerIP = socketInfo.udpIp || socketInfo.ip;
-        // Strip ::ffff: IPv6-mapped prefix so endpoints are plain IPv4 (e.g. "1.2.3.4:PORT")
-        if (peerIP && peerIP.startsWith('::ffff:')) {
-            peerIP = peerIP.substring(7);
-        }
-
-        // Use the external port from UDP info (as seen by the server) — this is the port
-        // other peers need to send to. For DirectMapping, external == local. For Restricted
-        // NAT, the external port may differ from the local port.
-        // This matches handleConnectionRequest which uses clientUDPInfo.port.
-        let externalPort = socketInfo.localPort || 0;
+        // Build the peer's IPv4 endpoint from its v4 UDP NAT-test info. udpInfo presence is the
+        // "peer is v4-reachable" signal: the v6 NAT test uses a separate path that never calls
+        // addUDPInfo, so a v6-only peer has no udpInfo here. In that case the v4 endpoint is left
+        // null — the peer is reachable only via socketInfo.endpointV6, and coordinators pair peers
+        // on whichever family both share.
         let udpInfo = null;
         if (socketInfo.localPort) {
             udpInfo = this.connectionManager.udpConnectionInfo.find(
@@ -670,15 +705,15 @@ class MessageHandler {
             );
         }
         if (!udpInfo) {
+            const peerIP = normalizeIP(socketInfo.udpIp || socketInfo.ip);
             udpInfo = this.connectionManager.udpConnectionInfo.find(
                 info => peerIP === info.ip || (socketInfo.ip && socketInfo.ip.includes(info.ip)) ||
                     (socketInfo.udpIp && socketInfo.udpIp.includes(info.ip))
             );
         }
-        if (udpInfo) {
-            externalPort = udpInfo.port;
-        }
-        const endpoint = `${peerIP}:${externalPort}`;
+        // Only a genuine v4 UDP observation yields a v4 endpoint. Don't fall back to the TCP IP:
+        // that produced a plausible-looking endpoint with the wrong (TCP) port for v6-only peers.
+        const endpoint = udpInfo ? formatEndpoint(udpInfo.ip, udpInfo.port) : null;
 
         const { NATTypes } = require('./constants');
 
@@ -695,7 +730,8 @@ class MessageHandler {
                 socketInfo.localPort,  // Local UDP port
                 peerMinVersion,        // Peer-to-peer protocol range advertised by this client
                 peerMaxVersion,
-                identityPublicKey      // Base64 X25519 identity pubkey for block fingerprinting
+                identityPublicKey,     // Base64 X25519 identity pubkey for block fingerprinting
+                socketInfo.endpointV6  // Publicly-observed IPv6 endpoint, or null if no v6 route
             );
 
             console.log(`[MessageHandler] Peer ${PeerID} joined network ${NetworkID} (${otherPeers.length} active peers)`);
@@ -749,6 +785,7 @@ class MessageHandler {
                         peerMinVersion: p.peerMinVersion,
                         peerMaxVersion: p.peerMaxVersion,
                         identityPublicKey: p.identityPublicKey,
+                        endpointV6: p.endpointV6,
                         joinTime: Date.now()
                     });
                 }
@@ -826,7 +863,8 @@ class MessageHandler {
                     meshIP: introducer.meshIP,
                     peerMinVersion: introducer.peerMinVersion,
                     peerMaxVersion: introducer.peerMaxVersion,
-                    identityPublicKey: introducer.identityPublicKey
+                    identityPublicKey: introducer.identityPublicKey,
+                    endpointV6: introducer.endpointV6
                 });
             }
 
@@ -857,6 +895,7 @@ class MessageHandler {
                         PeerMinVersion: peerMinVersion,    // New peer's peer-to-peer protocol range
                         PeerMaxVersion: peerMaxVersion,
                         IdentityPublicKey: identityPublicKey,
+                        EndpointV6String: socketInfo.endpointV6,  // New peer's observed IPv6 endpoint (or undefined)
                         OtherPeers: peersToIntroduce  // Peers to forward the introduction to (may be empty)
                     };
                     introducerPeer.socket.write(Buffer.from(JSON.stringify(introduceRequest)));
@@ -872,7 +911,8 @@ class MessageHandler {
                             localPort: socketInfo.localPort,
                             peerMinVersion,
                             peerMaxVersion,
-                            identityPublicKey
+                            identityPublicKey,
+                            endpointV6: socketInfo.endpointV6
                         },
                         peersToIntroduce,
                         introducerPeerID: introducer.peerID,
@@ -1052,6 +1092,7 @@ class MessageHandler {
                                 peerMinVersion: m.peerMinVersion,
                                 peerMaxVersion: m.peerMaxVersion,
                                 identityPublicKey: m.identityPublicKey,
+                                endpointV6: m.endpointV6,
                                 joinTime: Date.now()
                             });
                         }
@@ -1082,6 +1123,7 @@ class MessageHandler {
                 PeerMinVersion: pending.newPeerInfo.peerMinVersion,
                 PeerMaxVersion: pending.newPeerInfo.peerMaxVersion,
                 IdentityPublicKey: pending.newPeerInfo.identityPublicKey,
+                EndpointV6String: pending.newPeerInfo.endpointV6,
                 OtherPeers: remainingPeers
             };
 

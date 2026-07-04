@@ -126,31 +126,19 @@ public static class Config
         try
         {
             string endpointString = (string)model[MediationEndpoint];
-            int colonIndex = endpointString.IndexOf(':');
-            string ip;
-            int portForMediationIP;
-
-            if (colonIndex <= 0)
+            // "host[:port]" with a 6510 default; IPv6 literals use brackets ("[2001:db8::1]:6510").
+            // Validate syntax ONLY — DNS resolution is deferred to the engine's connect loop so an
+            // unresolvable/unreachable host doesn't crash startup. The daemon comes up and idles in
+            // a config-error state the GUI surfaces, and the user can fix the host without a restart.
+            if (!EndpointUtils.TrySplitHostPortWithDefault(endpointString, 6510, out string ip, out int portForMediationIP))
             {
-                // No port supplied — default to the conventional 6510.
-                ip = endpointString;
-                portForMediationIP = 6510;
-                endpointString = $"{ip}:{portForMediationIP}";
-            }
-            else
-            {
-                ip = endpointString[..colonIndex];
-                string port = endpointString[(colonIndex + 1)..];
-                if (!Int32.TryParse(port, out portForMediationIP))
-                {
-                    Console.Error.WriteLine($"Invalid port for {MediationEndpoint}!");
-                    return false;
-                }
+                Console.Error.WriteLine($"Invalid {MediationEndpoint}!");
+                return false;
             }
 
-            //Try to parse mediationEndpoint with DNS lookup
-            TunnelOptions.MediationEndpoint = new IPEndPoint(GetIPFromDnsResolve(ip), portForMediationIP);
-            TunnelOptions.MediationEndpointString = endpointString;
+            TunnelOptions.MediationHost = ip;
+            TunnelOptions.MediationPort = portForMediationIP;
+            TunnelOptions.MediationEndpointString = EndpointUtils.Format(ip, portForMediationIP);
         }
         catch
         {
@@ -479,28 +467,6 @@ public static class Config
     private static string GenerateNetworkID() => MeshConfig.GenerateNetworkID();
 
     private static string GenerateNetworkSecret() => MeshConfig.GenerateNetworkSecret();
-
-    /// <summary>
-    /// Helper method that resolves a DNS and returns the correct IPvX ip depending on what's supported.
-    /// </summary>
-    /// <param name="dns">The dns to resolve and get the ip from.</param>
-    /// <returns>An IPv6 ip of IPv6 is supported, otherwise an IPv4 ip.</returns>
-    private static IPAddress GetIPFromDnsResolve(string dns)
-    {
-        IPAddress[] ips = Dns.GetHostAddresses(dns);
-        IPAddress ipToReturn = null;
-
-        // If we support ipv6, return the first ipv6 ip (if it exists), otherwise return the first ipv4 ip.
-        if (TunnelOptions.IsIPv6Supported)
-            ipToReturn = ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetworkV6);
-
-        ipToReturn ??= ips.FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetwork);
-
-        if (ipToReturn is null)
-            throw new ArgumentException($"DNS {dns} could not be resolved to neither an IPv6 nor an IPv4 Address.");
-
-        return ipToReturn;
-    }
 
     /// <summary>
     /// Creates a new config file with mesh networking defaults.

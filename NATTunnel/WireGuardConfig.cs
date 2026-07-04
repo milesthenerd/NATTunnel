@@ -28,7 +28,7 @@ internal static class WireGuardConfig
             config.AppendLine();
             config.AppendLine("[Peer]");
             config.AppendLine($"PublicKey = {publicKey}");
-            config.AppendLine($"Endpoint = {endpoint}:{port}");
+            config.AppendLine($"Endpoint = {EndpointUtils.Format(endpoint, port)}");
             config.AppendLine($"AllowedIPs = {allowedIPs}");
             config.AppendLine("PersistentKeepalive = 5");
 

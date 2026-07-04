@@ -458,17 +458,9 @@ public static class Program
             // We'll create it after we know our mesh IP address and have peer information
             // This avoids the port conflict and allows proper mesh configuration
 
-            // Create UDP client for NAT traversal (shared across all peer connections)
-            udpClient = new UdpClient();
-            udpClient.Client.ReceiveBufferSize = 128000;
-            udpClient.Client.Bind(new IPEndPoint(IPAddress.Any, 0));
-
-            // Windows-specific UDP client configuration
-            if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
-            {
-                const int SIO_UDP_CONNRESET = -1744830452;
-                udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-            }
+            // Create UDP client for NAT traversal (shared across all peer connections).
+            // Dual-stack when the OS supports IPv6, so v6 peers can reach us directly.
+            udpClient = SocketUtils.CreateUdpClient();
 
             int localUdpPort = ((IPEndPoint)udpClient.Client.LocalEndPoint).Port;
 

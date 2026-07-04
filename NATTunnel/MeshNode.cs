@@ -230,23 +230,11 @@ public class MeshNode : IDisposable
         config.Validate();
         this.config = config;
 
-        // Split "host:port" into its components — mediation handshake DNS-resolves and connects.
+        // Split "host[:port]" into its components — mediation handshake DNS-resolves and connects.
         // A bare "host" (no ':port') defaults to 6510 (the conventional mediation port).
-        int colon = config.MediationEndpoint.LastIndexOf(':');
-        if (colon < 0)
-        {
-            this.mediationHost = config.MediationEndpoint;
-            this.mediationPort = 6510;
-        }
-        else
-        {
-            this.mediationHost = config.MediationEndpoint.Substring(0, colon);
-            if (!int.TryParse(config.MediationEndpoint.Substring(colon + 1), out this.mediationPort) ||
-                this.mediationPort <= 0 || this.mediationPort > 65535)
-            {
-                throw new ArgumentException("MeshConfig.MediationEndpoint port is not a valid integer.");
-            }
-        }
+        // IPv6 literals use brackets to carry a port: "[2001:db8::1]:6510".
+        if (!EndpointUtils.TrySplitHostPortWithDefault(config.MediationEndpoint, 6510, out this.mediationHost, out this.mediationPort))
+            throw new ArgumentException("MeshConfig.MediationEndpoint is not a valid host, host:port, or [ipv6]:port string.");
 
         // Identity: persistent PeerID if supplied, otherwise fresh per session.
         this.peerID = config.PersistentPeerID ?? Guid.NewGuid();
@@ -275,13 +263,14 @@ public class MeshNode : IDisposable
     {
         if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(MeshNode));
         // Resolve the mediation hostname to an IP for the MeshOptions snapshot. MeshProtocolEngine expects
-        // an IPEndPoint, so we do the DNS resolution here once. Force IPv4 — the shared UDP socket below
-        // binds IPAddress.Any (IPv4), and Send() to a v6 endpoint throws WSAEAFNOSUPPORT.
-        var mediationIP = Dns.GetHostAddresses(mediationHost)
-            .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+        // an IPEndPoint, so we do the DNS resolution here once. Prefer IPv4 so mixed-capability
+        // networks land on the family everyone supports; a v6-only host resolves to v6 (the
+        // shared UDP socket is dual-stack, so either family works).
+        var addresses = Dns.GetHostAddresses(mediationHost);
+        var mediationIP = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+            ?? addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6)
             ?? throw new InvalidOperationException(
-                $"MeshConfig.MediationEndpoint '{mediationHost}' has no IPv4 address. " +
-                "NATTunnel currently requires an IPv4-reachable mediation server.");
+                $"MeshConfig.MediationEndpoint '{mediationHost}' did not resolve to any IP address.");
 
         // Embedded mode picks a random local UDP port for the mesh-control channel to avoid
         // colliding with a daemon on 51888 or another embedded process on the same machine.
@@ -290,6 +279,8 @@ public class MeshNode : IDisposable
         var options = new MeshOptions
         {
             MediationEndpoint = new IPEndPoint(mediationIP, mediationPort),
+            MediationHost = mediationHost,
+            MediationPort = mediationPort,
             NetworkID = config.NetworkID,
             NetworkSecret = config.NetworkSecret,
             TlsEnabled = true,
@@ -329,13 +320,8 @@ public class MeshNode : IDisposable
         host.PeerRemoved += OnPeerRemoved;
 
         // Open the shared UDP socket the protocol uses for hole-punching + NAT detection.
-        udpClient = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-        udpClient.Client.ReceiveBufferSize = 128_000;
-        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
-        {
-            const int SIO_UDP_CONNRESET = -1744830452;
-            udpClient.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
-        }
+        // Dual-stack when the OS supports IPv6, so v6 peers can reach us directly.
+        udpClient = SocketUtils.CreateUdpClient();
 
         // Pick a mesh IP from the configured subnet using the hash-based scheme the daemon uses.
         // SHA256(peerID) → first two bytes form .X.Y in 10.5.X.Y. Collisions are resolved
@@ -632,35 +618,23 @@ public class MeshNode : IDisposable
             throw new ArgumentException("mediationEndpoint is required.", nameof(mediationEndpoint));
 
         // A bare "host" (no ':port') defaults to 6510, matching the MeshNode ctor's behavior.
-        int colon = mediationEndpoint.LastIndexOf(':');
-        string host;
-        int port;
-        if (colon < 0)
-        {
-            host = mediationEndpoint;
-            port = 6510;
-        }
-        else
-        {
-            host = mediationEndpoint.Substring(0, colon);
-            if (!int.TryParse(mediationEndpoint.Substring(colon + 1), out port) || port <= 0 || port > 65535)
-                throw new ArgumentException("mediationEndpoint port must be a valid TCP port.", nameof(mediationEndpoint));
-        }
+        if (!EndpointUtils.TrySplitHostPortWithDefault(mediationEndpoint, 6510, out string host, out int port))
+            throw new ArgumentException("mediationEndpoint is not a valid host, host:port, or [ipv6]:port string.", nameof(mediationEndpoint));
 
-        // Same IPv4-only resolve trick as Start() — the UDP socket below binds IPv4, so a v6
-        // mediation endpoint would fail with WSAEAFNOSUPPORT on Send.
+        // Same v4-preferring resolve as Start() — v6-only hosts fall back to their AAAA record.
         IPAddress mediationIP;
         try
         {
-            mediationIP = (await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false))
-                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+            var addresses = await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false);
+            mediationIP = addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork)
+                ?? addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
         }
         catch (Exception ex)
         {
             return new NetworkProbeResult { NatType = NATType.Unknown, ErrorMessage = $"DNS resolution failed: {ex.Message}" };
         }
         if (mediationIP == null)
-            return new NetworkProbeResult { NatType = NATType.Unknown, ErrorMessage = $"Mediation endpoint '{host}' has no IPv4 address." };
+            return new NetworkProbeResult { NatType = NATType.Unknown, ErrorMessage = $"Mediation endpoint '{host}' did not resolve to any IP address." };
 
         var localIP = Tunnel.GetLanIPAddress();
 
@@ -669,7 +643,7 @@ public class MeshNode : IDisposable
         UdpClient udp = null;
         try
         {
-            tcp = new TcpClient();
+            tcp = new TcpClient(mediationIP.AddressFamily);
             // 5s TCP connect budget — mediation should respond promptly; longer waits suggest a routing problem.
             using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
@@ -681,7 +655,7 @@ public class MeshNode : IDisposable
             await tls.AuthenticateAsClientAsync(mediationIP.ToString()).ConfigureAwait(false);
             tls.ReadTimeout = 5000;
 
-            udp = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
+            udp = SocketUtils.CreateUdpClient();
             int localUdpPort = ((IPEndPoint)udp.Client.LocalEndPoint).Port;
 
             // Read first message ("Connected").
