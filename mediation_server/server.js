@@ -8,6 +8,7 @@ const { Config, MessageTypes } = require('./constants');
 const { normalizeIP, formatEndpoint, isIPv6 } = require('./ip-utils');
 const ConnectionManager = require('./connection-manager');
 const MessageHandler = require('./message-handler');
+const selfAddress = require('./self-address');
 // Browser-facing NAT test (web-nat-test) is opt-in via Config.NAT_TEST_ENABLED.
 // Operators who don't want to bother with coturn + nginx can leave it disabled;
 // the mediation server runs perfectly with just its TCP+UDP protocol surface.
@@ -37,6 +38,10 @@ class NATServer {
         this.connectionManager.onSocketRemoved = (socket) => {
             this.messageHandler.handlePeerDisconnection(socket);
         };
+
+        // Discover our own public v4/v6 addresses via STUN (advertised to clients in NATTestBegin
+        // so a peer can NAT-test over the family it didn't use to reach mediation).
+        selfAddress.start();
 
         this.initializeTCPServer();
         this.initializeUDPServer();
@@ -312,38 +317,37 @@ class NATServer {
                 const socket = this.connectionManager.sockets.find(s => s.clientID === message.ClientID);
                 if (!socket) return;
 
-                // Always record the observed IPv6 endpoint (used as the v6 connect candidate),
-                // regardless of which family is primary. Reflects whatever port a v6 firewall or
-                // NAT66 assigned — no assumption it's unrewritten.
+                // Endpoint model: the peer's v6 endpoint always lives in socket.endpointV6, and its
+                // v4 endpoint always lives in udpConnectionInfo (which handleMeshJoinRequest reads to
+                // build the primary `endpoint`). This holds regardless of which family the peer used
+                // to reach mediation, so a dual-stack peer advertises BOTH families. NAT-type
+                // detection is separate — it runs purely off the NAT-test PORTS (externalPortOne/Two
+                // vs localPort in checkNATType), never off udpConnectionInfo.
                 if (packetIsV6) {
+                    // v6 packet → only ever populates the v6 endpoint. Never written into
+                    // udpConnectionInfo (that slot is v4-only).
                     socket.endpointV6 = formatEndpoint(address, info.port);
                     console.log(`[Server] Observed IPv6 endpoint for ${message.ClientID}: ${socket.endpointV6}`);
+                } else {
+                    // v4 packet → populates the v4 endpoint in udpConnectionInfo, whether this peer
+                    // is v4-primary or v6-primary-but-dual-stack.
+                    socket.udpIp = address;
+                    if (!socket.ip || socket.ip === '0.0.0.0') {
+                        socket.ip = address;
+                    }
+                    console.log(`[Server] Adding UDP info from NAT test: ${address}:${info.port} (localPort=${socket.localPort}, tcpIp=${socket.ip})`);
+                    this.connectionManager.addUDPInfo(address, info.port, socket.localPort);
                 }
 
-                // The peer's PRIMARY family is how it reached the mediation server (its TCP
-                // connection). NAT-type detection and the primary v4 endpoint are driven only by
-                // NAT-test packets of that family; the other family is observation-only (its
-                // endpoint is still recorded above for v6). This lets a v6-primary peer get a real
-                // NAT type from its v6 probes instead of defaulting to Unknown.
+                // NAT-type detection runs only for the PRIMARY family's packets (how the peer
+                // reached mediation). A secondary-family packet's ports must not touch
+                // externalPortOne/Two or they'd corrupt the NAT verdict.
                 const primaryIsV6 = isIPv6(socket.ip);
                 if (packetIsV6 !== primaryIsV6) {
-                    return; // Secondary-family packet — endpoint noted, but doesn't drive NAT type.
+                    return; // Secondary family — endpoint recorded above, but doesn't drive NAT type.
                 }
 
                 this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort);
-
-                // Track the UDP source IP separately so we don't clobber the TCP IP.
-                // Symmetric NAT peers may use different IPs for TCP vs UDP traffic.
-                socket.udpIp = address;
-                if (!socket.ip || socket.ip === '0.0.0.0') {
-                    socket.ip = address;
-                }
-
-                // Add UDP info so connection requests can build this peer's primary endpoint.
-                // Store the external port (as seen by the server) — the port other peers send to.
-                console.log(`[Server] Adding UDP info from NAT test: ${address}:${info.port} (localPort=${socket.localPort}, tcpIp=${socket.ip})`);
-                this.connectionManager.addUDPInfo(address, info.port, socket.localPort);
-
                 this.connectionManager.checkNATType(
                     socket.socket,
                     socket.localPort,

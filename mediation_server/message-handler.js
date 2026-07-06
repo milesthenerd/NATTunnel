@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const NetworkRegistry = require('./network-registry');
 const { normalizeIP, formatEndpoint, sameFamily } = require('./ip-utils');
+const selfAddress = require('./self-address');
 
 const SECRETS_FILE = path.join(__dirname, 'network-secrets.json');
 
@@ -212,10 +213,17 @@ class MessageHandler {
             }
         }
 
+        // Advertise the server's own public v4/v6 addresses (auto-discovered via STUN) so the
+        // client can run the NAT test over the family it did NOT use to reach mediation — needed
+        // when the peer connected via a bare IP literal (no A/AAAA record to resolve for the other
+        // family). Omitted when a family hasn't been discovered yet; the client then falls back to
+        // DNS resolution of its configured hostname, if it has one.
         socket.write(Buffer.from(JSON.stringify({
             ID: MessageTypes.NATTestBegin,
             NATTestPortOne: Config.NAT_TEST_PORT_ONE,
-            NATTestPortTwo: Config.NAT_TEST_PORT_TWO
+            NATTestPortTwo: Config.NAT_TEST_PORT_TWO,
+            ServerPublicIPv4: selfAddress.publicIPv4 || undefined,
+            ServerPublicIPv6: selfAddress.publicIPv6 || undefined
         })));
 
         // Timeout: if NAT test UDP packets don't arrive within 10s, respond with Unknown
@@ -467,6 +475,12 @@ class MessageHandler {
                 ID: MessageTypes.ConnectionBegin,
                 EndpointString: endpointForClient,
                 ExternalEndpointString: targetExternalForClient,
+                // Always carry the OTHER peer's v6 endpoint, independent of which family THIS
+                // connection uses. A v4-connected receiver (e.g. a v4-only introducer bridging two
+                // dual-stack peers) must still learn the peers' v6 endpoints so it can later
+                // introduce/repair them over v6 — otherwise it only knows v4 and can't bridge a
+                // pair that needs v6.
+                EndpointV6String: targetV6 || undefined,
                 NATType: targetNatType,
                 OwnNATType: clientNatType,  // Initiating peer's own NAT type
                 ConnectionID: connectionId,
@@ -485,6 +499,8 @@ class MessageHandler {
                 ID: MessageTypes.ConnectionBegin,
                 EndpointString: endpointForTarget,
                 ExternalEndpointString: clientExternalForTarget,
+                // Always carry the other peer's v6 endpoint (see clientMessage above).
+                EndpointV6String: clientV6 || undefined,
                 NATType: clientNatType,
                 OwnNATType: targetNatType,  // Target peer's own NAT type
                 ConnectionID: connectionId,
@@ -772,6 +788,13 @@ class MessageHandler {
                     const hi = Math.min(p.peerMaxVersion, peerMaxVersion);
                     if (hi < lo) return false;
                 }
+                // Introducer must share a reachable ADDRESS FAMILY with the joiner — it needs its
+                // own tunnel to the joiner to relay introductions. A candidate with NO family in
+                // common (e.g. v4-only candidate + v6-only joiner) can never tunnel to the joiner
+                // and would defer forever. A dual-stack pair shares v4, so this stays permissive.
+                const sharesV4 = !!p.endpoint && !!endpoint;
+                const sharesV6 = !!p.endpointV6 && !!socketInfo.endpointV6;
+                if (!sharesV4 && !sharesV6) return false;
                 // Re-register them in the active network if they fell out
                 // (e.g., network was deleted when it emptied, but socket is still alive)
                 const activeNetwork = this.networkRegistry.networks.get(NetworkID);

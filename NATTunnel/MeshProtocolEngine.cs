@@ -172,7 +172,7 @@ internal class MeshProtocolEngine
     /// or NAT66 middlebox does in practice. Fire-and-forget: no v6 route just means the
     /// server never sees the packets and we advertise no v6 endpoint.
     /// </summary>
-    private void SendNatTestV6(byte[] natTestBuffer, int portOne, int portTwo)
+    private void SendNatTestV6(byte[] natTestBuffer, int portOne, int portTwo, string serverAdvertisedV6 = null)
     {
         try
         {
@@ -182,26 +182,35 @@ internal class MeshProtocolEngine
                 // Use the resolved endpoint (the connect loop filled it); if the primary mediation
                 // connection is already v6, the normal NAT test covers it — no separate v6 probe.
                 var mediationEP = endpoint;
-                string host = context.Options.MediationHost;
                 // Only run the v6 NAT test when this machine has a genuinely global v6 route.
                 // A link-local/ULA-only machine (very common — Windows assigns link-local to
                 // every NIC) can send the probe from a non-routable source; the packet may even
                 // reach mediation, but the observed endpoint is useless peer-to-peer and would
                 // wrongly make the peer look v6-reachable. Gate on a real global v6 source.
-                if (mediationEP != null && mediationEP.Address.AddressFamily != AddressFamily.InterNetworkV6 &&
-                    !string.IsNullOrEmpty(host) && !IPAddress.TryParse(host, out _))
+                if (mediationEP != null && mediationEP.Address.AddressFamily != AddressFamily.InterNetworkV6)
                 {
                     var v6Source = Tunnel.GetGlobalIPv6Candidate();
                     if (v6Source == null)
                     {
                         context.Log(LogLevel.Debug, "[Mesh] No native global IPv6 route — skipping v6 NAT test");
                     }
+                    // Prefer the server-advertised v6 (works for a bare v4-literal config); fall
+                    // back to resolving the AAAA record of the configured hostname.
+                    else if (!string.IsNullOrEmpty(serverAdvertisedV6) && IPAddress.TryParse(serverAdvertisedV6, out var advV6))
+                    {
+                        mediationV6Address = advV6;
+                        context.Log(LogLevel.Debug, $"[Mesh] Global IPv6 source {v6Source} + server-advertised v6 {mediationV6Address} — running v6 NAT test");
+                    }
                     else
                     {
-                        mediationV6Address = Dns.GetHostAddresses(host)
-                            .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
-                        if (mediationV6Address != null)
-                            context.Log(LogLevel.Debug, $"[Mesh] Global IPv6 source {v6Source} + mediation AAAA present — running v6 NAT test");
+                        string host = context.Options.MediationHost;
+                        if (!string.IsNullOrEmpty(host) && !IPAddress.TryParse(host, out _))
+                        {
+                            mediationV6Address = Dns.GetHostAddresses(host)
+                                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
+                            if (mediationV6Address != null)
+                                context.Log(LogLevel.Debug, $"[Mesh] Global IPv6 source {v6Source} + mediation AAAA present — running v6 NAT test");
+                        }
                     }
                 }
             }
@@ -212,6 +221,62 @@ internal class MeshProtocolEngine
         catch (Exception ex)
         {
             context.Log(LogLevel.Debug, $"[Mesh] v6 NAT test skipped: {ex.Message}");
+        }
+    }
+
+    /// <summary>Mediation server's IPv4 address (A record), resolved once per process.
+    /// Null when the primary mediation endpoint is already v4 (the normal NAT test covers it)
+    /// or when no A record / hostname is available.</summary>
+    private IPAddress mediationV4Address;
+    private bool mediationV4Resolved;
+
+    /// <summary>
+    /// Mirror of <see cref="SendNatTestV6"/> for a v6-PRIMARY peer: when the peer reached mediation
+    /// over IPv6, its normal NAT test only exercises v6, so the server never observes its v4
+    /// endpoint and it would advertise v6-only. This resolves the mediation server's A record and
+    /// sends the NAT test over v4 too, so a dual-stack peer that happens to be v6-primary still
+    /// advertises BOTH families. Fire-and-forget: no v4 route just means no v4 endpoint observed.
+    /// </summary>
+    private void SendNatTestV4(byte[] natTestBuffer, int portOne, int portTwo, string serverAdvertisedV4 = null)
+    {
+        try
+        {
+            if (!mediationV4Resolved)
+            {
+                mediationV4Resolved = true;
+                var mediationEP = endpoint;
+                // Only relevant when the primary connection is v6 (a v4-primary peer's normal test
+                // already covers v4).
+                if (mediationEP != null && mediationEP.Address.AddressFamily == AddressFamily.InterNetworkV6)
+                {
+                    // Prefer the address the server advertised in NATTestBegin — works even for a
+                    // bare v6-literal config (no DNS A record). Fall back to resolving the A record
+                    // of the configured hostname, if there is one.
+                    if (!string.IsNullOrEmpty(serverAdvertisedV4) && IPAddress.TryParse(serverAdvertisedV4, out var advV4))
+                    {
+                        mediationV4Address = advV4;
+                        context.Log(LogLevel.Debug, $"[Mesh] v6-primary peer — running v4 NAT test against server-advertised v4 {mediationV4Address}");
+                    }
+                    else
+                    {
+                        string host = context.Options.MediationHost;
+                        if (!string.IsNullOrEmpty(host) && !IPAddress.TryParse(host, out _))
+                        {
+                            mediationV4Address = Dns.GetHostAddresses(host)
+                                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+                            if (mediationV4Address != null)
+                                context.Log(LogLevel.Debug, $"[Mesh] v6-primary peer — running v4 NAT test against mediation A record {mediationV4Address}");
+                        }
+                    }
+                }
+            }
+            if (mediationV4Address == null) return;
+            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(mediationV4Address, portOne));
+            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(mediationV4Address, portTwo));
+        }
+        catch (Exception ex)
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] v4 NAT test skipped: {ex.Message}");
         }
     }
 
@@ -2028,7 +2093,8 @@ internal class MeshProtocolEngine
                                             byte[] natTestBuf = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
                                             udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortOne));
                                             udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortTwo));
-                                            SendNatTestV6(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo);
+                                            SendNatTestV6(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo, natTestBeginR.ServerPublicIPv6);
+                                            SendNatTestV4(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo, natTestBeginR.ServerPublicIPv4);
                                         }
 
                                         // Read NATTypeResponse
@@ -2258,7 +2324,8 @@ internal class MeshProtocolEngine
             byte[] natTestBuffer = Encoding.ASCII.GetBytes(natTestMsg.Serialize());
             udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortOne));
             udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortTwo));
-            SendNatTestV6(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo);
+            SendNatTestV6(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo, natTestBegin.ServerPublicIPv6);
+            SendNatTestV4(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo, natTestBegin.ServerPublicIPv4);
         }
 
         var natTypeResponse = ReadOneTcpMessage();
@@ -4544,7 +4611,8 @@ internal class MeshProtocolEngine
                     byte[] natTestBuf2 = Encoding.ASCII.GetBytes(natTestMsg2.Serialize());
                     udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortOne));
                     udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortTwo));
-                    SendNatTestV6(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.NATTestPortTwo);
+                    SendNatTestV6(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.NATTestPortTwo, natTestBeginR2.ServerPublicIPv6);
+                    SendNatTestV4(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.NATTestPortTwo, natTestBeginR2.ServerPublicIPv4);
                 }
 
                 var natTypeRespR2 = ReadReconMessage2();
@@ -5609,7 +5677,15 @@ internal class MeshProtocolEngine
                     attempts++;
                     repairAttemptCount[pairKey] = attempts;
 
-                    bool bothSymmetric = infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
+                    // If both peers have a usable v6 endpoint, they can connect DIRECTLY over v6
+                    // regardless of their (v4) NAT type — v6 has no NAT to traverse, so the
+                    // symmetric-relay dance is unnecessary and, in steady state, broken (both peers
+                    // are off mediation, so the relay path can't be set up). Force the direct path.
+                    bool repairBothHaveV6 = !string.IsNullOrEmpty(infoA.endpointV6) &&
+                                            !string.IsNullOrEmpty(infoB.endpointV6);
+
+                    bool bothSymmetric = !repairBothHaveV6 &&
+                        infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
                     // Same-LAN exception: skip relay if both endpoints share a public IP and
                     // we have LAN info for both. Direct LAN connection should work even when
                     // both are symmetric.
@@ -5745,9 +5821,8 @@ internal class MeshProtocolEngine
                         // Prefer v6 when both peers have it (no NAT — direct connect is reliable);
                         // else for same-LAN pairs substitute LAN endpoints so peers retry over the
                         // local network instead of the public endpoints that don't hairpin.
-                        // Each side is handed the *other* peer's endpoint.
-                        bool repairBothHaveV6 = !string.IsNullOrEmpty(infoA.endpointV6) &&
-                                                !string.IsNullOrEmpty(infoB.endpointV6);
+                        // Each side is handed the *other* peer's endpoint. repairBothHaveV6 was
+                        // computed above (it also gated the symmetric-relay branch out).
                         string endpointForA = repairBothHaveV6 ? infoB.endpointV6 : infoB.endpoint;
                         string endpointForB = repairBothHaveV6 ? infoA.endpointV6 : infoA.endpoint;
                         if (!repairBothHaveV6 && sameLanPair)

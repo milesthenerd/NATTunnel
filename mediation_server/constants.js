@@ -78,6 +78,12 @@ const Config = {
     BIND_ADDRESS: process.env.BIND_ADDRESS || "::",
     MESH_CONTROL_PORT: 51888,   // UDP port used for peer-to-peer mesh introduction messages over WireGuard
 
+    // The server's own PUBLIC IPv4/IPv6 addresses are discovered automatically at runtime via STUN
+    // (see self-address.js) and advertised to clients in NATTestBegin, so a peer that reached
+    // mediation over one family can still run its NAT test over the other. PUBLIC_IPV4/PUBLIC_IPV6
+    // env vars, if set, override auto-discovery (escape hatch for unusual setups). No manual config
+    // is required in the common case — STUN handles public VPS, cloud 1:1 NAT, and port-forward-behind-NAT.
+
     // TLS configuration. TLS is always on.
     // Cert/key are auto-generated with openssl on first startup if not present.
     // Override paths with TLS_CERT_PATH / TLS_KEY_PATH env vars to use your own CA-signed certificate.

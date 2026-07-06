@@ -59,6 +59,17 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int NATTestPortTwo { get; set; }
     /// <summary>
+    /// The mediation server's own public IPv4 address, advertised in NATTestBegin. Lets a peer that
+    /// reached mediation over IPv6 send its NAT test over v4 (to observe its v4 endpoint) without
+    /// needing a DNS A record — required when the peer's mediation config is a bare v6 literal.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string ServerPublicIPv4 { get; set; }
+    /// <summary>The mediation server's own public IPv6 address, advertised in NATTestBegin. Mirror of
+    /// <see cref="ServerPublicIPv4"/> for a v4-primary peer that wants to observe its v6 endpoint.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string ServerPublicIPv6 { get; set; }
+    /// <summary>
     ///ID assigned to a peer pair attempting to make a connection
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
