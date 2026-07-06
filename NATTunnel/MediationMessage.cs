@@ -25,9 +25,16 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string LocalIP { get; set; }
     /// <summary>
-    ///NAT type of the client
+    ///NAT type of the client (IPv4). Present on NATTypeResponse for the v4 family.
     /// </summary>
     public NATType NATType { get; set; }
+    /// <summary>
+    /// NAT type of the client over IPv6, delivered in a separate NATTypeResponse once the v6 NAT
+    /// test settles. Nullable — absent when the peer has no v6 (or on older servers). Lets the GUI
+    /// show v4 and v6 capabilities independently, since they can differ.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public NATType? NATTypeV6 { get; set; }
     /// <summary>
     ///Server's IP address and port as a string because IPEndpoint is not deserializable
     /// </summary>

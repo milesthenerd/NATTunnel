@@ -98,6 +98,8 @@
                              Text="-"
                              Foreground="{StaticResource TextPrimaryBrush}"
                              FontSize="12"
+                             AcceptsReturn="True"
+                             TextWrapping="Wrap"
                              Classes="copyable" />
 
                     <TextBlock Text="ROLE"

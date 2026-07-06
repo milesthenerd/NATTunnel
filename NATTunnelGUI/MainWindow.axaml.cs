@@ -130,7 +130,12 @@ public partial class MainWindow : Window
 
             MeshIPText.Text = state.OwnMeshIP ?? "-";
             PeerIDText.Text = state.OwnPeerID ?? "-";
-            NATTypeText.Text = state.NATType ?? "-";
+            // Show both address families (one per line so neither gets truncated in the narrow
+            // field) when a v6 verdict is present — v4 and v6 NAT behavior can differ; fall back to
+            // the v4-only display otherwise.
+            NATTypeText.Text = string.IsNullOrEmpty(state.NATTypeV6)
+                ? (state.NATType ?? "-")
+                : $"IPv4: {state.NATType ?? "-"}\nIPv6: {state.NATTypeV6}";
             RoleText.Text = state.IsIntroducer ? "Introducer" : "Peer";
             string peerRange = state.PeerProtocolMinVersion == state.PeerProtocolMaxVersion
                 ? $"v{state.PeerProtocolMinVersion}"

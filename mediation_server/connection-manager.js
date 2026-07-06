@@ -22,6 +22,11 @@ class ConnectionManager {
             localPort: 0,
             externalPortOne: 0,
             externalPortTwo: 0,
+            // Separate NAT-test port pair + verdict for IPv6, so a dual-stack peer is classified
+            // independently per family (v4 and v6 NAT behavior can differ).
+            natTypeV6: NATTypes.Unknown,
+            externalPortOneV6: 0,
+            externalPortTwoV6: 0,
             clientID: Math.random().toString(),
         };
         this.sockets.push(socketInfo);
@@ -174,7 +179,11 @@ class ConnectionManager {
         }
     }
 
-    checkNATType(socket, localPort, externalPortOne, externalPortTwo) {
+    // Classify the NAT type for one address family and, once both test ports are in, send a
+    // NATTypeResponse for that family. isV6 selects which family's response field is used
+    // (NATType for v4, NATTypeV6 for v6) and which socket field the verdict is stored in — so a
+    // dual-stack peer gets an independent verdict per family, delivered as each family settles.
+    checkNATType(socket, localPort, externalPortOne, externalPortTwo, isV6 = false) {
         let natType = NATTypes.Unknown;
 
         if (externalPortOne !== 0 && externalPortTwo !== 0) {
@@ -188,13 +197,15 @@ class ConnectionManager {
 
             socket.write(Buffer.from(JSON.stringify({
                 ID: MessageTypes.NATTypeResponse,
-                NATType: natType,
+                // v4 keeps the original NATType field (unchanged wire format); v6 uses NATTypeV6.
+                ...(isV6 ? { NATTypeV6: natType } : { NATType: natType }),
             })));
 
-            // Store NAT type on socket info
+            // Store NAT type on socket info (per family).
             const socketInfo = this.sockets.find(s => s.socket === socket);
             if (socketInfo) {
-                socketInfo.natType = natType;
+                if (isV6) socketInfo.natTypeV6 = natType;
+                else socketInfo.natType = natType;
                 socketInfo.natTestResponded = true;
             }
         }
@@ -206,13 +217,15 @@ class ConnectionManager {
         return this.sockets.find(s => s.ip === address);
     }
 
-    updateNATTestPort(clientID, port, isFirstPort = true) {
+    updateNATTestPort(clientID, port, isFirstPort = true, isV6 = false) {
         const socket = this.sockets.find(s => s.clientID === clientID);
         if (socket) {
-            if (isFirstPort) {
-                socket.externalPortOne = port;
+            if (isV6) {
+                if (isFirstPort) socket.externalPortOneV6 = port;
+                else socket.externalPortTwoV6 = port;
             } else {
-                socket.externalPortTwo = port;
+                if (isFirstPort) socket.externalPortOne = port;
+                else socket.externalPortTwo = port;
             }
         }
         return socket;

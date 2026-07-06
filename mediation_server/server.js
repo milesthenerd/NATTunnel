@@ -339,20 +339,18 @@ class NATServer {
                     this.connectionManager.addUDPInfo(address, info.port, socket.localPort);
                 }
 
-                // NAT-type detection runs only for the PRIMARY family's packets (how the peer
-                // reached mediation). A secondary-family packet's ports must not touch
-                // externalPortOne/Two or they'd corrupt the NAT verdict.
-                const primaryIsV6 = isIPv6(socket.ip);
-                if (packetIsV6 !== primaryIsV6) {
-                    return; // Secondary family — endpoint recorded above, but doesn't drive NAT type.
-                }
-
-                this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort);
+                // Classify NAT type PER FAMILY: each family's two test ports drive their own
+                // verdict (v4 and v6 NAT behavior can differ). The packet's family selects which
+                // port pair it feeds and which NATTypeResponse field the verdict is returned in.
+                // A response is sent for each family once both its ports have arrived, so the two
+                // verdicts are delivered independently as each family settles.
+                this.connectionManager.updateNATTestPort(message.ClientID, info.port, isFirstPort, packetIsV6);
                 this.connectionManager.checkNATType(
                     socket.socket,
                     socket.localPort,
-                    socket.externalPortOne,
-                    socket.externalPortTwo
+                    packetIsV6 ? socket.externalPortOneV6 : socket.externalPortOne,
+                    packetIsV6 ? socket.externalPortTwoV6 : socket.externalPortTwo,
+                    packetIsV6
                 );
             }
         } catch (e) {

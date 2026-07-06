@@ -154,10 +154,13 @@ class MessageHandler {
 
             socketInfo.clientID = message.ClientID;
 
-            // Reset NAT test state so checkNATType waits for fresh results
+            // Reset NAT test state so checkNATType waits for fresh results (both families).
             socketInfo.externalPortOne = 0;
             socketInfo.externalPortTwo = 0;
             socketInfo.natType = NATTypes.Unknown;
+            socketInfo.externalPortOneV6 = 0;
+            socketInfo.externalPortTwoV6 = 0;
+            socketInfo.natTypeV6 = NATTypes.Unknown;
         }
 
         // Check if this is a per-connection tunnel (server-side tunnel for specific client)

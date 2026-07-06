@@ -24,6 +24,11 @@ public class MeshState
     [JsonPropertyName("natType")]
     public string NATType { get; set; }
 
+    /// <summary>NAT type over IPv6, or null when the peer has no v6 / it hasn't been detected.
+    /// The GUI shows this alongside <see cref="NATType"/> so users see both families.</summary>
+    [JsonPropertyName("natTypeV6")]
+    public string NATTypeV6 { get; set; }
+
     [JsonPropertyName("connectedPeers")]
     public List<ConnectedPeer> ConnectedPeers { get; set; }
 

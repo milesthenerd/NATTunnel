@@ -520,6 +520,26 @@ internal class MeshProtocolEngine
     private Guid peerID;
     private bool isIntroducer;
     private NATType detectedNatType = NATType.Unknown;
+    /// <summary>NAT type over IPv6, or null if the peer has no v6 / the server hasn't reported it.
+    /// Detected independently of the v4 verdict (they can differ) and surfaced to the GUI.</summary>
+    private NATType? detectedNatTypeV6;
+
+    /// <summary>Applies a NATTypeResponse: stores the v4 verdict (if present) and/or the v6 verdict
+    /// (if present). The server sends one response per family as each settles, so a single message
+    /// may carry either or (rarely) both.</summary>
+    private void ApplyNatTypeResponse(MediationMessage m)
+    {
+        if (m.NATTypeV6.HasValue)
+        {
+            detectedNatTypeV6 = m.NATTypeV6.Value;
+            context.Log(LogLevel.Info, $"[Mesh] NAT type detected (IPv6): {detectedNatTypeV6}");
+        }
+        else
+        {
+            detectedNatType = m.NATType;
+            context.Log(LogLevel.Info, $"[Mesh] NAT type detected: {detectedNatType}");
+        }
+    }
 
     // ── Introducer probe state ──
     private string introducerMeshIP;
@@ -1900,6 +1920,12 @@ internal class MeshProtocolEngine
                                                 }
                                             }
                                         }
+                                        else if (parsedMsg.ID == MediationMessageType.NATTypeResponse)
+                                        {
+                                            // A per-family NAT verdict (usually the v6 one arriving
+                                            // after the v4 verdict was already captured in the handshake).
+                                            ApplyNatTypeResponse(parsedMsg);
+                                        }
                                         (parsedMsg, remainder) = ExtractFirstJson(remainder);
                                     }
                                     reconnectedTcpBuffer = remainder ?? "";
@@ -2097,13 +2123,11 @@ internal class MeshProtocolEngine
                                             SendNatTestV4(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo, natTestBeginR.ServerPublicIPv4);
                                         }
 
-                                        // Read NATTypeResponse
+                                        // Read NATTypeResponse (v6 counterpart, if any, arrives in
+                                        // the reconnect dispatch loop below).
                                         var natTypeRespR = ReadReconMessage();
                                         if (natTypeRespR.ID == MediationMessageType.NATTypeResponse)
-                                        {
-                                            detectedNatType = natTypeRespR.NATType;
-                                            context.Log(LogLevel.Debug, $"[Mesh] Reconnect NAT type: {detectedNatType}");
-                                        }
+                                            ApplyNatTypeResponse(natTypeRespR);
 
                                         // 3. Send MeshJoinRequest for peer discovery
                                         var joinReq = new MediationMessage(MediationMessageType.MeshJoinRequest)
@@ -2328,11 +2352,19 @@ internal class MeshProtocolEngine
             SendNatTestV4(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo, natTestBegin.ServerPublicIPv4);
         }
 
-        var natTypeResponse = ReadOneTcpMessage();
-        if (natTypeResponse.ID == MediationMessageType.NATTypeResponse)
+        // The server sends a NATTypeResponse per family as each settles (v4 and v6 arrive in
+        // either order). The join needs the v4 verdict, so keep reading — capturing v6 whenever it
+        // appears — until we have the v4 one. In this synchronous phase only NATTypeResponse
+        // messages arrive before we send the join; a v6 response that arrives later (after join)
+        // is handled in the main message loop.
+        detectedNatType = NATType.Unknown;
+        bool haveV4Verdict = false;
+        while (!haveV4Verdict)
         {
-            detectedNatType = natTypeResponse.NATType;
-            context.Log(LogLevel.Info, $"[Mesh] NAT type detected: {detectedNatType}");
+            var natTypeResponse = ReadOneTcpMessage();
+            if (natTypeResponse.ID != MediationMessageType.NATTypeResponse) break;
+            ApplyNatTypeResponse(natTypeResponse);
+            if (!natTypeResponse.NATTypeV6.HasValue) haveV4Verdict = true;
         }
 
         // 3. Join mesh network
@@ -4421,6 +4453,12 @@ internal class MeshProtocolEngine
             {
                 HandleConnectionBegin(msg);
             }
+            else if (msg.ID == MediationMessageType.NATTypeResponse)
+            {
+                // A per-family NAT verdict arriving after the handshake — typically the v6 one
+                // if it settled slower than v4. Captured for the GUI's per-family display.
+                ApplyNatTypeResponse(msg);
+            }
             else if (msg.ID == MediationMessageType.MeshJoinResponse)
             {
                 HandleMeshJoinResponse(msg, ref hasPeers);
@@ -4617,10 +4655,7 @@ internal class MeshProtocolEngine
 
                 var natTypeRespR2 = ReadReconMessage2();
                 if (natTypeRespR2.ID == MediationMessageType.NATTypeResponse)
-                {
-                    detectedNatType = natTypeRespR2.NATType;
-                    context.Log(LogLevel.Debug, $"[Mesh] Reconnect NAT type: {detectedNatType}");
-                }
+                    ApplyNatTypeResponse(natTypeRespR2);
 
                 // 3. Send MeshJoinRequest. Server decides who's the introducer; we don't claim
                 // the role locally until the response confirms.
@@ -5233,6 +5268,7 @@ internal class MeshProtocolEngine
                 OwnPeerID = peerID.ToString(),
                 IsIntroducer = isIntroducer,
                 NATType = detectedNatType.ToString(),
+                NATTypeV6 = detectedNatTypeV6?.ToString(),
                 IntroducerMeshIP = introducerMeshIP,
                 UptimeSeconds = (long)(DateTime.UtcNow - meshStartTime).TotalSeconds,
                 ConnectionState = context.ConnectionState.ToString(),
@@ -5436,6 +5472,7 @@ internal class MeshProtocolEngine
                 OwnPeerID = peerID.ToString(),
                 IsIntroducer = isIntroducer,
                 NATType = detectedNatType.ToString(),
+                NATTypeV6 = detectedNatTypeV6?.ToString(),
                 UptimeSeconds = (long)(DateTime.UtcNow - meshStartTime).TotalSeconds,
                 ConnectionState = context.ConnectionState.ToString(),
                 MediationProtocolVersion = MediationProtocol.ClientVersion,
