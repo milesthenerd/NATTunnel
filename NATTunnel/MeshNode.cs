@@ -686,6 +686,10 @@ public class MeshNode : IDisposable
             byte[] natBytes = Encoding.ASCII.GetBytes(natReq.Serialize());
             await tls.WriteAsync(natBytes.AsMemory(), cancellationToken).ConfigureAwait(false);
 
+            // v6 mediation address for the optional v6 probe (resolved after NATTestBegin, which
+            // may advertise the server's public v6). Only used when this machine has global v6.
+            IPAddress mediationV6 = null;
+
             var natTestBegin = await ReadOneAsync().ConfigureAwait(false);
             if (natTestBegin.ID == MediationMessageType.NATTestBegin)
             {
@@ -693,24 +697,78 @@ public class MeshNode : IDisposable
                 byte[] testBytes = Encoding.ASCII.GetBytes(natTest.Serialize());
                 udp.Send(testBytes, testBytes.Length, new IPEndPoint(mediationIP, natTestBegin.NATTestPortOne));
                 udp.Send(testBytes, testBytes.Length, new IPEndPoint(mediationIP, natTestBegin.NATTestPortTwo));
+
+                // Also probe over IPv6 when we have a global v6 route and a v6 address for the server.
+                if (Tunnel.HasGlobalIPv6())
+                {
+                    if (!string.IsNullOrEmpty(natTestBegin.ServerPublicIPv6) &&
+                        IPAddress.TryParse(natTestBegin.ServerPublicIPv6, out var advV6))
+                        mediationV6 = advV6;
+                    if (mediationV6 == null && !IPAddress.TryParse(host, out _))
+                    {
+                        try
+                        {
+                            mediationV6 = (await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false))
+                                .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
+                        }
+                        catch { /* no AAAA — skip v6 probe */ }
+                    }
+                    if (mediationV6 != null)
+                    {
+                        udp.Send(testBytes, testBytes.Length, new IPEndPoint(mediationV6, natTestBegin.NATTestPortOne));
+                        udp.Send(testBytes, testBytes.Length, new IPEndPoint(mediationV6, natTestBegin.NATTestPortTwo));
+                    }
+                }
             }
 
-            var natResp = await ReadOneAsync().ConfigureAwait(false);
-            if (natResp.ID != MediationMessageType.NATTypeResponse)
-                return new NetworkProbeResult
-                {
-                    MediationReachable = true,
-                    NatType = NATType.Unknown,
-                    LocalIP = localIP,
-                    ErrorMessage = $"Mediation server returned unexpected message ID {(int)natResp.ID} instead of NATTypeResponse."
-                };
+            // Read NAT-type responses. The server sends one per family as each settles; we always
+            // need the v4 verdict, and the v6 verdict is best-effort (may never arrive). Capture
+            // whichever family each response carries; stop once we have v4 and either have v6 or the
+            // v6 probe wasn't sent / times out.
+            NATType v4Type = NATType.Unknown;
+            NATType? v6Type = null;
+            bool haveV4 = false;
+            bool expectV6 = mediationV6 != null;
+            while (!haveV4 || (expectV6 && v6Type == null))
+            {
+                // Once we have the (required) v4 verdict, only briefly wait for the optional v6 one
+                // — if v6 is blocked despite our probe, don't make the user wait the full budget.
+                if (haveV4) tls.ReadTimeout = 1500;
 
+                MediationMessage r;
+                try
+                {
+                    r = await ReadOneAsync().ConfigureAwait(false);
+                }
+                catch (IOException)
+                {
+                    // Read timeout. If we already have v4, stop and report what we have (v6 may be
+                    // blocked even though we sent a probe). If we don't even have v4, propagate below.
+                    if (haveV4) break;
+                    throw;
+                }
+                if (r.ID != MediationMessageType.NATTypeResponse)
+                    return new NetworkProbeResult
+                    {
+                        MediationReachable = true,
+                        NatType = NATType.Unknown,
+                        LocalIP = localIP,
+                        ErrorMessage = $"Mediation server returned unexpected message ID {(int)r.ID} instead of NATTypeResponse."
+                    };
+                if (r.NATTypeV6.HasValue) { v6Type = r.NATTypeV6.Value; }
+                else { v4Type = r.NATType; haveV4 = true; }
+            }
+
+            // Needs relay only if direct P2P is unlikely on EVERY reachable family.
+            bool v4NeedsRelay = v4Type == NATType.Symmetric;
+            bool v6RescuesUs = v6Type.HasValue && v6Type.Value != NATType.Symmetric;
             return new NetworkProbeResult
             {
                 MediationReachable = true,
-                NatType = natResp.NATType,
+                NatType = v4Type,
+                NatTypeV6 = v6Type,
                 LocalIP = localIP,
-                LikelyNeedsRelay = natResp.NATType == NATType.Symmetric
+                LikelyNeedsRelay = v4NeedsRelay && !v6RescuesUs
             };
         }
         catch (OperationCanceledException)
