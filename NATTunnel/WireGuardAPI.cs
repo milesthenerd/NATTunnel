@@ -14,118 +14,9 @@ namespace NATTunnel;
 [SupportedOSPlatform("windows")]
 internal static class WireGuardAPI
 {
-    // Constants
-    private const uint WGDEVICE_HAS_PRIVATE_KEY = 0x00000001;
-    private const uint WGDEVICE_HAS_PUBLIC_KEY = 0x00000002;
-    private const uint WGDEVICE_HAS_FLAGS = 0x00000004;
-    private const uint WGDEVICE_HAS_LISTEN_PORT = 0x00000008;
-    private const uint WGDEVICE_HAS_ERRNO = 0x00000010;
-    private const uint WGDEVICE_REPLACE_PEERS = 0x00000020;
-
-    private const uint WGPEER_HAS_PUBLIC_KEY = 0x00000001;
-    private const uint WGPEER_HAS_PRESHARED_KEY = 0x00000002;
-    private const uint WGPEER_HAS_ENDPOINT = 0x00000004;
-    private const uint WGPEER_HAS_PERSISTENT_KEEPALIVE = 0x00000008;
-    private const uint WGPEER_HAS_ALLOWEDIPS = 0x00000010;
-    private const uint WGPEER_REPLACE_ALLOWEDIPS = 0x00000020;
-    private const uint WGPEER_REMOVE = 0x00000040;
-
-    // IPHLPAPI constants
-    private const uint NL_DAD_STATE_TENTATIVE = 1;
-    private const uint NL_DAD_STATE_DUPLICATE = 2;
-    private const uint NL_DAD_STATE_DEPRECATED = 3;
+    // IPHLPAPI constant used by AssignIPAddress (address-state check).
     private const uint NL_DAD_STATE_PREFERRED = 4;
 
-    // Structures
-    [StructLayout(LayoutKind.Sequential)]
-    public struct WireGuardAllowedIP
-    {
-        public ushort Family;
-        public byte Cidr;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
-        public byte[] Address;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct WireGuardPeer
-    {
-        public uint Flags;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PublicKey;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PresharedKey;
-        public uint AllowedIPsCount;
-        public IntPtr AllowedIPs;
-        public long RxBytes;
-        public long TxBytes;
-        public long LastHandshakeNano;
-        public uint PersistentKeepaliveInterval;
-        public IntPtr Next;
-        public uint Endpoint_Family;
-        public ushort Endpoint_Port;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
-        public byte[] Endpoint_Address;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct WireGuardDevice
-    {
-        public uint Flags;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PrivateKey;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PublicKey;
-        public uint ListenPort;
-        public uint Errno;
-        public IntPtr Peers;
-        public uint PeersCount;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MIB_IPINTERFACE_ROW
-    {
-        public byte Family;
-        public ulong InterfaceLuid;
-        public uint InterfaceIndex;
-        public uint MaxReassemblySize;
-        public ulong InterfaceIdentifier;
-        public ulong BaseReachableTime;
-        public ulong RetransmitTime;
-        public uint DadTransmits;
-        public uint IgmpLevel;
-        public uint AdvertisingEnabled;
-        public uint ForwardingEnabled;
-        public uint WeakHostSend;
-        public uint WeakHostReceive;
-        public uint UseNeighborUnreachabilityDetection;
-        public uint ManagedAddressConfigurationSupported;
-        public uint OtherStatefulConfigurationSupported;
-        public uint AdvertiseDefaultRoute;
-        public uint AdvertiseMobileIPv6PrefixFlag;
-        public uint RouterDiscoveryBehavior;
-        public uint DhcpV6ClientLuid;
-        public uint ConnectionType;
-        public uint NetworkGuid;
-        public ulong ConnectionSpeed;
-        public uint IpVersion;
-        public uint Ipv6AddressEditingEnabled;
-        public uint AdvancedDadTransmitCount;
-        public uint NlMtu;
-        public uint Ipv6Only;
-        public uint AdvertiseRouterFlag;
-        public uint NdIsRouter;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct SOCKADDR_IN
-    {
-        public ushort sin_family;
-        public ushort sin_port;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 4)]
-        public byte[] sin_addr;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 8)]
-        public byte[] sin_zero;
-    }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MIB_UNICASTIPADDRESS_ROW
@@ -149,20 +40,12 @@ internal static class WireGuardAPI
     }
 
     // P/Invoke declarations for wireguard.dll
-    [DllImport("wireguard.dll", EntryPoint = "WireGuardOpenAdapter", CallingConvention = CallingConvention.StdCall, SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr WireGuardOpenAdapter(string name);
 
     [DllImport("wireguard.dll", EntryPoint = "WireGuardCloseAdapter", CallingConvention = CallingConvention.StdCall)]
     private static extern void WireGuardCloseAdapter(IntPtr adapter);
 
-    [DllImport("wireguard.dll", EntryPoint = "WireGuardSetConfiguration", CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-    private static extern bool WireGuardSetConfiguration(IntPtr adapter, ref WireGuardDevice config);
 
-    [DllImport("wireguard.dll", EntryPoint = "WireGuardGetConfiguration", CallingConvention = CallingConvention.StdCall, SetLastError = true)]
-    private static extern IntPtr WireGuardGetConfiguration(IntPtr adapter, ref uint len);
 
-    [DllImport("wireguard.dll", EntryPoint = "WireGuardFreeConfiguration", CallingConvention = CallingConvention.StdCall)]
-    private static extern void WireGuardFreeConfiguration(IntPtr config);
 
     // P/Invoke declarations for IPHLPAPI
     [DllImport("iphlpapi.dll", SetLastError = true)]
@@ -183,57 +66,8 @@ internal static class WireGuardAPI
     [DllImport("iphlpapi.dll", SetLastError = true)]
     private static extern uint ConvertInterfaceNameToLuidW(string interfaceName, out ulong interfaceLuid);
 
-    [DllImport("iphlpapi.dll", SetLastError = true)]
-    private static extern uint GetIfTable2(out IntPtr table);
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MIB_IF_ROW2
-    {
-        public ulong InterfaceLuid;
-        public uint InterfaceIndex;
-        public Guid InterfaceGuid;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
-        public string Alias;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
-        public string Description;
-        public uint PhysicalAddressLength;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
-        public byte[] PhysicalAddress;
-        public uint Mtu;
-        public uint Type;
-        public uint OperStatus;
-        public uint AdminStatus;
-        public uint MediaConnectState;
-        public Guid NetworkGuid;
-        public uint ConnectionType;
-        public uint TransmitLinkSpeed;
-        public uint ReceiveLinkSpeed;
-        public ulong InOctets;
-        public ulong InUcastPkts;
-        public ulong InNUcastPkts;
-        public ulong InDiscards;
-        public ulong InErrors;
-        public ulong InUnknownProtos;
-        public ulong InUcastOctets;
-        public ulong InMulticastOctets;
-        public ulong InBroadcastOctets;
-        public ulong OutOctets;
-        public ulong OutUcastPkts;
-        public ulong OutNUcastPkts;
-        public ulong OutDiscards;
-        public ulong OutErrors;
-        public ulong OutUcastOctets;
-        public ulong OutMulticastOctets;
-        public ulong OutBroadcastOctets;
-        public ulong OutErrors2;
-    }
 
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MIB_IF_TABLE2
-    {
-        public uint NumEntries;
-        public IntPtr Table;
-    }
 
     /// <summary>
     /// Creates a WireGuard adapter using Wintun
@@ -321,52 +155,6 @@ internal static class WireGuardAPI
         return win32Error == 2 || win32Error == 1060 || win32Error == 1062;
     }
 
-    /// <summary>
-    /// Configures the WireGuard interface with private key and listen port
-    /// Note: With Wintun, we primarily use WireGuard tools for configuration.
-    /// This method attempts configuration but continues even if it fails.
-    /// </summary>
-    public static void ConfigureAdapter(IntPtr adapter, byte[] privateKey, ushort listenPort)
-    {
-        try
-        {
-            Program.Log(LogLevel.Debug, $"Configuring Wintun adapter with listen port: {listenPort}");
-
-            // Try to configure using WireGuard API
-            // Note: This may fail with Wintun adapters as they're managed differently
-            var device = new WireGuardDevice
-            {
-                Flags = WGDEVICE_HAS_PRIVATE_KEY | WGDEVICE_HAS_LISTEN_PORT,
-                PrivateKey = new byte[32],
-                ListenPort = listenPort,
-                Peers = IntPtr.Zero,
-                PeersCount = 0
-            };
-
-            // Copy private key
-            if (privateKey.Length != 32)
-                throw new ArgumentException("Private key must be exactly 32 bytes");
-
-            Array.Copy(privateKey, device.PrivateKey, 32);
-
-            // Try to configure via WireGuard API (may not work with Wintun)
-            if (WireGuardSetConfiguration(adapter, ref device))
-            {
-                Program.Log(LogLevel.Debug, "Adapter configured via WireGuard API successfully");
-            }
-            else
-            {
-                int error = Marshal.GetLastWin32Error();
-                Program.Log(LogLevel.Error, $"WireGuard configuration failed (Error: {error}). This is expected for Wintun adapters.");
-                Program.Log(LogLevel.Debug, "Configuration will be handled via WireGuard config file instead.");
-            }
-        }
-        catch (Exception ex)
-        {
-            Program.Log(LogLevel.Error, $"Configuration error (non-fatal): {ex.Message}");
-            // Don't throw - configuration can be handled other ways
-        }
-    }
 
     /// <summary>
     /// Converts CIDR prefix length to subnet mask
