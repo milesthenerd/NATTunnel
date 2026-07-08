@@ -12,7 +12,7 @@ The Windows build ships as a standalone GUI executable. There's no installer or 
 There's a `win-x64` publish profile at [`NATTunnelGUI/Properties/PublishProfiles/win-x64.pubxml`](../../NATTunnelGUI/Properties/PublishProfiles/win-x64.pubxml). It produces a framework-dependent single-file executable:
 
 ```powershell
-dotnet publish NATTunnelGUI -p:PublishProfile=win-x64
+dotnet publish NATTunnelGUI -p:PublishProfile=win-x64 -p:DebugType=None -p:DebugSymbols=false
 ```
 
 ## Filesystem layout on a running install

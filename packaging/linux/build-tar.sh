@@ -12,8 +12,8 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 RID="${RID:-linux-x64}"
 VERSION="${VERSION:-$(grep -oP '(?<=<Version>)[^<]+' "$REPO_ROOT/Directory.Build.props" | head -1)}"
 VERSION="${VERSION:-1.0.0}"
-STAGE="$REPO_ROOT/packaging/linux/stage/nattunnel-$VERSION"
-OUT="$REPO_ROOT/nattunnel-$VERSION-$RID.tar.gz"
+STAGE="$REPO_ROOT/packaging/linux/stage/nattunnel_${VERSION}"
+OUT="$REPO_ROOT/nattunnel_${VERSION}_${RID}.tar.gz"
 
 echo "Building for $RID (version $VERSION)"
 
