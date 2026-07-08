@@ -2,15 +2,22 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <Version>1.1.0</Version>
     <TargetFramework>net9.0</TargetFramework>
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
     <DebugType>embedded</DebugType>
     <Nullable>enable</Nullable>
+    <DebugSymbols>false</DebugSymbols>
+    <AllowedReferenceRelatedFileExtensions>none</AllowedReferenceRelatedFileExtensions>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\NATTunnel\NATTunnel.csproj" />
   </ItemGroup>
+
+  <Target Name="StripUnusedNativeLibs" AfterTargets="Publish">
+    <Delete Files="$(PublishDir)wireguard.dll;$(PublishDir)libsodium.so;$(PublishDir)libsodium.dll" />
+  </Target>
 
 </Project>
