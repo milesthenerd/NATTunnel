@@ -328,12 +328,21 @@ internal class Tunnel : IDisposable
             connectionAttempt.Elapsed += (source, e) =>
             {
                 if (Volatile.Read(ref disposed) != 0) return;
-                if (holePunchReceivedCount < HOLE_PUNCH_THRESHOLD)
+                // Branch on whether a probe has WON, not on holePunchReceivedCount. Once a probe
+                // wins, its socket (now `udpClient`) holds the NAT mapping the peer is replying to
+                // — we must keep sending from THAT socket to keep the mapping fresh so the peer's
+                // subsequent packets keep landing on it. If we instead kept spraying all 256 (the
+                // old `count < THRESHOLD` branch, which stays true after a single-packet win),
+                // the winning mapping goes stale on a per-flow-port-rewriting NAT/firewall and the
+                // peer's replies stop arriving — exactly one packet gets through, then silence.
+                // (This is invisible on many v4 NATs but fatal on symmetric IPv6 firewalls.)
+                MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
+                // Don't set ConnectionID — introducer-relayed tunnels use mismatched IDs
+                // (each side hashes the remote peer's ID). Source IP filtering is sufficient.
+                byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                if (Volatile.Read(ref probeConnected) == 0)
                 {
-                    MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                    // Don't set ConnectionID — introducer-relayed tunnels use mismatched IDs
-                    // (each side hashes the remote peer's ID). Source IP filtering is sufficient.
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    // No winner yet — spray from all probes to find a path through.
                     foreach (System.Net.Sockets.UdpClient probe in symmetricConnectionUdpProbes)
                     {
                         probe.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
@@ -341,14 +350,10 @@ internal class Tunnel : IDisposable
                 }
                 else
                 {
-                    // Threshold reached locally — but the non-symmetric peer may not yet have
-                    // received any of our packets (only one of 256 probes "won"). Keep sending
-                    // hole-punches from the winning probe (udpClient) until peer 2 confirms by
-                    // bouncing a packet back; otherwise both sides stall and peer 2 times out.
-                    // No `!connected` gate: even after `connected=true` locally, we still need
-                    // to drive peer 2's state machine until it also flips.
-                    MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
-                    byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
+                    // A probe won — keep punching from ONLY the winning socket (udpClient) to keep
+                    // its mapping alive and drive the peer's state machine until it also flips.
+                    // No `!connected` gate: even after we flip connected locally, the peer may not
+                    // have received our packets yet and still needs us to keep sending.
                     udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
                 }
             };
@@ -381,13 +386,10 @@ internal class Tunnel : IDisposable
                         byte[] receivedBuffer = capturedProbe.EndReceive(res, ref receivedEndpoint);
                         holePunchReceivedCount++;
 
-                        bool matched = EndpointUtils.Normalize(receivedEndpoint.Address).Equals(EndpointUtils.Normalize(targetPeerIp));
-                        Program.Log(LogLevel.Debug, $"[Symmetric NAT] Probe RX from {EndpointUtils.Normalize(receivedEndpoint.Address)}:{receivedEndpoint.Port} (target={targetPeerIp}, matched={matched}, count={holePunchReceivedCount})");
-
                         // The probe socket is dual-stack, so a v4 sender arrives as a v4-mapped
                         // address (::ffff:a.b.c.d) that won't .Equals a plain-v4 targetPeerIp —
                         // normalize both sides before comparing so the winning probe is recognized.
-                        if (matched &&
+                        if (EndpointUtils.Normalize(receivedEndpoint.Address).Equals(EndpointUtils.Normalize(targetPeerIp)) &&
                             Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
                         {
                             won = true;
@@ -408,9 +410,7 @@ internal class Tunnel : IDisposable
                             // have flowed pre-connection under the relaxed !connected gate; mesh
                             // control that starts after connection is what breaks — the introducer
                             // heartbeat acks never arrive and the introducer looks dead.)
-                            int oldTargetPort = targetPeerPort;
                             targetPeerPort = EndpointUtils.Normalize(receivedEndpoint).Port;
-                            Program.Log(LogLevel.Info, $"[Symmetric NAT] Adopted winning remote port: targetPeerPort {oldTargetPort} -> {targetPeerPort} (peer {EndpointUtils.Normalize(receivedEndpoint).Address})");
 
                             // Process the packet that triggered the winning probe immediately.
                             // Without this, the first packet (e.g. WG key exchange from the
@@ -495,11 +495,15 @@ internal class Tunnel : IDisposable
                         udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, randPort.Next(1024, 65536)));
                     }
                 }
-                else if (!connected)
+                else if (!connected || wireguardTunnel == null)
                 {
-                    // Threshold reached but not fully connected yet — keep sending to the
-                    // symmetric peer's confirmed endpoint so its winning probe receives
-                    // packets and can complete connection establishment.
+                    // Threshold reached. Keep sending to the symmetric peer's confirmed endpoint so
+                    // its winning probe keeps receiving packets and can climb to its OWN threshold.
+                    // The `|| wireguardTunnel == null` (embedded) is critical: we may flip connected
+                    // after just 1-2 received packets, but the symmetric peer needs ~3 to flip too.
+                    // If we stop the instant WE connect, the symmetric side stalls at count=1 and
+                    // never establishes — a deadlock where we think we're done and it's starved.
+                    // (WG mode stops at connected because WG's own keepalives take over the flow.)
                     MediationMessage message = new MediationMessage(MediationMessageType.SymmetricHolePunchAttempt);
                     byte[] sendBuffer = Encoding.ASCII.GetBytes(message.Serialize());
                     udpClient.Send(sendBuffer, sendBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
@@ -629,12 +633,7 @@ internal class Tunnel : IDisposable
             // see comment at first portOk
             bool portOk = listenEndpoint.Port == targetPeerPort
                           || (!connected && (natType == NATType.Symmetric || remoteNatType == NATType.Symmetric));
-            bool ipOk = targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp);
-            if (!(ipOk && portOk))
-            {
-                Program.Log(LogLevel.Warning, $"[Tunnel] DROPPED 0x20 mesh-control from {listenEndpoint.Address}:{listenEndpoint.Port} (targetPeerIp={targetPeerIp}, targetPeerPort={targetPeerPort}, ipOk={ipOk}, portOk={portOk}, connected={connected})");
-            }
-            if (ipOk && portOk)
+            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp) && portOk)
             {
                 DataPacketReceived?.Invoke(receiveBuffer);
             }
