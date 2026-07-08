@@ -27,6 +27,13 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
         try
         {
             WireGuardConfigSanitizer.WriteWgOnlyConfig(configFilePath, tempConfigPath);
+            // Native setconf first (no wg.exe). Fall back to wg.exe setconf on any failure.
+            if (adapters.TryGetValue(interfaceName, out IntPtr adapter) && adapter != IntPtr.Zero &&
+                WireGuardNativeConfig.ApplyConfigFile(adapter, tempConfigPath))
+            {
+                return;
+            }
+            Program.Log(LogLevel.Debug, $"[WireGuard] Native setconf failed for {interfaceName}; falling back to wg.exe");
             RunWg($"setconf \"{interfaceName}\" \"{tempConfigPath}\"");
         }
         finally
@@ -80,12 +87,74 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
     }
 
     public bool AddOrUpdatePeer(string interfaceName, WireGuardPeer peer)
-        => WireGuardNT.AddPeerToInterface(interfaceName, peer);
+    {
+        // Prefer the native WireGuardSetConfiguration merge — no wg.exe means no dependency on a
+        // WireGuard-for-Windows install (which was an onboarding cliff: users hit the installer
+        // download and gave up) and one fewer code-execution surface. Fall back to wg.exe on any
+        // failure so connectivity never regresses if the native path misbehaves.
+        if (adapters.TryGetValue(interfaceName, out IntPtr adapter) && adapter != IntPtr.Zero &&
+            WireGuardPeer.IsValidPublicKey(peer.PublicKey))
+        {
+            var allowedIPs = ParseAllowedIPs(peer.AllowedIPs);
+            // Peer's WireGuard endpoint is its per-peer loopback proxy port (see WireGuardPeer.GenerateConfigSection).
+            var endpoint = new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, peer.ProxyPort);
+            if (WireGuardNativeConfig.AddPeer(adapter, peer.PublicKey, endpoint, allowedIPs, peer.KeepAliveInterval))
+                return true;
+
+            Program.Log(LogLevel.Debug, $"[WireGuard] Native peer add failed for {peer.PublicKey[..8]}...; falling back to wg.exe");
+        }
+
+        return WireGuardNT.AddPeerToInterface(interfaceName, peer);
+    }
+
+    /// <summary>Parse a comma-separated "ip/cidr,ip/cidr" AllowedIPs string into (address, cidr) tuples.</summary>
+    private static System.Collections.Generic.List<(System.Net.IPAddress addr, int cidr)> ParseAllowedIPs(string allowedIPs)
+    {
+        var result = new System.Collections.Generic.List<(System.Net.IPAddress, int)>();
+        if (string.IsNullOrWhiteSpace(allowedIPs)) return result;
+        foreach (var entry in allowedIPs.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int slash = entry.IndexOf('/');
+            string ipPart = slash >= 0 ? entry.Substring(0, slash) : entry;
+            int cidr = slash >= 0 && int.TryParse(entry.Substring(slash + 1), out int c) ? c
+                     : (System.Net.IPAddress.TryParse(ipPart, out var probe) && probe.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? 128 : 32);
+            if (System.Net.IPAddress.TryParse(ipPart, out var addr))
+                result.Add((addr, cidr));
+        }
+        return result;
+    }
 
     public void ApplyFullConfig(string interfaceName, string configFilePath)
     {
         if (!adapters.TryGetValue(interfaceName, out IntPtr adapter))
             throw new InvalidOperationException($"Interface {interfaceName} has not been created");
+
+        // Native full-config apply first (no wg.exe). Sanitize to wg-native fields, then apply the
+        // whole interface+peer set with REPLACE_PEERS. Fall back to the wg.exe path on failure.
+        string tempConfigPath = System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(), $"wg_apply_{interfaceName}_{Guid.NewGuid()}.conf");
+        try
+        {
+            if (adapter != IntPtr.Zero)
+            {
+                WireGuardConfigSanitizer.WriteWgOnlyConfig(configFilePath, tempConfigPath);
+                if (WireGuardNativeConfig.ApplyConfigFile(adapter, tempConfigPath))
+                    return;
+                Program.Log(LogLevel.Debug, $"[WireGuard] Native full-config apply failed for {interfaceName}; falling back to wg.exe");
+            }
+        }
+        catch (Exception ex)
+        {
+            Program.Log(LogLevel.Debug, $"[WireGuard] Native full-config apply threw ({ex.Message}); falling back to wg.exe");
+        }
+        finally
+        {
+            if (System.IO.File.Exists(tempConfigPath))
+            {
+                try { System.IO.File.Delete(tempConfigPath); } catch { }
+            }
+        }
+
         WireGuardNT.UpdateConfiguration(adapter, configFilePath, interfaceName);
     }
 
