@@ -3,9 +3,9 @@
 NATTunnel connects peers behind NAT into fully-decentralized mesh networks, using UDP hole-punching coordinated by a central mediation server. The same protocol ships in two deployment forms:
 
 - **Daemon (system-wide)** — Windows / Linux system service plus an optional Avalonia GUI. Creates a real WireGuard interface; any process on the host can reach mesh peers via their mesh IPs. Requires admin/root and a kernel WireGuard implementation.
-- **Embedded library (in-process)** — A NuGet package games and apps link against. No daemon, no kernel WireGuard, no admin/root. Peers appear to the host application as normal UDP endpoints on `127.0.0.1`. Pure managed C#. See [EMBEDDED_MODE_DESIGN.md](EMBEDDED_MODE_DESIGN.md) for the integration model.
+- **Embedded library (in-process)** — A NuGet package games and apps link against. No daemon, no kernel WireGuard, no admin/root. Peers appear to the host application as normal UDP loopback endpoints (by default on `127.0.0.1` distinguished by port; optionally each peer gets its own address across `127.0.0.0/8`). Pure managed C#.
 
-Both modes share the same protocol engine (`MeshProtocolEngine` in `NATTunnel/`) and talk to the same mediation server. The differences are entirely at the host-integration boundary: the daemon uses WireGuard for the data plane and ChaCha20-Poly1305 via the kernel; the library uses Noise XX + ChaCha20-Poly1305 in userspace and exposes per-peer loopback sockets.
+Both modes share the same protocol engine (`MeshProtocolEngine` in `NATTunnel/`) and talk to the same mediation server. The differences are entirely at the host-integration boundary: the daemon uses WireGuard for the data plane and its own kernel crypto; the library runs a Noise XX handshake in userspace (with a negotiated AEAD: ChaCha20-Poly1305 preferred, AES-GCM fallback) and exposes per-peer loopback sockets.
 
 ## Architecture
 
@@ -28,6 +28,8 @@ The NAT type determines which hole-punching strategy is used.
 
 The mediation server tells both peers each other's external UDP endpoint, then both peers simultaneously send packets to each other. The outbound packets create NAT mappings that allow the inbound packets through.
 
+**Address family (IPv6 preference)**: Peers run NAT detection over both families and advertise their observed v4 and v6 endpoints independently. When coordinating a pair, the server (and the introducer, on the mesh-side repair path) prefers IPv6 whenever *both* peers advertised a usable v6 endpoint: with no NAT to traverse on v6, a direct connection lands more reliably, and it rescues pairs that couldn't connect over v4 (for example two symmetric-v4 NATs). If either peer lacks v6, selection falls through to the v4 path. A same-family backstop guards every coordinator path so a v4-only peer is never handed a v6 endpoint or vice versa. Note that a firewall can still restrict or port-rewrite v6 even though there's no address translation, so the NAT type is detected per family and the hole-punch strategies below apply to whichever family was chosen.
+
 **Non-symmetric peers**: Both send `HolePunchAttempt` packets to each other's known endpoint every second. Since both NATs allocate predictable ports, this connects quickly.
 
 **One symmetric peer**: The symmetric peer opens 256 probe sockets on different local ports and sends from all of them simultaneously. The non-symmetric peer's NAT accepts packets from any source port, so one of the 256 probes will get through. The non-symmetric peer also sprays packets to 100 random destination ports per second to find the symmetric peer's allocated port. This leverages the birthday paradox to drastically reduce connection time.
@@ -49,9 +51,10 @@ The hole-punched UDP socket talks to the real remote peer, but the host applicat
 
 **Embedded mode (game-networking bridge)**:
 
-- Each peer gets a `MeshPeerProxy` bound to a unique loopback port (configurable range; default starts at 50100, falls through to the next free port on conflict so multiple embedded processes can run on one machine)
+- Each peer gets a `MeshPeerProxy` bound to a loopback endpoint. By default all peers share `127.0.0.1` and are distinguished by a unique port (configurable range; default starts at 50100, falls through to the next free port on conflict so multiple embedded processes can run on one machine)
+- When `MeshConfig.UseDistinctLoopbackIPs` is set, each peer instead gets its own address in `127.0.0.0/8` (walking `127.0.1.1` upward, skipping `127.0.0.0/24`). This suits host transports that surface only the source IP and not the port: each peer has a unique IP, reverse-lookup-able via `MeshNode.TryGetPeerByLoopbackIP`
 - The host application's UDP code (ENet, LiteNetLib, raw `UdpClient`, anything) treats `peer.LoopbackEndpoint` as a normal remote endpoint
-- **Outbound**: Game sends to `127.0.0.1:<port>` => the proxy encrypts with the peer's Noise transport key => wraps in a 1-byte envelope (`0x01` for data, `0x02` for relay) => sends via the hole-punched socket
+- **Outbound**: Game sends to `127.0.0.1:<port>` => the proxy encrypts with the peer's negotiated transport key => wraps in a 1-byte envelope (see the envelope-byte table below) => sends via the hole-punched socket
 - **Inbound**: A packet arrives, the dispatcher routes by envelope byte and decrypts with the source peer's transport key, then writes to the same loopback port so the game's UDP code sees it as coming back from the same address
 
 The embedded layer is transparent to UDP-based game networking libraries the same way the daemon layer is transparent to WireGuard.
@@ -60,7 +63,9 @@ The embedded layer is transparent to UDP-based game networking libraries the sam
 
 **Daemon mode**: After hole-punching succeeds, peers exchange WireGuard public keys over the UDP connection (verified with SHA-256 hashes for integrity). Once both peers have each other's keys, WireGuard handles all further encryption using its own protocol.
 
-**Embedded mode**: Each direct peer pair runs a Noise XX handshake over the hole-punched UDP path. The handshake produces a per-peer ChaCha20-Poly1305 transport key that subsequent data packets use, with an explicit 8-byte nonce per packet (Noise's transport mode is replay-protected via internal counters that don't survive UDP packet loss/reordering, so a custom UDP-safe transport layer wraps the Noise keys; see `NoiseUdpTransport`). The handshake takes one round trip plus a confirmation; subsequent traffic is one frame each direction.
+**Embedded mode**: Each direct peer pair runs a Noise XX handshake over the hole-punched UDP path. Before the handshake, the two peers exchange a 1-byte cleartext capability hello (`0x11`) and deterministically agree on an AEAD: **ChaCha20-Poly1305 when both support it, else AES-GCM**. The fallback exists because .NET's BCL `ChaCha20Poly1305` is unavailable on some platforms (older Windows 10 for example); AES-GCM is the near-universal common ground. Both capability bytes are bound into the Noise prologue so the cleartext negotiation can't be tampered (a downgrade changes the handshake hash and breaks it). The agreed cipher is used for both the handshake and the data transport.
+
+The handshake produces a per-peer transport key that subsequent data packets use, with an explicit 8-byte nonce per packet (Noise's transport mode is replay-protected via internal counters that don't survive UDP packet loss/reordering, so a custom UDP-safe transport layer wraps the Noise keys; see `NoiseUdpTransport`). ChaCha20-Poly1305 uses BouncyCastle's managed implementation (platform-independent); AES-GCM uses the BCL. The handshake takes one round trip plus a confirmation; subsequent traffic is one frame each direction.
 
 The mediation server's TCP control channel is always wrapped in TLS. On first startup the server auto-generates a self-signed certificate via `openssl` (`cert.pem`/`key.pem` in the server directory); operators can supply their own via the `TLS_CERT_PATH`/`TLS_KEY_PATH` environment variables. Clients default to TLS enabled and accept self-signed certificates.
 
@@ -136,7 +141,17 @@ When two symmetric NAT peers can't hole-punch to each other (and they're not sam
 The embedded library (`NATTunnel` NuGet package, public type `MeshNode`) wraps the same `MeshProtocolEngine` the daemon uses, but with a different host integration:
 
 - **Identity**: the host application supplies its own `PeerID` if it wants stable identity across sessions; otherwise `Guid.NewGuid()` per session. Static Noise keypair is regenerated per session in the current version (persistent static key support is a deferred polish item).
-- **Mesh transport**: encrypted UDP via Noise XX + ChaCha20-Poly1305, multiplexed over the same hole-punched socket. Wire-format envelopes distinguish data (`0x01`), handshake (`0x10`), relay-wrapped (`0x02`), and mesh-control (`0x20`) traffic.
+- **Mesh transport**: encrypted UDP via Noise XX with a negotiated AEAD (ChaCha20-Poly1305 preferred, AES-GCM fallback; see Encryption above), multiplexed over the same hole-punched socket. Wire-format envelopes (1-byte prefix) distinguish traffic types:
+
+  | Byte | Meaning |
+  |---|---|
+  | `0x01` | encrypted data |
+  | `0x02` | relay-wrapped (src/dst mesh-IP header + inner) |
+  | `0x10` | Noise handshake |
+  | `0x11` | cipher-negotiation hello (cleartext) |
+  | `0x20` | mesh-control (heartbeats / ConnectionBegin / relay signaling) |
+  | `0x30`–`0x33` | application identity / unreliable / reliable / reliable-ack |
+  | `0x40` | data fragment (when `AutoFragment` is enabled) |
 - **Loopback port allocation**: each connected peer gets a unique `127.0.0.1:<port>` endpoint exposed as `MeshPeer.LoopbackEndpoint`. The library walks the configured `LoopbackPortRange` (default 50100-65535) per `MeshPeerProxy` it builds, catching `SocketException` on bind conflicts and trying the next port. This lets multiple embedded processes coexist on one machine — no shared state and no race-prone fixed ports.
 - **Mediation-server NAT-test parity**: the embedded library performs the same UDP NAT-detection handshake the daemon does, with the same result classifications. The library also lifts the "symmetric NAT skips introducer probes" exclusion that the daemon applies (the daemon path can't usefully reconnect to mediation post-grace, but the embedded path can).
 - **No persistent state**: no config file, no WireGuard interface, no kernel involvement. Everything lives in the `MeshNode` instance and goes away on `Dispose()`.
@@ -146,8 +161,6 @@ What embedded mode does NOT have, compared to the daemon:
 - No `localhost:51889` HTTP status/control endpoint. Inspection is via `MeshNode.Peers` and the `PeerConnected` / `PeerDisconnected` events.
 - No GUI, no log streaming, no `/config` POST. Callers wire in a `Logger` callback if they want logs.
 - No persistent introducer-takeover sticky state across process restarts. A restarted embedded process starts with no introducer pointer and re-discovers via mediation.
-
-See [EMBEDDED_MODE_DESIGN.md](EMBEDDED_MODE_DESIGN.md) for the full integration model and [ENCRYPTION_PROTOCOL.md](ENCRYPTION_PROTOCOL.md) for the wire-format details.
 
 ## Mesh Status and Control (daemon mode)
 
