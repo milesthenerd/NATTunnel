@@ -1,6 +1,6 @@
 {
     "name": "nattunnel-mediation-server",
-    "version": "1.4.0",
+    "version": "1.5.0",
     "private": true,
     "description": "NATTunnel mediation server — handles peer discovery, NAT detection, and introducer election for the NATTunnel mesh networking library.",
     "main": "server.js",
