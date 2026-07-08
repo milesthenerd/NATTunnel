@@ -4161,11 +4161,15 @@ internal class MeshProtocolEngine
                     }
                 }
 
-                // When both peers have a usable IPv6 endpoint, connect directly over v6 regardless
-                // of NAT type: v6 has no NAT to traverse, so the symmetric-relay dance is
-                // unnecessary — only a mutual firewall punch is needed, which the direct path does.
+                // When both peers have a usable IPv6 endpoint we PREFER connecting over v6 (no NAT
+                // address translation to traverse). BUT this does NOT exempt a both-symmetric pair
+                // from relaying: a symmetric IPv6 firewall still randomizes the source port per
+                // destination, so two symmetric peers can't punch to each other over v6 any more
+                // than over v4 — they still need a relay. (An earlier version skipped relay whenever
+                // bothHaveV6, which left symmetric-over-v6 pairs looping in re-introduce forever.)
                 bool bothHaveV6 = !string.IsNullOrEmpty(msg.EndpointV6String) &&
                                   !string.IsNullOrEmpty(existingPeerEndpointV6);
+                bool bothSymmetric = msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric;
 
                 // Same-LAN short-circuit for symmetric pairs.
                 string msgPublicIP = EndpointUtils.GetHost(msg.EndpointString);
@@ -4175,7 +4179,7 @@ internal class MeshProtocolEngine
                                !string.IsNullOrEmpty(msg.LocalIP) &&
                                !string.IsNullOrEmpty(existingPeerLocalIP);
 
-                if (!bothHaveV6 && !sameLan && msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric)
+                if (!sameLan && bothSymmetric)
                 {
                     string chosenRelay = PickRelay(existingPeerMeshIP, msg.PrivateAddressString) ?? (context.Options.AllowRelayThrough ? meshIP : null);
                     if (string.IsNullOrEmpty(chosenRelay))
@@ -5813,13 +5817,17 @@ internal class MeshProtocolEngine
                     repairAttemptCount[pairKey] = attempts;
 
                     // If both peers have a usable v6 endpoint, they can connect DIRECTLY over v6
-                    // regardless of their (v4) NAT type — v6 has no NAT to traverse, so the
-                    // symmetric-relay dance is unnecessary and, in steady state, broken (both peers
-                    // are off mediation, so the relay path can't be set up). Force the direct path.
+                    // Prefer v6 endpoints for the direct punch when both have them, BUT this does not
+                    // exempt a both-symmetric pair from relaying: a symmetric IPv6 firewall randomizes
+                    // the source port per destination, so two symmetric peers cannot punch to each
+                    // other over v6 any more than over v4. Suppressing relay for bothHaveV6 left such
+                    // pairs looping in re-introduce forever (never connecting, never relaying). The
+                    // introducer is still on mediation here (it's the introducer), so it can set up
+                    // the relay even though the two target peers are off mediation.
                     bool repairBothHaveV6 = !string.IsNullOrEmpty(infoA.endpointV6) &&
                                             !string.IsNullOrEmpty(infoB.endpointV6);
 
-                    bool bothSymmetric = !repairBothHaveV6 &&
+                    bool bothSymmetric =
                         infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
                     // Same-LAN exception: skip relay if both endpoints share a public IP and
                     // we have LAN info for both. Direct LAN connection should work even when

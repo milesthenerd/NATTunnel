@@ -316,33 +316,10 @@ namespace NATTunnel
 
                 System.Threading.Thread.Sleep(1000);
 
-                // Verify interface status
-                Program.Log(LogLevel.Debug, "Checking WireGuard interface status...");
-                var statusPsi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
-                    Arguments = $"show {interfaceName}",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
-                };
-
-                using (var statusProcess = System.Diagnostics.Process.Start(statusPsi))
-                {
-                    statusProcess.WaitForExit();
-                    string output = statusProcess.StandardOutput.ReadToEnd();
-                    string error = statusProcess.StandardError.ReadToEnd();
-
-                    if (!string.IsNullOrWhiteSpace(output))
-                    {
-                        Program.Log(LogLevel.Debug, $"WireGuard status:\n{output}");
-                    }
-                    if (!string.IsNullOrWhiteSpace(error))
-                    {
-                        Program.Log(LogLevel.Error, $"WireGuard status error: {error}");
-                    }
-                }
+                // Native interface-status diagnostic (no wg.exe). The bundled WireGuard-NT driver is
+                // the only WireGuard component we require, so query it directly rather than shelling
+                // to the WG-for-Windows CLI (which fresh installs no longer have).
+                Program.Log(LogLevel.Debug, $"WireGuard status: driver v0x{WireGuardNTAPI.WireGuardGetRunningDriverVersion():X}, interface {interfaceName}");
 
                 // Initialize tunnel based on mode
                 if (!skipTunnelCreation)
@@ -393,22 +370,11 @@ namespace NATTunnel
                         {
                             try
                             {
-                                // Use the peer's specific proxy port, not the shared 51821
-                                var resetPsi = new System.Diagnostics.ProcessStartInfo
-                                {
-                                    FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
-                                    Arguments = $"set {interfaceName} peer {peer.PublicKey} endpoint 127.0.0.1:{peer.ProxyPort}",
-                                    UseShellExecute = false,
-                                    RedirectStandardError = true,
-                                    CreateNoWindow = true
-                                };
-                                using var proc = System.Diagnostics.Process.Start(resetPsi);
-                                proc.WaitForExit();
-                                if (proc.ExitCode != 0)
-                                {
-                                    var err = proc.StandardError.ReadToEnd();
-                                    Program.Log(LogLevel.Error, $"[Endpoint Reset] Failed for peer {peer.PublicKey.Substring(0, 8)}: {err}");
-                                }
+                                // Re-assert the peer's endpoint (its loopback proxy port) natively via
+                                // the backend's WireGuardSetConfiguration merge — no wg.exe. This
+                                // counters WireGuard's endpoint roaming from breaking the proxy.
+                                if (!backend.AddOrUpdatePeer(interfaceName, peer))
+                                    Program.Log(LogLevel.Error, $"[Endpoint Reset] Failed for peer {peer.PublicKey.Substring(0, 8)}");
                             }
                             catch (Exception ex)
                             {
@@ -418,62 +384,6 @@ namespace NATTunnel
                     }
                 });
 
-                // Peer health monitoring is now handled by TunnelManager
-                // which tracks actual tunnel activity (including keepalives)
-                // This WireGuard-specific check was too aggressive and removed active peers
-                // Leaving code commented for reference
-                /*
-                // Start peer health monitoring task
-                // Removes peers that haven't sent WireGuard traffic in 10 minutes
-                // Note: This is based on WireGuard handshake activity, not tunnel keepalives
-                if (TunnelOptions.IsServer)
-                {
-                    Task.Run(async () =>
-                    {
-                        while (tunnelStarted)
-                        {
-                            await Task.Delay(30000); // Check every 30 seconds
-
-                            var now = DateTime.UtcNow;
-                            // Increased timeout from 120s to 600s (10 minutes) to avoid premature removal
-                            // WireGuard handshakes can be infrequent even with active traffic
-                            var inactivePeers = peerManager.GetAllPeers()
-                                .Where(p => !p.IsPersistent && (now - p.LastActivity).TotalSeconds > 600)
-                                .ToList();
-
-                            foreach (var peer in inactivePeers)
-                            {
-                                Program.Log(LogLevel.Debug, $"[Health] Removing inactive peer {peer.PrivateAddress} (last activity: {(now - peer.LastActivity).TotalSeconds:F0}s ago)");
-
-                                // Remove from WireGuard
-                                try
-                                {
-                                    var removePsi = new System.Diagnostics.ProcessStartInfo
-                                    {
-                                        FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
-                                        Arguments = $"set {interfaceName} peer {peer.PublicKey} remove",
-                                        UseShellExecute = false,
-                                        RedirectStandardError = true,
-                                        CreateNoWindow = true
-                                    };
-                                    using var proc = System.Diagnostics.Process.Start(removePsi);
-                                    proc.WaitForExit();
-                                }
-                                catch (Exception ex)
-                                {
-                                    Program.Log(LogLevel.Error, $"[Health] Error removing peer from WireGuard: {ex.Message}");
-                                }
-
-                                // Remove from proxy
-                                udpProxy?.UnregisterPeer(peer.PrivateAddress);
-
-                                // Remove from peer manager
-                                peerManager.RemovePeer(peer.ConnectionId);
-                            }
-                        }
-                    });
-                }
-                */
 
                 // Check interface connectivity status (Windows-only diagnostic)
                 Task.Run(async () =>
@@ -503,19 +413,9 @@ namespace NATTunnel
                         }
                     }
 
-                    // Also check WireGuard status
-                    var wgPsi = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = WireGuardDriverInstaller.TryFindWgExe() ?? "wg",
-                        Arguments = "show",
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        CreateNoWindow = true
-                    };
-                    using var wgProc = System.Diagnostics.Process.Start(wgPsi);
-                    var wgOutput = wgProc.StandardOutput.ReadToEnd();
-                    wgProc.WaitForExit();
-                    Program.Log(LogLevel.Debug, $"[Status Check] WireGuard status:\n{wgOutput}");
+                    // Native driver-version status (no wg.exe). Detailed per-peer status is available
+                    // via the HTTP /status endpoint; here we just confirm the driver is live.
+                    Program.Log(LogLevel.Debug, $"[Status Check] WireGuard-NT driver v0x{WireGuardNTAPI.WireGuardGetRunningDriverVersion():X}");
                 });
 
                 tunnelStarted = true;
@@ -610,8 +510,8 @@ namespace NATTunnel
             // Update config file for persistence (used on restart)
             RegenerateConfigWithPeers();
 
-            // Use "wg set" to add this single peer without tearing down existing sessions.
-            // Falls back to full setconf if wg set fails.
+            // Add this single peer natively (WireGuardSetConfiguration merge, no REPLACE_PEERS)
+            // without tearing down existing sessions.
             if (tunnelStarted)
             {
                 if (!backend.AddOrUpdatePeer(interfaceName, peer))
@@ -700,8 +600,8 @@ namespace NATTunnel
             // Update config file for persistence (used on restart)
             RegenerateConfigWithPeers();
 
-            // Use "wg set" to add this single peer without tearing down existing sessions.
-            // Falls back to full setconf if wg set fails.
+            // Add this single peer natively (WireGuardSetConfiguration merge, no REPLACE_PEERS)
+            // without tearing down existing sessions.
             if (tunnelStarted)
             {
                 if (!backend.AddOrUpdatePeer(interfaceName, peer))

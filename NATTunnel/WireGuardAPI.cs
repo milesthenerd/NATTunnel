@@ -256,10 +256,8 @@ internal static class WireGuardAPI
             int error = Marshal.GetLastWin32Error();
             Program.Log(LogLevel.Debug, $"WireGuard-NT adapter not found (Error: {error}), creating new adapter...");
 
-            // Lazy driver install: try create first. If it fails because the kernel driver
-            // isn't installed, run the silent installer once and retry. This avoids probing
-            // on every launch — most calls succeed first try and never touch the install path.
-            adapter = TryCreateOrInstall(interfaceName);
+            // Create the adapter using the bundled WireGuard-NT driver (wireguard.dll).
+            adapter = TryCreateAdapter(interfaceName);
 
             if (adapter == IntPtr.Zero)
             {
@@ -286,32 +284,30 @@ internal static class WireGuardAPI
     }
 
     /// <summary>
-    /// First attempt at WireGuardCreateAdapter. If it fails with an error suggesting the
-    /// kernel driver isn't installed, run the bundled/downloaded installer once and retry.
-    /// Returns the adapter handle (zero on final failure).
+    /// Attempt WireGuardCreateAdapter. The WireGuard-NT driver is provided by the bundled
+    /// wireguard.dll (loaded on first CreateAdapter with admin rights) — we no longer download or
+    /// silent-install WireGuard for Windows. If the create fails in a way that looks like the
+    /// driver couldn't load, log a clear message rather than fetching an installer.
+    /// Returns the adapter handle (zero on failure).
     /// </summary>
-    private static IntPtr TryCreateOrInstall(string interfaceName)
+    private static IntPtr TryCreateAdapter(string interfaceName)
     {
         Guid guid = Guid.NewGuid();
         IntPtr adapter = WireGuardNTAPI.WireGuardCreateAdapter(interfaceName, "WireGuard", ref guid);
         if (adapter != IntPtr.Zero) return adapter;
 
         int err = Marshal.GetLastWin32Error();
-        if (!LooksLikeMissingDriver(err))
+        if (LooksLikeMissingDriver(err))
         {
-            // Something else went wrong (name conflict, permissions, etc.) — don't try to
-            // install over a working setup.
-            return IntPtr.Zero;
+            Program.Log(LogLevel.Error,
+                $"WireGuardCreateAdapter failed with Win32 {err}: the WireGuard-NT driver could not " +
+                "be loaded. Ensure wireguard.dll is present next to the daemon and that it's running " +
+                "with administrative privileges.");
         }
-
-        if (!OperatingSystem.IsWindows()) return IntPtr.Zero;
-        Program.Log(LogLevel.Info, $"WireGuardCreateAdapter failed with Win32 {err}; appears the kernel driver is not installed. Attempting silent install ...");
-        if (!WireGuardDriverInstaller.TryInstallDriver()) return IntPtr.Zero;
-
-        guid = Guid.NewGuid();
-        adapter = WireGuardNTAPI.WireGuardCreateAdapter(interfaceName, "WireGuard", ref guid);
-        if (adapter == IntPtr.Zero)
-            Program.Log(LogLevel.Error, $"WireGuardCreateAdapter still failed after driver install (Win32 {Marshal.GetLastWin32Error()}).");
+        else
+        {
+            Program.Log(LogLevel.Error, $"WireGuardCreateAdapter failed with Win32 {err} (name conflict, permissions, etc.).");
+        }
         return adapter;
     }
 
