@@ -30,6 +30,14 @@ namespace NATTunnel.Embedded;
 internal sealed class MeshPeerProxy : IDisposable
 {
     public const byte EnvelopeNoiseHandshake = 0x10;
+    /// <summary>
+    /// Cipher-negotiation hello: [0x11] [1-byte capability bitmask]. Sent IN THE CLEAR before the
+    /// Noise handshake so both peers can agree on an AEAD (ChaCha if both support it, else AES-GCM
+    /// — the BCL ChaCha is unavailable on some older Windows). One is exchanged each way; the
+    /// agreed cipher is used for both the Noise handshake and the data transport, and both caps are
+    /// bound into the Noise prologue so tampering breaks the handshake. See <see cref="CipherCapabilities"/>.
+    /// </summary>
+    public const byte EnvelopeCipherHello = 0x11;
     public const byte EnvelopeData = 0x01;
     /// <summary>Relay envelope. Format: [0x02] [4-byte src-mesh-IPv4] [4-byte dst-mesh-IPv4] [inner].</summary>
     public const byte EnvelopeRelay = 0x02;
@@ -102,6 +110,20 @@ internal sealed class MeshPeerProxy : IDisposable
     private readonly object sendLock = new();
     private volatile bool handshakeDone;
     private volatile bool started;
+
+    // Cipher negotiation (runs before Noise; see CipherCapabilities + EnvelopeCipherHello).
+    // We exchange one cleartext capability byte each way, then both sides deterministically pick
+    // the same AEAD and construct the Noise Protocol with it + a prologue binding both caps.
+    private readonly byte localCipherCaps = CipherCapabilities.LocalCapabilities();
+    private byte remoteCipherCaps;
+    private volatile bool remoteCapsReceived;
+    private volatile bool cipherNegotiated;   // true once we've built handshakeState with the agreed cipher
+    private NegotiatedCipher negotiatedCipher;
+    private byte[] cipherHelloFrame;           // cached [0x11][caps] for retransmit until Noise starts
+    private Timer cipherHelloRetransmitTimer;
+    // Serializes negotiation: HandleCipherHello (tunnel-receive thread) and Start() (caller thread)
+    // both drive NegotiateAndBeginNoise, which builds handshakeState exactly once.
+    private readonly object negotiationLock = new();
     // Buffer for Noise handshake packets that arrive before Start() runs (peer may complete
     // its hole-punch and send msg-1 before we declare our tunnel connected). Flushed on Start().
     private readonly ConcurrentQueue<byte[]> earlyHandshakePackets = new();
@@ -113,6 +135,18 @@ internal sealed class MeshPeerProxy : IDisposable
     // Cached last-sent handshake message for retransmit (UDP can lose msg-1/msg-2/msg-3).
     private byte[] lastSentHandshakeFrame;
     private Timer handshakeRetransmitTimer;
+    // After we complete, the peer may still be missing our final frame and keep retransmitting
+    // its own. We must keep re-answering with lastSentHandshakeFrame or the peer wedges forever
+    // (it never advances, we've torn down handshakeState so we'd otherwise ignore it). Bounded so
+    // a peer that genuinely died doesn't make us reply indefinitely.
+    private int postCompletionRetransmitsLeft;
+    private const int MaxPostCompletionRetransmits = 10;
+    // The last handshake frame we successfully consumed. The peer's retransmit timer resends its
+    // latest frame byte-for-byte on UDP loss; feeding that duplicate back into the forward-only
+    // Noise handshakeState throws AND can poison the state, so a single stale duplicate arriving
+    // before the real next message permanently wedges the handshake (responder spams "read failed"
+    // and never completes — the introducer-drop root cause). Dedup exact duplicates before the read.
+    private byte[] lastReadHandshakeFrame;
 
     // Fragmentation/reassembly state. See MeshConfig.AutoFragment for why; see
     // EnvelopeDataFragment for the on-wire format.
@@ -280,34 +314,109 @@ internal sealed class MeshPeerProxy : IDisposable
         tunnel.DataPacketReceived += OnTunnelPacket;
     }
 
-    /// <summary>Begin the Noise handshake; once complete, start carrying data.</summary>
+    /// <summary>
+    /// Begin the connection: first negotiate the AEAD cipher (cleartext CipherHello exchange),
+    /// then run the Noise handshake with the agreed cipher, then carry data. The initiator sends
+    /// its CipherHello immediately; the responder waits for the initiator's before replying.
+    /// </summary>
     public void Start()
     {
         cts = new CancellationTokenSource();
-
-        var protocol = new Protocol(
-            HandshakePattern.XX,
-            CipherFunction.ChaChaPoly,
-            HashFunction.Sha256);
-        handshakeState = protocol.Create(initiator: isInitiator, s: staticPrivateKey);
         started = true;
 
-        // Retransmit the most recently sent handshake message every second until the
-        // handshake completes. UDP can drop any of the three messages, and without this
-        // a single loss permanently stalls the handshake.
-        handshakeRetransmitTimer = new Timer(_ => RetransmitHandshake(), null, 1000, 1000);
+        // Cache our CipherHello and retransmit it until negotiation completes (UDP can drop it).
+        cipherHelloFrame = new byte[] { EnvelopeCipherHello, localCipherCaps };
+        cipherHelloRetransmitTimer = new Timer(_ => RetransmitCipherHello(), null, 1000, 1000);
 
-        // Drain any handshake packets that arrived before Start() ran.
-        while (earlyHandshakePackets.TryDequeue(out var early))
+        // Send our CipherHello now if it's our turn: the initiator always opens; the responder
+        // sends once it already knows the initiator's caps (i.e. the initiator's hello beat our
+        // Start()). Otherwise the responder waits and replies from HandleCipherHello. The retransmit
+        // timer covers loss either way.
+        if (isInitiator || remoteCapsReceived)
         {
-            HandleHandshakeMessage(early.AsSpan());
-            if (handshakeDone) return;
+            try { SendThroughTunnel(cipherHelloFrame); }
+            catch (Exception ex) { Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] CipherHello send failed: {ex.Message}"); }
         }
 
-        // Initiator sends msg-1 immediately; responder waits for it.
-        if (isInitiator && !handshakeDone)
+        // A CipherHello may have arrived before Start() ran; process it now to advance negotiation.
+        if (remoteCapsReceived && !cipherNegotiated)
+            NegotiateAndBeginNoise();
+    }
+
+    private void RetransmitCipherHello()
+    {
+        if (cipherNegotiated || cipherHelloFrame == null) return;
+        try { SendThroughTunnel(cipherHelloFrame); }
+        catch { /* tunnel may be gone */ }
+    }
+
+    /// <summary>
+    /// Handle an inbound cleartext CipherHello (the peer's capability byte). Records the caps,
+    /// and — for the responder — replies with our own CipherHello. Once we know both sides' caps
+    /// we can build the Noise handshake with the agreed cipher.
+    /// </summary>
+    private void HandleCipherHello(ReadOnlySpan<byte> body)
+    {
+        if (body.Length < 1) return;
+        if (!remoteCapsReceived)
         {
-            SendNoiseMessage();
+            remoteCipherCaps = body[0];
+            remoteCapsReceived = true;
+        }
+
+        // Responder replies with its caps so the initiator learns them. (Retransmit-safe: the
+        // initiator's timer resends until it sees our reply and negotiates.)
+        if (!isInitiator && cipherHelloFrame != null)
+        {
+            try { SendThroughTunnel(cipherHelloFrame); }
+            catch { /* tunnel may be gone */ }
+        }
+
+        // Start() may not have run yet (early packet); NegotiateAndBeginNoise re-checks started.
+        if (started && !cipherNegotiated)
+            NegotiateAndBeginNoise();
+    }
+
+    /// <summary>
+    /// Both capability bytes are known: pick the agreed cipher, build the Noise handshake with it
+    /// and a prologue binding both caps (downgrade protection), then drive the first Noise message.
+    /// Idempotent — guarded by cipherNegotiated so duplicate CipherHellos don't rebuild state.
+    /// </summary>
+    private void NegotiateAndBeginNoise()
+    {
+        lock (negotiationLock)
+        {
+            if (cipherNegotiated || !remoteCapsReceived) return;
+
+            negotiatedCipher = CipherCapabilities.Select(localCipherCaps, remoteCipherCaps);
+            byte initiatorCaps = isInitiator ? localCipherCaps : remoteCipherCaps;
+            byte responderCaps = isInitiator ? remoteCipherCaps : localCipherCaps;
+            byte[] prologue = CipherCapabilities.BuildPrologue(initiatorCaps, responderCaps);
+
+            var protocol = new Protocol(
+                HandshakePattern.XX,
+                CipherCapabilities.ToNoiseCipher(negotiatedCipher),
+                HashFunction.Sha256);
+            handshakeState = protocol.Create(isInitiator, prologue, staticPrivateKey, null, null);
+            cipherNegotiated = true;
+
+            Program.Log(LogLevel.Debug, $"[Noise/{peerLabel}] cipher negotiated: {negotiatedCipher} (local caps=0x{localCipherCaps:X2}, remote caps=0x{remoteCipherCaps:X2})");
+
+            // Now that we can process Noise, retransmit the last Noise frame (not the CipherHello).
+            cipherHelloRetransmitTimer?.Dispose();
+            cipherHelloRetransmitTimer = null;
+            handshakeRetransmitTimer = new Timer(_ => RetransmitHandshake(), null, 1000, 1000);
+
+            // Drain Noise packets that arrived before negotiation finished.
+            while (earlyHandshakePackets.TryDequeue(out var early))
+            {
+                HandleHandshakeMessage(early.AsSpan());
+                if (handshakeDone) return;
+            }
+
+            // Initiator sends msg-1 now that the cipher is set; responder waits for it.
+            if (isInitiator && !handshakeDone)
+                SendNoiseMessage();
         }
     }
 
@@ -396,10 +505,15 @@ internal sealed class MeshPeerProxy : IDisposable
 
         switch (framed[0])
         {
+            case EnvelopeCipherHello:
+                HandleCipherHello(framed.AsSpan(1));
+                break;
             case EnvelopeNoiseHandshake:
-                if (!started)
+                // Noise can't be processed until cipher negotiation has built handshakeState with
+                // the agreed cipher. The peer may send msg-1 before we've finished negotiating
+                // (it negotiated first), so buffer until cipherNegotiated, then drain.
+                if (!cipherNegotiated)
                 {
-                    // Peer raced ahead of our Start() — buffer for replay.
                     var copy = new byte[framed.Length - 1];
                     Buffer.BlockCopy(framed, 1, copy, 0, copy.Length);
                     earlyHandshakePackets.Enqueue(copy);
@@ -602,13 +716,35 @@ internal sealed class MeshPeerProxy : IDisposable
 
     private void HandleHandshakeMessage(ReadOnlySpan<byte> body)
     {
-        if (handshakeDone || handshakeState == null) return;
+        // Post-completion: our handshakeState is gone, but a peer that missed our final frame
+        // keeps retransmitting its last message. Re-answer with our completing frame (bounded) so
+        // it can advance — otherwise it wedges: tunnel up but Noise never finishes on its side, so
+        // no mesh-control flows and it looks dead. (This is the introducer-drop symptom.)
+        if (handshakeDone)
+        {
+            if (lastSentHandshakeFrame != null && postCompletionRetransmitsLeft > 0)
+            {
+                postCompletionRetransmitsLeft--;
+                try { SendThroughTunnel(lastSentHandshakeFrame); } catch { }
+            }
+            return;
+        }
+        if (handshakeState == null) return;
+
+        // Drop an exact duplicate of the frame we last consumed. The peer's retransmit timer
+        // resends its latest frame verbatim on UDP loss; Noise's handshakeState is forward-only,
+        // so replaying it throws and can poison the state. Noise never sends an OLDER frame (a
+        // peer only ever retransmits its most recent one), so "same bytes as last read" is the
+        // only stale case — ignore it and let the retransmit timers deliver the next real message.
+        if (lastReadHandshakeFrame != null && body.SequenceEqual(lastReadHandshakeFrame))
+            return;
 
         var payloadBuf = new byte[MaxNoiseMessage];
         try
         {
             var (bytesRead, _, t) = handshakeState.ReadMessage(body, payloadBuf);
             consecutiveHandshakeFailures = 0;
+            lastReadHandshakeFrame = body.ToArray();
 
             // Msg 1 (received by responder) and msg 2 (received by initiator) carry the peer's
             // supported version range. Msg 3 (received by responder) has none. Track by counter.
@@ -649,22 +785,35 @@ internal sealed class MeshPeerProxy : IDisposable
         catch (Exception ex)
         {
             int fails = Interlocked.Increment(ref consecutiveHandshakeFailures);
-            Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake read failed ({fails}/{HandshakeFailureThreshold}): {ex.Message}");
+            Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake read failed ({fails}/{HandshakeFailureThreshold}, role={(isInitiator ? "initiator" : "responder")}, recv={handshakeMessagesReceived}, sent={handshakeMessagesSent}): {ex.Message}");
             if (fails >= HandshakeFailureThreshold)
             {
                 Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake wedged after {fails} consecutive failures — tearing down proxy");
                 try { Dispose(); } catch { }
                 try { HandshakeBroken?.Invoke(); } catch { }
+                return;
             }
+
+            // A read failure here is almost always a duplicate/reordered handshake frame from a
+            // peer that hasn't advanced past an earlier step (UDP retransmit landed after we'd
+            // already consumed that message). That means the peer is still waiting on OUR last
+            // frame — nudge it immediately instead of waiting up to 1s for the retransmit timer,
+            // which is what lets one side complete while the other stays wedged. Harmless if the
+            // peer wasn't actually stuck: it's an idempotent duplicate they'll ignore.
+            RetransmitHandshake();
         }
     }
 
     private void CompleteHandshake(Transport noiseTransport)
     {
-        // Promote Noise's internal Transport to our explicit-nonce UDP-safe transport.
+        // Promote Noise's internal Transport to our explicit-nonce UDP-safe transport, using the
+        // cipher we negotiated (must match the handshake cipher, or the peer can't decrypt data).
         // The original Noise Transport is disposed inside FromNoiseTransport.
-        transport = NoiseUdpTransport.FromNoiseTransport(noiseTransport, isInitiator);
+        transport = NoiseUdpTransport.FromNoiseTransport(noiseTransport, isInitiator, negotiatedCipher);
         handshakeDone = true;
+        // Allow a bounded number of post-completion re-answers so a peer still missing our final
+        // frame can be nudged forward. lastSentHandshakeFrame is intentionally NOT cleared here.
+        postCompletionRetransmitsLeft = MaxPostCompletionRetransmits;
 
         try { handshakeRetransmitTimer?.Dispose(); } catch { }
         handshakeRetransmitTimer = null;
@@ -877,6 +1026,7 @@ internal sealed class MeshPeerProxy : IDisposable
         tunnel.DataPacketReceived -= OnTunnelPacket;
         cts?.Cancel();
         try { handshakeRetransmitTimer?.Dispose(); } catch { }
+        try { cipherHelloRetransmitTimer?.Dispose(); } catch { }
         try { loopbackSocket?.Dispose(); } catch { }
         try { handshakeState?.Dispose(); } catch { }
         try { transport?.Dispose(); } catch { }

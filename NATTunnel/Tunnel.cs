@@ -359,8 +359,21 @@ internal class Tunnel : IDisposable
                 // even though there's no NAT to traverse.
                 System.Net.Sockets.UdpClient tempUdpClient = SocketUtils.CreateUdpClient();
                 var capturedProbe = tempUdpClient;
-                tempUdpClient.BeginReceive(new AsyncCallback((IAsyncResult res) =>
+                // The initial receive is one-shot: BeginReceive fires its callback exactly once.
+                // A probe whose FIRST datagram isn't from the target (stray/duplicate/noise) would
+                // otherwise go deaf and could never catch the peer's real reply — and with a
+                // symmetric NAT only one specific probe's external port receives that reply, so a
+                // single deaf probe can lose the whole connection. Re-arm on every non-winning
+                // packet so no probe stops listening until one actually wins.
+                AsyncCallback probeCallback = null;
+                void ArmProbe()
                 {
+                    try { capturedProbe.BeginReceive(probeCallback, null); }
+                    catch { /* socket disposed/torn down — stop re-arming */ }
+                }
+                probeCallback = new AsyncCallback((IAsyncResult res) =>
+                {
+                    bool won = false;
                     try
                     {
                         if (Volatile.Read(ref disposed) != 0) return;
@@ -368,18 +381,36 @@ internal class Tunnel : IDisposable
                         byte[] receivedBuffer = capturedProbe.EndReceive(res, ref receivedEndpoint);
                         holePunchReceivedCount++;
 
+                        bool matched = EndpointUtils.Normalize(receivedEndpoint.Address).Equals(EndpointUtils.Normalize(targetPeerIp));
+                        Program.Log(LogLevel.Debug, $"[Symmetric NAT] Probe RX from {EndpointUtils.Normalize(receivedEndpoint.Address)}:{receivedEndpoint.Port} (target={targetPeerIp}, matched={matched}, count={holePunchReceivedCount})");
+
                         // The probe socket is dual-stack, so a v4 sender arrives as a v4-mapped
                         // address (::ffff:a.b.c.d) that won't .Equals a plain-v4 targetPeerIp —
                         // normalize both sides before comparing so the winning probe is recognized.
-                        if (EndpointUtils.Normalize(receivedEndpoint.Address).Equals(EndpointUtils.Normalize(targetPeerIp)) &&
+                        if (matched &&
                             Interlocked.CompareExchange(ref probeConnected, 1, 0) == 0)
                         {
+                            won = true;
                             Program.Log(LogLevel.Info, $"[Symmetric NAT] Connection established on probe port {((IPEndPoint)capturedProbe.Client.LocalEndPoint).Port}");
 
                             // Mesh mode: DON'T replace the shared udpClient or cancel shared tokens.
                             // Instead, switch this tunnel to use the winning probe for sends,
                             // and start a private receive loop that feeds into ProcessUdpPacketBody.
                             udpClient = capturedProbe;
+
+                            // Adopt the winning probe's remote port as this tunnel's target port.
+                            // For a symmetric peer the port it actually punched from differs from
+                            // the one mediation advertised (targetPeerPort). All subsequent traffic
+                            // arrives from this winning port, and the post-connection envelope gates
+                            // (0x01/0x02/0x20) require listenEndpoint.Port == targetPeerPort — so
+                            // without this, mesh-control/data packets on the established flow would
+                            // be dropped as port-mismatched even though the tunnel is up. (Data may
+                            // have flowed pre-connection under the relaxed !connected gate; mesh
+                            // control that starts after connection is what breaks — the introducer
+                            // heartbeat acks never arrive and the introducer looks dead.)
+                            int oldTargetPort = targetPeerPort;
+                            targetPeerPort = EndpointUtils.Normalize(receivedEndpoint).Port;
+                            Program.Log(LogLevel.Info, $"[Symmetric NAT] Adopted winning remote port: targetPeerPort {oldTargetPort} -> {targetPeerPort} (peer {EndpointUtils.Normalize(receivedEndpoint).Address})");
 
                             // Process the packet that triggered the winning probe immediately.
                             // Without this, the first packet (e.g. WG key exchange from the
@@ -418,7 +449,17 @@ internal class Tunnel : IDisposable
                         }
                     }
                     catch { }
-                }), null);
+                    finally
+                    {
+                        // If this packet didn't win (and we're still trying), re-arm so the probe
+                        // keeps listening for the peer's reply instead of going deaf after one
+                        // stray datagram. The winning probe doesn't re-arm here — it hands off to
+                        // its dedicated winningProbeTask receive loop above.
+                        if (!won && Volatile.Read(ref disposed) == 0 && Volatile.Read(ref probeConnected) == 0)
+                            ArmProbe();
+                    }
+                });
+                ArmProbe();
                 symmetricConnectionUdpProbes.Add(tempUdpClient);
             }
 
@@ -538,13 +579,14 @@ internal class Tunnel : IDisposable
         }
 
         // Embedded mode — route designated marker bytes to DataPacketReceived. 0x01 is the
-        // encrypted data envelope; 0x10 is the Noise handshake envelope; 0x30-0x33 are the
-        // application signaling envelopes (identity / unreliable / reliable / reliable-ack);
-        // 0x40 is the data-fragment envelope used when MeshConfig.AutoFragment is enabled.
-        // All must come from our target peer; pre-connection packets are dropped silently to
-        // avoid acting on a racing peer's early traffic.
+        // encrypted data envelope; 0x10 is the Noise handshake envelope; 0x11 is the cleartext
+        // cipher-negotiation hello (sent before Noise); 0x30-0x33 are the application signaling
+        // envelopes (identity / unreliable / reliable / reliable-ack); 0x40 is the data-fragment
+        // envelope used when MeshConfig.AutoFragment is enabled. All must come from our target
+        // peer; pre-connection packets are dropped silently to avoid acting on a racing peer's
+        // early traffic.
         if (wireguardTunnel == null && receiveBuffer.Length > 0 &&
-            (receiveBuffer[0] == 0x01 || receiveBuffer[0] == 0x10 ||
+            (receiveBuffer[0] == 0x01 || receiveBuffer[0] == 0x10 || receiveBuffer[0] == 0x11 ||
              receiveBuffer[0] == 0x30 || receiveBuffer[0] == 0x31 ||
              receiveBuffer[0] == 0x32 || receiveBuffer[0] == 0x33 ||
              receiveBuffer[0] == 0x40))
@@ -587,7 +629,12 @@ internal class Tunnel : IDisposable
             // see comment at first portOk
             bool portOk = listenEndpoint.Port == targetPeerPort
                           || (!connected && (natType == NATType.Symmetric || remoteNatType == NATType.Symmetric));
-            if (targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp) && portOk)
+            bool ipOk = targetPeerIp != null && Equals(listenEndpoint.Address, targetPeerIp);
+            if (!(ipOk && portOk))
+            {
+                Program.Log(LogLevel.Warning, $"[Tunnel] DROPPED 0x20 mesh-control from {listenEndpoint.Address}:{listenEndpoint.Port} (targetPeerIp={targetPeerIp}, targetPeerPort={targetPeerPort}, ipOk={ipOk}, portOk={portOk}, connected={connected})");
+            }
+            if (ipOk && portOk)
             {
                 DataPacketReceived?.Invoke(receiveBuffer);
             }

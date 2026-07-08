@@ -2,6 +2,8 @@ using System;
 using System.Reflection;
 using System.Security.Cryptography;
 using Noise;
+using Org.BouncyCastle.Crypto.Parameters;
+using BcChaCha20Poly1305 = Org.BouncyCastle.Crypto.Modes.ChaCha20Poly1305;
 
 namespace NATTunnel.Embedded;
 
@@ -28,26 +30,43 @@ internal sealed class NoiseUdpTransport : IDisposable
     public const int TagSize = 16;
     private const int ReplayWindowSize = 64;
 
-    private readonly ChaCha20Poly1305 sendCipher;
-    private readonly ChaCha20Poly1305 recvCipher;
+    // The negotiated AEAD. ChaCha uses BouncyCastle's MANAGED ChaCha20Poly1305 (not the BCL
+    // System.Security.Cryptography one, which throws "not supported on this platform" on older
+    // Windows 10 / Server without CNG ChaCha). AES-GCM uses the BCL AesGcm (near-universal HW
+    // support). Whichever the pair negotiated is used for BOTH directions here — the transport
+    // cipher must match the handshake cipher. BC AEADs are stateful, must be re-Init per nonce,
+    // and aren't thread-safe, so each direction locks its reused cipher for each operation.
+    private readonly NegotiatedCipher cipher;
+    private readonly byte[] sendKeyBytes;
+    private readonly byte[] recvKeyBytes;
+    private readonly KeyParameter sendKey;
+    private readonly KeyParameter recvKey;
+    private readonly BcChaCha20Poly1305 sendCipher = new BcChaCha20Poly1305();
+    private readonly BcChaCha20Poly1305 recvCipher = new BcChaCha20Poly1305();
+    private readonly object sendLock = new object();
+    private readonly object recvLock = new object();
     private ulong sendCounter;
 
     // Replay window: bitmap of last 64 counters relative to highestReceivedCounter.
     private ulong highestReceivedCounter;
     private ulong replayWindow;
 
-    private NoiseUdpTransport(byte[] sendKey, byte[] recvKey)
+    private NoiseUdpTransport(byte[] sendKey, byte[] recvKey, NegotiatedCipher cipher)
     {
-        sendCipher = new ChaCha20Poly1305(sendKey);
-        recvCipher = new ChaCha20Poly1305(recvKey);
+        this.cipher = cipher;
+        this.sendKeyBytes = sendKey;
+        this.recvKeyBytes = recvKey;
+        this.sendKey = new KeyParameter(sendKey);
+        this.recvKey = new KeyParameter(recvKey);
     }
 
     /// <summary>
     /// Extracts the two transport cipher keys from a completed Noise <see cref="Transport"/>
-    /// via reflection and constructs an explicit-nonce AEAD transport. Disposes the original
-    /// Noise Transport — the caller should not use it after calling this.
+    /// via reflection and constructs an explicit-nonce AEAD transport using the negotiated cipher
+    /// (which must match the one the handshake ran). Disposes the original Noise Transport — the
+    /// caller should not use it after calling this.
     /// </summary>
-    public static NoiseUdpTransport FromNoiseTransport(Transport noiseTransport, bool isInitiator)
+    public static NoiseUdpTransport FromNoiseTransport(Transport noiseTransport, bool isInitiator, NegotiatedCipher cipher)
     {
         // Noise.NET layout: Transport<CipherType> has private CipherState c1, c2.
         // For initiator: c1 = send, c2 = recv. For responder: c1 = recv, c2 = send.
@@ -71,7 +90,7 @@ internal sealed class NoiseUdpTransport : IDisposable
 
         try { noiseTransport.Dispose(); } catch { }
 
-        return new NoiseUdpTransport(sendKey, recvKey);
+        return new NoiseUdpTransport(sendKey, recvKey, cipher);
     }
 
     private static byte[] ExtractKey(object cipherState)
@@ -100,12 +119,30 @@ internal sealed class NoiseUdpTransport : IDisposable
         ulong counter = unchecked(sendCounter++);
         WriteCounterBigEndian(counter, destination);
 
-        Span<byte> nonce = stackalloc byte[NonceSize];
+        byte[] nonce = new byte[NonceSize];
         BuildNonce(counter, nonce);
 
-        var ciphertext = destination.Slice(CounterSize, plaintext.Length);
-        var tag = destination.Slice(CounterSize + plaintext.Length, TagSize);
-        sendCipher.Encrypt(nonce, plaintext, ciphertext, tag);
+        // Output is [ciphertext ‖ 16B tag] contiguous, exactly our wire layout after the counter.
+        byte[] pt = plaintext.ToArray();
+        byte[] output = new byte[plaintext.Length + TagSize];
+        if (cipher == NegotiatedCipher.ChaCha20Poly1305)
+        {
+            // BC AEAD is single-shot per Init: Init(encrypt) → ProcessBytes → DoFinal appends tag.
+            lock (sendLock)
+            {
+                sendCipher.Init(true, new ParametersWithIV(sendKey, nonce));
+                int len = sendCipher.ProcessBytes(pt, 0, pt.Length, output, 0);
+                sendCipher.DoFinal(output, len);
+            }
+        }
+        else
+        {
+            // BCL AesGcm: separate ciphertext + tag spans. Recreate per call (AesGcm is cheap to
+            // construct and this keeps it thread-safe without locking).
+            using var aes = new AesGcm(sendKeyBytes, TagSize);
+            aes.Encrypt(nonce, pt, output.AsSpan(0, pt.Length), output.AsSpan(pt.Length, TagSize));
+        }
+        output.AsSpan().CopyTo(destination.Slice(CounterSize, output.Length));
 
         return required;
     }
@@ -122,16 +159,41 @@ internal sealed class NoiseUdpTransport : IDisposable
         ulong counter = ReadCounterBigEndian(source);
         if (!CheckAndUpdateReplayWindow(counter, commit: false)) return -1;
 
-        Span<byte> nonce = stackalloc byte[NonceSize];
+        byte[] nonce = new byte[NonceSize];
         BuildNonce(counter, nonce);
 
         int ctLen = source.Length - CounterSize - TagSize;
-        var ciphertext = source.Slice(CounterSize, ctLen);
-        var tag = source.Slice(CounterSize + ctLen, TagSize);
+        byte[] output = new byte[ctLen];
+        if (cipher == NegotiatedCipher.ChaCha20Poly1305)
+        {
+            // BC decrypt takes [ciphertext ‖ tag] contiguous and verifies the tag in DoFinal.
+            byte[] ctAndTag = source.Slice(CounterSize).ToArray();
+            try
+            {
+                lock (recvLock)
+                {
+                    recvCipher.Init(false, new ParametersWithIV(recvKey, nonce));
+                    int len = recvCipher.ProcessBytes(ctAndTag, 0, ctAndTag.Length, output, 0);
+                    recvCipher.DoFinal(output, len); // throws InvalidCipherTextException on tag mismatch
+                }
+            }
+            catch (Org.BouncyCastle.Crypto.InvalidCipherTextException) { return -1; }
+        }
+        else
+        {
+            // BCL AesGcm: separate ciphertext + tag spans; throws on tag mismatch.
+            byte[] ct = source.Slice(CounterSize, ctLen).ToArray();
+            byte[] tag = source.Slice(CounterSize + ctLen, TagSize).ToArray();
+            try
+            {
+                using var aes = new AesGcm(recvKeyBytes, TagSize);
+                aes.Decrypt(nonce, ct, tag, output);
+            }
+            catch (AuthenticationTagMismatchException) { return -1; }
+            catch (CryptographicException) { return -1; }
+        }
 
-        try { recvCipher.Decrypt(nonce, ciphertext, tag, destination.Slice(0, ctLen)); }
-        catch (AuthenticationTagMismatchException) { return -1; }
-        catch (CryptographicException) { return -1; }
+        output.AsSpan(0, ctLen).CopyTo(destination.Slice(0, ctLen));
 
         // Auth succeeded — now commit the counter to the replay window.
         CheckAndUpdateReplayWindow(counter, commit: true);
@@ -192,7 +254,7 @@ internal sealed class NoiseUdpTransport : IDisposable
 
     public void Dispose()
     {
-        try { sendCipher?.Dispose(); } catch { }
-        try { recvCipher?.Dispose(); } catch { }
+        // BouncyCastle's ChaCha20Poly1305 and KeyParameter aren't IDisposable and hold managed
+        // arrays only — nothing to release. Kept for the IDisposable contract callers rely on.
     }
 }

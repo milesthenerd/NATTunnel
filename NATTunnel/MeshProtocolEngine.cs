@@ -524,21 +524,46 @@ internal class MeshProtocolEngine
     /// Detected independently of the v4 verdict (they can differ) and surfaced to the GUI.</summary>
     private NATType? detectedNatTypeV6;
 
-    /// <summary>Applies a NATTypeResponse: stores the v4 verdict (if present) and/or the v6 verdict
-    /// (if present). The server sends one response per family as each settles, so a single message
-    /// may carry either or (rarely) both.</summary>
+    /// <summary>Applies a NATTypeResponse: stores the v4 verdict (if present) or the v6 verdict
+    /// (if present). The server sends one response per family as each settles. Idempotent — a
+    /// re-seen verdict is a no-op (doesn't re-log), so it's safe to call from the handshake drain
+    /// AND the main message loop for the same response.</summary>
     private void ApplyNatTypeResponse(MediationMessage m)
     {
         if (m.NATTypeV6.HasValue)
         {
+            if (detectedNatTypeV6 == m.NATTypeV6.Value) return;
             detectedNatTypeV6 = m.NATTypeV6.Value;
             context.Log(LogLevel.Info, $"[Mesh] NAT type detected (IPv6): {detectedNatTypeV6}");
         }
         else
         {
+            if (detectedNatType == m.NATType && detectedNatType != NATType.Unknown) return;
             detectedNatType = m.NATType;
             context.Log(LogLevel.Info, $"[Mesh] NAT type detected: {detectedNatType}");
         }
+    }
+
+    /// <summary>Our NAT type for a hole-punch over the given endpoint. NAT type is a per-family
+    /// property (v6 has no port-translating NAT, so it's typically Restricted/Open even when v4 is
+    /// Symmetric). Passing the v4 verdict for a v6 connection makes the Tunnel run the 256-probe
+    /// symmetric-NAT-traversal strategy over v6, which doesn't establish — so pick by endpoint
+    /// family. Falls back to the v4 verdict if v6 was never detected.</summary>
+    private NATType OwnNatTypeForEndpoint(string endpoint)
+    {
+        if (EndpointUtils.IsIPv6Endpoint(endpoint) && detectedNatTypeV6.HasValue)
+            return detectedNatTypeV6.Value;
+        return detectedNatType;
+    }
+
+    /// <summary>The remote peer's NAT type for a hole-punch over the given endpoint, chosen by
+    /// family the same way as <see cref="OwnNatTypeForEndpoint"/>. Falls back to the v4 verdict
+    /// when the message carries no v6 verdict.</summary>
+    private static NATType RemoteNatTypeForEndpoint(string endpoint, NATType v4Type, NATType? v6Type)
+    {
+        if (EndpointUtils.IsIPv6Endpoint(endpoint) && v6Type.HasValue)
+            return v6Type.Value;
+        return v4Type;
     }
 
     // ── Introducer probe state ──
@@ -1175,24 +1200,22 @@ internal class MeshProtocolEngine
                                                                             // pendingTunnelCount = WireGuard setup in progress locally — don't block mediation disconnect
                                                                             // if a tunnel callback got lost; if the peer is in activePeerTunnels it's connected enough.
                         bool noPendingWork = pendingConnectionRequests.Count == 0;
-                        bool hasEstablishedTunnels = activePeerTunnels.Count > 0;
+                        // A tunnel in activePeerTunnels only means the Tunnel OBJECT was created —
+                        // not that its hole-punch completed. Symmetric peers can take much longer
+                        // than the grace period to actually establish (the 256-probe spray needs
+                        // the peer to punch back). Gating readiness on mere presence disconnected
+                        // us from mediation mid-punch, so the introducer tunnel never finished and
+                        // mesh-control never flowed → introducer looked dead. Require an ACTUALLY
+                        // completed tunnel (completedTunnelMeshIPs is populated by onConnectionComplete).
+                        bool hasEstablishedTunnels = completedTunnelMeshIPs.Count > 0;
 
-                        // Before disconnecting, verify we have a WireGuard tunnel specifically
-                        // to the introducer. Without this, the introducer can't send us
-                        // MeshConnectionBegin messages for newly joining peers, cutting us off
-                        // from the rest of the network.
+                        // Before disconnecting, verify we have a completed tunnel specifically to the
+                        // introducer. Without this, the introducer can't send us MeshConnectionBegin
+                        // messages for newly joining peers, cutting us off from the rest of the network.
                         bool hasIntroducerPath = false;
-                        if (hasEstablishedTunnels)
+                        if (hasEstablishedTunnels && !string.IsNullOrEmpty(introducerMeshIP))
                         {
-                            string introducerPeerID = joinResponse.IntroducerPeerID;
-                            if (!string.IsNullOrEmpty(introducerPeerID) && activePeerTunnels.ContainsKey(introducerPeerID))
-                            {
-                                hasIntroducerPath = true;
-                            }
-                            else if (!string.IsNullOrEmpty(introducerMeshIP) && completedTunnelMeshIPs.Contains(introducerMeshIP))
-                            {
-                                hasIntroducerPath = true;
-                            }
+                            hasIntroducerPath = completedTunnelMeshIPs.Contains(introducerMeshIP);
                         }
 
                         bool readyToDisconnect = noPendingWork && hasEstablishedTunnels && hasIntroducerPath;
@@ -1623,8 +1646,8 @@ internal class MeshProtocolEngine
                                                         reconnectTunnel.Start();
                                                         reconnectTunnel.InjectConnectionBegin(
                                                             capturedMsg.EndpointString,
-                                                            capturedMsg.NATType,
-                                                            capturedMsg.OwnNATType ?? detectedNatType,
+                                                            RemoteNatTypeForEndpoint(capturedMsg.EndpointString, capturedMsg.NATType, capturedMsg.NATTypeV6),
+                                                            capturedMsg.OwnNATType ?? OwnNatTypeForEndpoint(capturedMsg.EndpointString),
                                                             capturedMsg.PrivateAddressString);
                                                     }
                                                     catch (Exception ex)
@@ -2352,19 +2375,28 @@ internal class MeshProtocolEngine
             SendNatTestV4(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo, natTestBegin.ServerPublicIPv4);
         }
 
-        // The server sends a NATTypeResponse per family as each settles (v4 and v6 arrive in
-        // either order). The join needs the v4 verdict, so keep reading — capturing v6 whenever it
-        // appears — until we have the v4 one. In this synchronous phase only NATTypeResponse
-        // messages arrive before we send the join; a v6 response that arrives later (after join)
-        // is handled in the main message loop.
+        // The server sends ONE NATTypeResponse PER FAMILY we probed (v4 and/or v6), in either
+        // order. We need at least one verdict to proceed to join. BLOCKING-read the first response
+        // (required), then DRAIN any additional responses that are already buffered WITHOUT a
+        // blocking read — so we capture the second family's verdict when it arrived in the same
+        // round-trip, without hanging waiting for a family that was never probed / is blocked. A
+        // straggler that arrives later still gets picked up by the main message loop's
+        // NATTypeResponse handler. ApplyNatTypeResponse is idempotent, so a re-seen verdict is a
+        // no-op (this is what caused the earlier double-log).
         detectedNatType = NATType.Unknown;
-        bool haveV4Verdict = false;
-        while (!haveV4Verdict)
+        var firstNat = ReadOneTcpMessage();
+        if (firstNat.ID == MediationMessageType.NATTypeResponse)
         {
-            var natTypeResponse = ReadOneTcpMessage();
-            if (natTypeResponse.ID != MediationMessageType.NATTypeResponse) break;
-            ApplyNatTypeResponse(natTypeResponse);
-            if (!natTypeResponse.NATTypeV6.HasValue) haveV4Verdict = true;
+            ApplyNatTypeResponse(firstNat);
+            // Drain buffered follow-ups (non-blocking): the second family's response, if it landed
+            // in the same read, is already in earlyTcpRemainder.
+            while (true)
+            {
+                var (buffered, rest) = ExtractFirstJson(earlyTcpRemainder);
+                if (buffered == null || buffered.ID != MediationMessageType.NATTypeResponse) break;
+                earlyTcpRemainder = rest;
+                ApplyNatTypeResponse(buffered);
+            }
         }
 
         // 3. Join mesh network
@@ -2383,7 +2415,15 @@ internal class MeshProtocolEngine
         byte[] sendBuffer = Encoding.ASCII.GetBytes(joinRequest.Serialize());
         stream.Write(sendBuffer, 0, sendBuffer.Length);
 
-        joinResponse = ReadOneTcpMessage();
+        // Read the join response, skipping any straggler per-family NATTypeResponse that arrived
+        // after the drain above but before the join response (the second family settling late).
+        // Apply it so its verdict isn't lost, then keep reading for the actual join response.
+        while (true)
+        {
+            joinResponse = ReadOneTcpMessage();
+            if (joinResponse.ID != MediationMessageType.NATTypeResponse) break;
+            ApplyNatTypeResponse(joinResponse);
+        }
         if (!string.IsNullOrEmpty(joinResponse.VersionError))
         {
             context.Log(LogLevel.Error, $"[Mesh] Mediation server rejected protocol version: {joinResponse.VersionError}");
@@ -2780,7 +2820,9 @@ internal class MeshProtocolEngine
         string remotePeerID = cbMsg.PeerID;
         string remoteMeshIP = cbMsg.PrivateAddressString;
         string remoteEndpoint = cbMsg.EndpointString;
-        NATType remotePeerNatType = cbMsg.NATType;
+        // Pick the peer's NAT type by the family we're actually connecting over — a v6 endpoint
+        // uses the v6 verdict (v6 has no symmetric NAT), not the v4 one. See OwnNatTypeForEndpoint.
+        NATType remotePeerNatType = RemoteNatTypeForEndpoint(remoteEndpoint, cbMsg.NATType, cbMsg.NATTypeV6);
 
         if (string.IsNullOrEmpty(remotePeerID))
         {
@@ -3038,7 +3080,7 @@ internal class MeshProtocolEngine
                 peerTunnel.InjectConnectionBegin(
                     remoteEndpoint,
                     remotePeerNatType,
-                    detectedNatType,
+                    OwnNatTypeForEndpoint(remoteEndpoint),
                     remoteMeshIP
                 );
                 context.Log(LogLevel.Info, $"[Mesh] Hole-punching started for {capturedPeerID} at {remoteEndpoint}");
@@ -3873,8 +3915,8 @@ internal class MeshProtocolEngine
                 // Inject ConnectionBegin directly — preserves LAN endpoints for same-NAT peers.
                 peerTunnel.InjectConnectionBegin(
                     msg.EndpointString,
-                    msg.NATType,
-                    detectedNatType,
+                    RemoteNatTypeForEndpoint(msg.EndpointString, msg.NATType, msg.NATTypeV6),
+                    OwnNatTypeForEndpoint(msg.EndpointString),
                     msg.PrivateAddressString);
             }
             catch (Exception ex)

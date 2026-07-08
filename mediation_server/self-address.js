@@ -121,11 +121,23 @@ class SelfAddress {
             }
             if (!dest) return done(null, new Error('no address for STUN host'));
 
+            // Build a 20-byte Binding request: type, length=0, magic cookie, 12-byte transaction ID.
+            // The transaction ID is LOCAL to this query (not stored on `this`) — v4 and v6 queries
+            // run concurrently, so a shared instance field would get clobbered between send and
+            // parse, corrupting the v6 XOR-MAPPED-ADDRESS decode (which keys off cookie||txId) and
+            // yielding a garbage-but-valid-looking address.
+            const req = Buffer.alloc(20);
+            req.writeUInt16BE(STUN_BINDING_REQUEST, 0);
+            req.writeUInt16BE(0, 2);
+            req.writeUInt32BE(STUN_MAGIC_COOKIE, 4);
+            for (let i = 8; i < 20; i++) req[i] = Math.floor(Math.random() * 256);
+            const txId = req.slice(8, 20);
+
             const socket = dgram.createSocket(socketType);
             socket.on('error', (err) => done(null, err));
             socket.on('message', (msg) => {
                 try {
-                    const addr = this._parseStunResponse(msg);
+                    const addr = this._parseStunResponse(msg, txId);
                     done(addr);
                 } catch (e) {
                     done(null, e);
@@ -134,20 +146,14 @@ class SelfAddress {
 
             const timeout = setTimeout(() => done(null, new Error('STUN timeout')), 3000);
 
-            // Build a 20-byte Binding request: type, length=0, magic cookie, 12-byte transaction ID.
-            const req = Buffer.alloc(20);
-            req.writeUInt16BE(STUN_BINDING_REQUEST, 0);
-            req.writeUInt16BE(0, 2);
-            req.writeUInt32BE(STUN_MAGIC_COOKIE, 4);
-            for (let i = 8; i < 20; i++) req[i] = Math.floor(Math.random() * 256);
-            this._txId = req.slice(8, 20);
-
             socket.send(req, port, dest, (err) => { if (err) done(null, err); });
         });
     }
 
-    /** Extracts the reflected IP from a STUN Binding response (XOR-MAPPED-ADDRESS preferred). */
-    _parseStunResponse(msg) {
+    /** Extracts the reflected IP from a STUN Binding response (XOR-MAPPED-ADDRESS preferred).
+     * txId is the 12-byte transaction ID of the request this is a response to (used for the v6
+     * XOR key), passed in rather than read from shared state so concurrent queries don't collide. */
+    _parseStunResponse(msg, txId) {
         if (msg.length < 20) return null;
         const type = msg.readUInt16BE(0);
         if (type !== STUN_BINDING_RESPONSE) return null;
@@ -184,7 +190,7 @@ class SelfAddress {
                     if (xor) {
                         const key = Buffer.concat([
                             Buffer.from([(cookie >>> 24) & 0xff, (cookie >>> 16) & 0xff, (cookie >>> 8) & 0xff, cookie & 0xff]),
-                            this._txId,
+                            txId,
                         ]);
                         for (let i = 0; i < 16; i++) b[i] ^= key[i];
                     }

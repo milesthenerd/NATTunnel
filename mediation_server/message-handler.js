@@ -821,7 +821,20 @@ class MessageHandler {
             // Reuse the sticky introducer when still eligible — fresh `find()` per join causes split-brain.
             let introducer = null;
             const stickyID = this.networkRegistry.getIntroducer(NetworkID);
-            if (stickyID && stickyID !== PeerID) {
+            if (stickyID === PeerID) {
+                // The JOINING peer IS the current sticky introducer (it's rejoining). Its NAT type
+                // may have CHANGED since it was elected — e.g. DirectMapping last time, Symmetric
+                // now (a v6-primary peer's per-family detection can surface this). If it's no longer
+                // eligible, CLEAR the stale sticky so it isn't silently retained; downstream
+                // election (find → self-election) then picks a valid introducer or none. Without
+                // this, the `stickyID !== PeerID` guard skipped re-validation entirely and a stale
+                // sticky pointing at a now-symmetric peer stuck around.
+                if (NATType === NATTypes.Symmetric) {
+                    console.log(`[MessageHandler] Sticky introducer ${stickyID} (self-rejoin) now Symmetric — clearing stale sticky for ${NetworkID}`);
+                    this.networkRegistry.clearIntroducer(NetworkID);
+                }
+                // If still non-symmetric, leave the sticky as-is; self-election below re-confirms it.
+            } else if (stickyID) {
                 const sticky = allCandidates.find(p => p.peerID === stickyID);
                 if (isEligible(sticky)) {
                     introducer = sticky;
