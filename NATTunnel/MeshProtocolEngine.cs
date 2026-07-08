@@ -566,6 +566,36 @@ internal class MeshProtocolEngine
         return v4Type;
     }
 
+    /// <summary>
+    /// Given a peer's advertised v4 and (optional) v6 endpoints from a MeshConnectionBegin, choose
+    /// which one THIS node should hole-punch to. Prefer v6 only when both this node has a global v6
+    /// route AND the peer advertised a v6 endpoint (same rule the coordinator uses, but applied by
+    /// the receiver so it never tries a family it can't reach). Falls back to v4 otherwise.
+    ///
+    /// This is what lets a v4-only peer join a mesh whose existing peers paired over v6: the
+    /// introducer carries BOTH endpoints, and each receiver picks the family it can actually use,
+    /// instead of being handed a single (possibly wrong-family) endpoint it can't reach.
+    /// </summary>
+    private static string SelectReachableEndpoint(string endpointString, string v6Endpoint)
+    {
+        // Collect every candidate and bucket by family. endpointString may itself be a v6 literal
+        // (the coordinator substitutes v6 into it on the bothHaveV6 path), so classify by content,
+        // not by field name. v6Endpoint is always v6 when present.
+        string v6 = null, v4 = null;
+        if (!string.IsNullOrEmpty(v6Endpoint) && EndpointUtils.IsIPv6Endpoint(v6Endpoint)) v6 = v6Endpoint;
+        if (!string.IsNullOrEmpty(endpointString))
+        {
+            if (EndpointUtils.IsIPv6Endpoint(endpointString)) v6 ??= endpointString;
+            else v4 = endpointString;
+        }
+
+        // Prefer v6 only when we have a global v6 route and a v6 endpoint to punch to. Else use v4.
+        // Fall back to whatever single family exists if the preferred one is absent (an empty result
+        // means the peer gave us nothing reachable — downstream empty-checks handle that).
+        if (v6 != null && Tunnel.HasGlobalIPv6()) return v6;
+        return v4 ?? v6;
+    }
+
     // ── Introducer probe state ──
     private string introducerMeshIP;
     private bool introducerProbeAckReceived = true;
@@ -1884,8 +1914,13 @@ internal class MeshProtocolEngine
                                                     {
                                                         PeerID = parsedMsg.PeerID,
                                                         EndpointString = parsedMsg.EndpointString,
+                                                        // Carry both families so each receiver picks the one it can reach.
+                                                        // This reconnect-introducer path previously sent only v4, so a
+                                                        // v6-paired mesh couldn't admit a v4 joiner (and vice versa).
+                                                        EndpointV6String = parsedMsg.EndpointV6String,
                                                         ExternalEndpointString = parsedMsg.EndpointString,
                                                         NATType = parsedMsg.NATType,
+                                                        NATTypeV6 = parsedMsg.NATTypeV6,
                                                         PrivateAddressString = parsedMsg.PrivateAddressString,
                                                         PeerMinVersion = parsedMsg.PeerMinVersion,
                                                         PeerMaxVersion = parsedMsg.PeerMaxVersion,
@@ -1904,12 +1939,17 @@ internal class MeshProtocolEngine
                                                     }
 
                                                     // Send MeshConnectionBegin to new peer about existing peer (if tunnel ready)
-                                                    if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString) && !string.IsNullOrEmpty(exEndpoint))
+                                                    if (!string.IsNullOrEmpty(parsedMsg.PrivateAddressString) &&
+                                                        (!string.IsNullOrEmpty(exEndpoint) || !string.IsNullOrEmpty(exEndpointV6)))
                                                     {
                                                         var cbToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                                                         {
                                                             PeerID = exPeerID,
                                                             EndpointString = exEndpoint,
+                                                            // Carry the existing peer's v6 endpoint. Rescues a v6-paired
+                                                            // existing peer with no v4 endpoint: the joiner would otherwise
+                                                            // get an empty EndpointString and never learn to reach it.
+                                                            EndpointV6String = exEndpointV6,
                                                             ExternalEndpointString = exEndpoint,
                                                             NATType = (NATType)exNatType,
                                                             PrivateAddressString = exMeshIP,
@@ -2819,7 +2859,11 @@ internal class MeshProtocolEngine
     {
         string remotePeerID = cbMsg.PeerID;
         string remoteMeshIP = cbMsg.PrivateAddressString;
-        string remoteEndpoint = cbMsg.EndpointString;
+        // The CB may carry both a v4 (EndpointString) and v6 (EndpointV6String) endpoint. Pick the
+        // family THIS node can actually reach — prefer v6 only if we have a v6 route and the peer
+        // advertised one. Without this, a v4-only peer handed a v6 endpoint (because the mesh paired
+        // over v6) would key a tunnel on an unreachable family and never connect.
+        string remoteEndpoint = SelectReachableEndpoint(cbMsg.EndpointString, cbMsg.EndpointV6String);
         // Pick the peer's NAT type by the family we're actually connecting over — a v6 endpoint
         // uses the v6 verdict (v6 has no symmetric NAT), not the v4 one. See OwnNatTypeForEndpoint.
         NATType remotePeerNatType = RemoteNatTypeForEndpoint(remoteEndpoint, cbMsg.NATType, cbMsg.NATTypeV6);
@@ -4320,8 +4364,14 @@ internal class MeshProtocolEngine
                     {
                         PeerID = msg.PeerID,
                         EndpointString = newPeerEndpointForExisting,
+                        // Carry the new peer's v6 endpoint too (when it has one and we didn't already
+                        // substitute it into EndpointString) so the receiver can pick the family it
+                        // can actually reach. Lets a v6-capable existing peer choose v6 while a
+                        // v4-only one falls back to EndpointString.
+                        EndpointV6String = msg.EndpointV6String,
                         ExternalEndpointString = newPeerExternal,
                         NATType = msg.NATType,
+                        NATTypeV6 = msg.NATTypeV6,
                         PrivateAddressString = msg.PrivateAddressString,
                         PeerMinVersion = msg.PeerMinVersion,
                         PeerMaxVersion = msg.PeerMaxVersion,
@@ -4330,12 +4380,18 @@ internal class MeshProtocolEngine
                 }
 
                 MediationMessage connBeginToNew = null;
-                if (!string.IsNullOrEmpty(msg.PrivateAddressString) && !string.IsNullOrEmpty(existingPeerEndpointForNew))
+                if (!string.IsNullOrEmpty(msg.PrivateAddressString) &&
+                    (!string.IsNullOrEmpty(existingPeerEndpointForNew) || !string.IsNullOrEmpty(existingPeerEndpointV6)))
                 {
                     connBeginToNew = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                     {
                         PeerID = existingPeerID,
                         EndpointString = existingPeerEndpointForNew,
+                        // Carry the existing peer's v6 endpoint so a v6-capable new peer can pick it.
+                        // Critically, this also rescues the case where the existing peer paired over
+                        // v6 and has no v4 endpoint: without a v6 field the new peer would get an
+                        // empty EndpointString and never learn how to reach it.
+                        EndpointV6String = existingPeerEndpointV6,
                         ExternalEndpointString = existingPeerExternal,
                         NATType = (NATType)existingPeerNatType,
                         PrivateAddressString = existingPeerMeshIP,
@@ -5923,12 +5979,14 @@ internal class MeshProtocolEngine
                             continue;
                         }
 
-                        if (!string.IsNullOrEmpty(endpointForA))
+                        if (!string.IsNullOrEmpty(endpointForA) || !string.IsNullOrEmpty(infoB.endpointV6))
                         {
                             var cbToA = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                             {
                                 PeerID = infoB.peerID ?? "",
                                 EndpointString = endpointForA,
+                                // Carry both families so peer A picks the one it can reach.
+                                EndpointV6String = infoB.endpointV6,
                                 NATType = infoB.natType,
                                 PrivateAddressString = ipB,
                                 PeerMinVersion = infoB.peerMinVersion,
@@ -5948,12 +6006,14 @@ internal class MeshProtocolEngine
                             }
                         }
 
-                        if (!string.IsNullOrEmpty(endpointForB))
+                        if (!string.IsNullOrEmpty(endpointForB) || !string.IsNullOrEmpty(infoA.endpointV6))
                         {
                             var cbToB = new MediationMessage(MediationMessageType.MeshConnectionBegin)
                             {
                                 PeerID = infoA.peerID ?? "",
                                 EndpointString = endpointForB,
+                                // Carry both families so peer B picks the one it can reach.
+                                EndpointV6String = infoA.endpointV6,
                                 NATType = infoA.natType,
                                 PrivateAddressString = ipA,
                                 PeerMinVersion = infoA.peerMinVersion,
