@@ -224,9 +224,22 @@ internal class Tunnel : IDisposable
                 connectionAttempt.Enabled = false;
                 initialConnectionTimer.Enabled = false;
 
-                // Start cooldown before retry
-                Program.Log(LogLevel.Warning, $"Connection attempt {retryAttempt + 1} failed. Waiting {retryCooldown}s before retry...");
+                // Diagnostic: how many hole-punch packets did we actually receive from the peer?
+                // ZERO after a full attempt = nothing is arriving inbound → almost certainly a local
+                // firewall or a restrictive NAT dropping inbound UDP from this peer (NOT a code bug;
+                // DirectMapping only measures port MAPPING, never inbound FILTERING). Non-zero but
+                // below threshold = packets arrive but the flow stalls (mapping/filter/timing).
+                if (holePunchReceivedCount == 0)
+                    Program.Log(LogLevel.Warning, $"Hole-punch to {targetPeerIp}:{targetPeerPort} received 0 packets from the peer — inbound UDP is likely being dropped by a local firewall or a restrictive NAT. Allow inbound UDP for NATTunnel peer traffic.");
+                else
+                    Program.Log(LogLevel.Debug, $"Hole-punch to {targetPeerIp}:{targetPeerPort} received {holePunchReceivedCount}/{HOLE_PUNCH_THRESHOLD} packets before timeout (flow stalled below threshold).");
+
                 retryAttempt++;
+                // Only advertise a retry if one will actually happen in-place; with maxRetryAttempts=1
+                // there's no in-place retry (the introducer re-sends MeshConnectionBegin to drive the
+                // next attempt), so don't log a "waiting to retry" that never fires.
+                if (retryAttempt < maxRetryAttempts)
+                    Program.Log(LogLevel.Warning, $"Connection attempt {retryAttempt} failed. Waiting {retryCooldown}s before retry...");
 
                 if (retryAttempt < maxRetryAttempts)
                 {
@@ -518,10 +531,20 @@ internal class Tunnel : IDisposable
             // otherwise whichever side receives the first punch flips to connected, stops
             // sending, and the other side never gets a packet through.
             connectionAttempt = new Timer(1000) { AutoReset = true, Enabled = true };
+            int postThresholdTicks = 0;
             connectionAttempt.Elapsed += (source, e) =>
             {
                 if (Volatile.Read(ref disposed) != 0) return;
-                bool keepPunching = holePunchReceivedCount < HOLE_PUNCH_THRESHOLD || wireguardTunnel == null;
+
+                // Keep punching while we haven't hit our own receive threshold. CRUCIAL: even AFTER
+                // reaching threshold, keep sending for a bounded window. A NAT can report
+                // "DirectMapping" (port mapping is consistent to the two mediation test servers) yet
+                // still be ADDRESS-RESTRICTED on inbound — it only accepts packets from an address it
+                // has itself SENT to. Keep firing until both sides are above the threshold
+                bool belowThreshold = holePunchReceivedCount < HOLE_PUNCH_THRESHOLD;
+                if (!belowThreshold) postThresholdTicks++;
+                const int PostThresholdPunchTicks = 8; // ~8s of extra punching to open a restricted peer's filter
+                bool keepPunching = belowThreshold || !connected || postThresholdTicks <= PostThresholdPunchTicks;
                 if (keepPunching)
                 {
                     MediationMessage message = new MediationMessage(MediationMessageType.HolePunchAttempt);

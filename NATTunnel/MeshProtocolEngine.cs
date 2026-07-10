@@ -643,6 +643,22 @@ internal class MeshProtocolEngine
     private Dictionary<int, string> peerMeshIPs = new Dictionary<int, string>();
     private int pendingTunnelCount = 0;
     private Dictionary<string, List<MediationMessage>> deferredIntroductions = new Dictionary<string, List<MediationMessage>>();
+
+    /// <summary>
+    /// Queue a MeshConnectionBegin to be sent when the introducer's tunnel to <paramref name="targetMeshIP"/>
+    /// establishes. Keyed by the target so the flush (on tunnel-complete for that mesh IP) delivers
+    /// it there — no IntroducerMeshIP override needed since key == destination.
+    /// </summary>
+    private void DeferIntroduction(string targetMeshIP, MediationMessage cb)
+    {
+        if (string.IsNullOrEmpty(targetMeshIP) || cb == null) return;
+        if (!deferredIntroductions.TryGetValue(targetMeshIP, out var list))
+        {
+            list = new List<MediationMessage>();
+            deferredIntroductions[targetMeshIP] = list;
+        }
+        list.Add(cb);
+    }
     private HashSet<string> completedTunnelMeshIPs = new HashSet<string>();
     private HashSet<string> relayedPairs = new HashSet<string>();
     private Dictionary<string, DateTime> lastRepairAttempt = new Dictionary<string, DateTime>();
@@ -4138,13 +4154,13 @@ internal class MeshProtocolEngine
                 if (!string.IsNullOrEmpty(existingPeerLocalIP))
                     peerLanByMeshIP[existingPeerMeshIP] = (existingPeerLocalIP, existingPeerLocalPort);
 
-                // OtherPeers includes all mesh members; we can only send MeshConnectionBegin
-                // over WireGuard to peers we already have tunnels with.
-                if (host.GetPeer(IPAddress.Parse(existingPeerMeshIP)) == null)
-                {
-                    context.Log(LogLevel.Debug, $"[Mesh] Skipping peer {existingPeerID} ({existingPeerMeshIP}) — no WireGuard tunnel to this peer");
-                    continue;
-                }
+                // OtherPeers includes all mesh members. A MeshConnectionBegin can only be delivered
+                // over an established tunnel to its target. We no longer early-skip when the tunnel
+                // to the EXISTING peer isn't up yet — instead each direction below is sent if its
+                // target's tunnel is ready, else DEFERRED keyed on that target so it flushes when
+                // the tunnel completes. (Previously this skipped the whole pair with no retry except
+                // the slow repair loop, which could leave a joining peer introduced to the
+                // introducer but never to peers the introducer was still establishing tunnels to.)
 
                 // Clean up stale relay state if the pair's NAT types changed.
                 if (!string.IsNullOrEmpty(msg.PrivateAddressString))
@@ -4405,11 +4421,17 @@ internal class MeshProtocolEngine
                     };
                 }
 
+                // Each direction is independently sent (if the tunnel to ITS target is up) or
+                // deferred keyed on that target (flushed when the target's tunnel completes). This
+                // covers BOTH gaps: tunnel-to-new-peer not ready (was already handled) AND
+                // tunnel-to-existing-peer not ready (previously an early skip with no retry).
                 bool tunnelToNewReady = completedTunnelMeshIPs.Contains(msg.PrivateAddressString);
+                bool tunnelToExistingReady = host.GetPeer(IPAddress.Parse(existingPeerMeshIP)) != null;
 
-                if (tunnelToNewReady)
+                // → existing peer (about the new peer)
+                if (connBeginToExisting != null)
                 {
-                    if (connBeginToExisting != null)
+                    if (tunnelToExistingReady)
                     {
                         try
                         {
@@ -4423,8 +4445,17 @@ internal class MeshProtocolEngine
                             context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
                         }
                     }
+                    else
+                    {
+                        DeferIntroduction(existingPeerMeshIP, connBeginToExisting);
+                        context.Log(LogLevel.Debug, $"[Mesh] Deferred MeshConnectionBegin to existing peer {existingPeerMeshIP} (about new peer {msg.PeerID}) — tunnel not yet established");
+                    }
+                }
 
-                    if (connBeginToNew != null)
+                // → new peer (about the existing peer)
+                if (connBeginToNew != null)
+                {
+                    if (tunnelToNewReady)
                     {
                         try
                         {
@@ -4438,25 +4469,11 @@ internal class MeshProtocolEngine
                             context.Log(LogLevel.Error, $"[Mesh] Failed to send MeshConnectionBegin to {msg.PrivateAddressString}: {ex.Message}");
                         }
                     }
-                }
-                else
-                {
-                    // Defer BOTH sides until the tunnel to the new peer completes — so hole-punching
-                    // starts simultaneously on both ends.
-                    if (!deferredIntroductions.ContainsKey(msg.PrivateAddressString))
-                        deferredIntroductions[msg.PrivateAddressString] = new List<MediationMessage>();
-
-                    // Reuse IntroducerMeshIP field to tag the routing target for the existing peer.
-                    if (connBeginToExisting != null)
+                    else
                     {
-                        connBeginToExisting.IntroducerMeshIP = existingPeerMeshIP;
-                        deferredIntroductions[msg.PrivateAddressString].Add(connBeginToExisting);
+                        DeferIntroduction(msg.PrivateAddressString, connBeginToNew);
+                        context.Log(LogLevel.Debug, $"[Mesh] Deferred MeshConnectionBegin to new peer {msg.PrivateAddressString} (about existing peer {existingPeerMeshIP}) — tunnel not yet established");
                     }
-
-                    if (connBeginToNew != null)
-                        deferredIntroductions[msg.PrivateAddressString].Add(connBeginToNew);
-
-                    context.Log(LogLevel.Debug, $"[Mesh] Deferred MeshConnectionBegin for both peers (tunnel to {msg.PrivateAddressString} not yet established)");
                 }
 
                 introduced++;

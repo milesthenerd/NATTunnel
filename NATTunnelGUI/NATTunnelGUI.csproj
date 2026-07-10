@@ -5,6 +5,7 @@
     <AssemblyName>nattunnel-gui</AssemblyName>
     <Nullable>enable</Nullable>
     <ApplicationManifest Condition="$([MSBuild]::IsOSPlatform('Windows'))">app.manifest</ApplicationManifest>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
   </PropertyGroup>
 
   <ItemGroup>
