@@ -280,6 +280,28 @@ internal class MeshProtocolEngine
         }
     }
 
+    /// <summary>
+    /// Second-IP MAPPING probe (RFC 5780): send a NAT-test packet to the mediation server's SECOND
+    /// public IPv4 on port 1. The server compares the external port it observes here against the one
+    /// from the primary IP; a difference means ADDRESS-dependent mapping (the endpoint the server
+    /// advertises won't work peer-to-peer → the pair must relay). Sent from the same shared udpClient
+    /// so it exercises the same NAT mapping the real peer traffic will. No-op when the server didn't
+    /// advertise a second IP (v1 server or single-IP host).
+    /// </summary>
+    private void SendSecondIpMappingProbe(byte[] natTestBuffer, int portOne, string[] serverPublicIPv4List)
+    {
+        try
+        {
+            if (serverPublicIPv4List == null || serverPublicIPv4List.Length < 2) return;
+            if (!IPAddress.TryParse(serverPublicIPv4List[1], out var secondIp)) return;
+            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(secondIp, portOne));
+        }
+        catch (Exception ex)
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] second-IP mapping probe skipped: {ex.Message}");
+        }
+    }
+
     /// <summary>Snapshot of currently-blocked fingerprints. Safe to iterate without external locking.</summary>
     internal IReadOnlyCollection<string> BlockedFingerprints
     {
@@ -523,11 +545,17 @@ internal class MeshProtocolEngine
     /// <summary>NAT type over IPv6, or null if the peer has no v6 / the server hasn't reported it.
     /// Detected independently of the v4 verdict (they can differ) and surfaced to the GUI.</summary>
     private NATType? detectedNatTypeV6;
+    /// <summary>RFC 5780 mapping/filtering behavior (v4), from a v2+ server's two-IP test. Null on a
+    /// v1 server. AddressDependent-or-worse mapping ⇒ this peer must relay (endpoint not P2P-usable).</summary>
+    private MappingBehavior? detectedMappingBehavior;
+    private FilteringBehavior? detectedFilteringBehavior;
 
     /// <summary>Applies a NATTypeResponse: stores the v4 verdict (if present) or the v6 verdict
-    /// (if present). The server sends one response per family as each settles. Idempotent — a
-    /// re-seen verdict is a no-op (doesn't re-log), so it's safe to call from the handshake drain
-    /// AND the main message loop for the same response.</summary>
+    /// (if present), plus the RFC 5780 mapping/filtering behavior when a v2 server includes it. The
+    /// server sends the v4 response TWICE — once when the IP_A ports settle (mapping still Unknown)
+    /// and again when the second-IP probe lands (mapping known) — so we must NOT early-return purely
+    /// on an unchanged NATType; a newly-arrived MappingBehavior still needs applying. Idempotent
+    /// otherwise (no re-log when nothing changed).</summary>
     private void ApplyNatTypeResponse(MediationMessage m)
     {
         if (m.NATTypeV6.HasValue)
@@ -538,9 +566,40 @@ internal class MeshProtocolEngine
         }
         else
         {
-            if (detectedNatType == m.NATType && detectedNatType != NATType.Unknown) return;
-            detectedNatType = m.NATType;
-            context.Log(LogLevel.Info, $"[Mesh] NAT type detected: {detectedNatType}");
+            bool natChanged = detectedNatType != m.NATType || detectedNatType == NATType.Unknown;
+            bool mappingChanged = m.MappingBehavior.HasValue && detectedMappingBehavior != m.MappingBehavior;
+            bool filteringChanged = m.FilteringBehavior.HasValue && detectedFilteringBehavior != m.FilteringBehavior;
+            if (!natChanged && !mappingChanged && !filteringChanged) return;
+
+            if (natChanged)
+            {
+                detectedNatType = m.NATType;
+                context.Log(LogLevel.Info, $"[Mesh] NAT type detected: {detectedNatType}");
+            }
+            if (mappingChanged)
+            {
+                detectedMappingBehavior = m.MappingBehavior;
+                context.Log(LogLevel.Info, $"[Mesh] NAT mapping behavior: {detectedMappingBehavior}");
+
+                // Address-dependent (or worse) MAPPING means the server-observed endpoint won't work
+                // peer-to-peer — a direct punch to it fails deterministically (this was the
+                // misclassified-as-DirectMapping bug). Such a peer must RELAY, exactly like a
+                // symmetric NAT. Fold it into the reported NAT type so ALL the outbound
+                // "NATType = detectedNatType" sites drive the existing symmetric-relay path with no
+                // per-site changes. (Only UPGRADE toward Symmetric; never downgrade a real verdict.)
+                if ((detectedMappingBehavior == MappingBehavior.AddressDependent ||
+                     detectedMappingBehavior == MappingBehavior.AddressPortDependent) &&
+                    detectedNatType != NATType.Symmetric)
+                {
+                    context.Log(LogLevel.Info, $"[Mesh] Mapping is {detectedMappingBehavior} — treating NAT as Symmetric (relay required; advertised endpoint isn't reachable peer-to-peer).");
+                    detectedNatType = NATType.Symmetric;
+                }
+            }
+            if (filteringChanged)
+            {
+                detectedFilteringBehavior = m.FilteringBehavior;
+                context.Log(LogLevel.Info, $"[Mesh] NAT filtering behavior: {detectedFilteringBehavior}");
+            }
         }
     }
 
@@ -2200,6 +2259,7 @@ internal class MeshProtocolEngine
                                             udpClient.Send(natTestBuf, natTestBuf.Length, new IPEndPoint(mediationEP.Address, natTestBeginR.NATTestPortTwo));
                                             SendNatTestV6(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo, natTestBeginR.ServerPublicIPv6);
                                             SendNatTestV4(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.NATTestPortTwo, natTestBeginR.ServerPublicIPv4);
+                                            SendSecondIpMappingProbe(natTestBuf, natTestBeginR.NATTestPortOne, natTestBeginR.ServerPublicIPv4List);
                                         }
 
                                         // Read NATTypeResponse (v6 counterpart, if any, arrives in
@@ -2429,6 +2489,7 @@ internal class MeshProtocolEngine
             udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(endpoint.Address, natTestBegin.NATTestPortTwo));
             SendNatTestV6(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo, natTestBegin.ServerPublicIPv6);
             SendNatTestV4(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.NATTestPortTwo, natTestBegin.ServerPublicIPv4);
+            SendSecondIpMappingProbe(natTestBuffer, natTestBegin.NATTestPortOne, natTestBegin.ServerPublicIPv4List);
         }
 
         // The server sends ONE NATTypeResponse PER FAMILY we probed (v4 and/or v6), in either
@@ -4770,6 +4831,7 @@ internal class MeshProtocolEngine
                     udpClient.Send(natTestBuf2, natTestBuf2.Length, new IPEndPoint(mediationEP.Address, natTestBeginR2.NATTestPortTwo));
                     SendNatTestV6(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.NATTestPortTwo, natTestBeginR2.ServerPublicIPv6);
                     SendNatTestV4(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.NATTestPortTwo, natTestBeginR2.ServerPublicIPv4);
+                    SendSecondIpMappingProbe(natTestBuf2, natTestBeginR2.NATTestPortOne, natTestBeginR2.ServerPublicIPv4List);
                 }
 
                 var natTypeRespR2 = ReadReconMessage2();

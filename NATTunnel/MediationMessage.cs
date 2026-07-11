@@ -36,6 +36,20 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public NATType? NATTypeV6 { get; set; }
     /// <summary>
+    /// RFC 5780 MAPPING behavior (IPv4), delivered on NATTypeResponse by a v2+ mediation server that
+    /// ran the two-IP test. Nullable/additive — absent from a v1 server or before the second-IP probe
+    /// settles. AddressDependent-or-worse ⇒ the server-observed endpoint won't work peer-to-peer ⇒
+    /// the pair must relay (same handling as Symmetric). See <see cref="MappingBehavior"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public MappingBehavior? MappingBehavior { get; set; }
+    /// <summary>
+    /// RFC 5780 FILTERING behavior (IPv4), delivered on NATTypeResponse by a v2+ server. Additive.
+    /// Informs whether simultaneous hole-punching is required. See <see cref="FilteringBehavior"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public FilteringBehavior? FilteringBehavior { get; set; }
+    /// <summary>
     ///Server's IP address and port as a string because IPEndpoint is not deserializable
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -72,6 +86,14 @@ internal class MediationMessage
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string ServerPublicIPv4 { get; set; }
+    /// <summary>
+    /// All public IPv4 addresses the mediation server has, advertised in NATTestBegin by a v2+ server.
+    /// [0] is the primary (== ServerPublicIPv4); [1], when present, is the SECOND IP the client also
+    /// probes so the server can detect ADDRESS-dependent NAT mapping. Additive — null on a v1 server
+    /// or a single-IP host; the client simply skips the second-IP probe then.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public string[] ServerPublicIPv4List { get; set; }
     /// <summary>The mediation server's own public IPv6 address, advertised in NATTestBegin. Mirror of
     /// <see cref="ServerPublicIPv4"/> for a v4-primary peer that wants to observe its v6 endpoint.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -502,5 +524,30 @@ public enum NATType
     /// <summary>
     ///Before the type is defined
     /// </summary>
+    Unknown = -1
+}
+
+/// <summary>
+/// RFC 5780 MAPPING behavior — does the NAT's external (ip:port) allocation change per destination?
+/// Detected via the two-IP NAT test. Values mirror the mediation server's MappingBehaviors enum.
+/// AddressDependent-or-worse means the server-observed endpoint is wrong for other peers → relay.
+/// </summary>
+public enum MappingBehavior
+{
+    EndpointIndependent = 0,  // same external port to any destination — advertised endpoint works P2P
+    AddressDependent = 1,     // consistent across ports of an IP but differs across IPs — needs relay
+    AddressPortDependent = 2, // differs per (ip,port) = classic symmetric — needs relay
+    Unknown = -1
+}
+
+/// <summary>
+/// RFC 5780 FILTERING behavior — does the NAT accept inbound from an address/port it hasn't sent to?
+/// Values mirror the mediation server's FilteringBehaviors enum.
+/// </summary>
+public enum FilteringBehavior
+{
+    EndpointIndependent = 0,  // full cone
+    AddressDependent = 1,     // accepts from an IP it has sent to (any port)
+    AddressPortDependent = 2, // port-restricted — only the exact ip:port contacted
     Unknown = -1
 }

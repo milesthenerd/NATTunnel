@@ -39,8 +39,15 @@ class SelfAddress {
     constructor() {
         this.publicIPv4 = process.env.PUBLIC_IPV4 || null;
         this.publicIPv6 = process.env.PUBLIC_IPV6 || null;
+        // All distinct public IPv4 addresses this host has (for the two-IP RFC 5780 NAT test).
+        // publicIPv4 stays the PRIMARY (first/default); publicIPv4List carries every one found.
+        // NAT_TEST_IPV4_LIST env (comma-separated) overrides discovery for pinned deployments.
+        this.publicIPv4List = process.env.NAT_TEST_IPV4_LIST
+            ? process.env.NAT_TEST_IPV4_LIST.split(',').map(s => s.trim()).filter(Boolean)
+            : (process.env.PUBLIC_IPV4 ? [process.env.PUBLIC_IPV4] : []);
         this._v4Overridden = !!process.env.PUBLIC_IPV4;
         this._v6Overridden = !!process.env.PUBLIC_IPV6;
+        this._v4ListOverridden = !!process.env.NAT_TEST_IPV4_LIST;
         this._timer = null;
     }
 
@@ -74,7 +81,53 @@ class SelfAddress {
         await Promise.all([
             this._v4Overridden ? Promise.resolve() : this._discoverFamily('udp4'),
             this._v6Overridden ? Promise.resolve() : this._discoverFamily('udp6'),
+            this._v4ListOverridden ? Promise.resolve() : this._discoverAllV4IPs(),
         ]);
+    }
+
+    /**
+     * Discover EVERY distinct public IPv4 this host has, for the two-IP RFC 5780 NAT test.
+     * Plain STUN (unbound socket) only reveals the OS's default-source public IP. To find the
+     * others, we enumerate the host's global-scope local IPv4s and run a STUN query bound to each
+     * — the reflector then reports that specific local IP's public mapping. This works behind 1:1
+     * NAT / elastic IPs (each local IP maps to its own public IP) the same way the primary STUN
+     * discovery does. Populates publicIPv4List (distinct, order-stable) and keeps publicIPv4 as the
+     * primary (first entry).
+     */
+    async _discoverAllV4IPs() {
+        // Global-scope local IPv4s only — skip loopback, link-local (169.254), and (optionally)
+        // RFC1918 private ranges are KEPT because behind 1:1 NAT the local IP is private but still
+        // maps to a distinct public IP via STUN; we dedupe by the discovered PUBLIC IP anyway.
+        const os = require('os');
+        const locals = [];
+        for (const addrs of Object.values(os.networkInterfaces())) {
+            for (const a of addrs || []) {
+                if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.')) {
+                    locals.push(a.address);
+                }
+            }
+        }
+
+        const found = [];
+        // Query each local IP against the STUN servers, bound to that local address.
+        await Promise.all(locals.map(async (localIP) => {
+            for (const server of STUN_SERVERS) {
+                try {
+                    const addr = await this._stunQuery('udp4', server.host, server.port, localIP);
+                    if (addr && !found.includes(addr)) found.push(addr);
+                    if (addr) return; // one answer per local IP is enough
+                } catch (e) { /* try next STUN server */ }
+            }
+        }));
+
+        if (found.length > 0) {
+            // Keep order stable; primary = first. Log only on change.
+            const changed = found.length !== this.publicIPv4List.length ||
+                            found.some((ip, i) => this.publicIPv4List[i] !== ip);
+            this.publicIPv4List = found;
+            if (!this._v4Overridden && !this.publicIPv4) this.publicIPv4 = found[0];
+            if (changed) console.log(`[SelfAddress] Discovered ${found.length} public IPv4(s): ${found.join(', ')}`);
+        }
     }
 
     async _discoverFamily(socketType) {
@@ -98,8 +151,14 @@ class SelfAddress {
         // No STUN server answered for this family — likely no route for it. Leave as-is.
     }
 
-    /** Sends a STUN Binding request and resolves the reflected public IP (address only, no port). */
-    _stunQuery(socketType, host, port) {
+    /**
+     * Sends a STUN Binding request and resolves the reflected public IP (address only, no port).
+     * When <paramref localAddress> is set, the query socket is bound to that specific local IP so
+     * the reflector reports the public IP that local address maps to — this is how we discover BOTH
+     * public IPv4s on a multi-IP host (bind each local IP in turn), which plain unbound STUN can't
+     * do because the OS would pick one default source for every query.
+     */
+    _stunQuery(socketType, host, port, localAddress = null) {
         return new Promise(async (resolve, reject) => {
             let resolved = false;
             const done = (val, err) => {
@@ -146,7 +205,13 @@ class SelfAddress {
 
             const timeout = setTimeout(() => done(null, new Error('STUN timeout')), 3000);
 
-            socket.send(req, port, dest, (err) => { if (err) done(null, err); });
+            const fire = () => socket.send(req, port, dest, (err) => { if (err) done(null, err); });
+            if (localAddress) {
+                // Bind to the specific local IP so the reflected address is THAT IP's public mapping.
+                socket.bind(0, localAddress, fire);
+            } else {
+                fire();
+            }
         });
     }
 

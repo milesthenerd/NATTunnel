@@ -226,7 +226,12 @@ class MessageHandler {
             NATTestPortOne: Config.NAT_TEST_PORT_ONE,
             NATTestPortTwo: Config.NAT_TEST_PORT_TWO,
             ServerPublicIPv4: selfAddress.publicIPv4 || undefined,
-            ServerPublicIPv6: selfAddress.publicIPv6 || undefined
+            ServerPublicIPv6: selfAddress.publicIPv6 || undefined,
+            // All public IPv4s this server has, for the two-IP RFC 5780 mapping test. [0] is the
+            // primary (== ServerPublicIPv4); [1], if present, is the SECOND IP a v2 client probes to
+            // detect address-dependent NAT mapping. Additive — v1 clients ignore it.
+            ServerPublicIPv4List: (selfAddress.publicIPv4List && selfAddress.publicIPv4List.length > 1)
+                ? selfAddress.publicIPv4List : undefined
         })));
 
         // Timeout: if NAT test UDP packets don't arrive within 10s, respond with Unknown

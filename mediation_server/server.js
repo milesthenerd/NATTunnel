@@ -141,16 +141,69 @@ class NATServer {
     }
 
     initializeNATTestServers() {
+        // Primary (IP_A / default) receivers: dual-stack wildcard, handling v4 primary + all v6.
+        // A probe to the SECOND IPv4 lands on the IP_B-bound sockets below instead, so the bind
+        // itself discriminates which server IP a client targeted (Node UDP recv gives source only,
+        // never destination). natTestServer1/2 stay the primary p1/p2 receivers.
         this.bindDualStackSocket('NAT Test 1', Config.NAT_TEST_PORT_ONE, (socket) => {
             this.natTestServer1 = socket;
-            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, true));
+            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, true, 'A'));
             socket.on('listening', () => console.log(`NAT Test 1 listening on port ${Config.NAT_TEST_PORT_ONE}`));
         });
         this.bindDualStackSocket('NAT Test 2', Config.NAT_TEST_PORT_TWO, (socket) => {
             this.natTestServer2 = socket;
-            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, false));
+            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, false, 'A'));
             socket.on('listening', () => console.log(`NAT Test 2 listening on port ${Config.NAT_TEST_PORT_TWO}`));
         });
+
+        // The SECOND-IP (IP_B) sockets need the discovered public IPv4 list, which STUN populates
+        // asynchronously after start(). Poll until a second IP appears, then bind IP_B:p1 / IP_B:p2
+        // (IPv4-only, bound to the specific local IP). If the host only has one public IPv4, these
+        // never bind and the server gracefully runs the legacy single-IP test.
+        this._bindSecondIpWhenReady();
+    }
+
+    /**
+     * Bind the IP_B NAT-test sockets once STUN has discovered a second public IPv4. The bind target
+     * is the LOCAL IPv4 that maps to the second public IP (we discovered public IPs by binding each
+     * local IPv4 in self-address; here we bind the same local IPs so the OS routes correctly). Since
+     * we only stored the public list, bind to the local IP whose STUN result is the 2nd public IP —
+     * for the common cloud case (public==local, no NAT) that's the public IP itself; behind 1:1 NAT
+     * the operator can pin locals via env. We attempt to bind directly to publicIPv4List[1]; if that
+     * fails (EADDRNOTAVAIL because the local IP differs), log and skip (legacy single-IP mode).
+     */
+    _bindSecondIpWhenReady(attempts = 0) {
+        const list = selfAddress.publicIPv4List;
+        if (!list || list.length < 2) {
+            // Not yet / never. Retry a bounded number of times during startup, then give up quietly.
+            if (attempts < 30) setTimeout(() => this._bindSecondIpWhenReady(attempts + 1), 2000);
+            else console.log('[NAT Test] No second public IPv4 discovered — running legacy single-IP NAT test.');
+            return;
+        }
+
+        const ipB = list[1];
+        this._bindIpBoundNatSocket('NAT Test 1 (IP_B)', ipB, Config.NAT_TEST_PORT_ONE, (socket) => {
+            this.natTestServer1B = socket;
+            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, true, 'B'));
+        });
+        this._bindIpBoundNatSocket('NAT Test 2 (IP_B)', ipB, Config.NAT_TEST_PORT_TWO, (socket) => {
+            this.natTestServer2B = socket;
+            socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, false, 'B'));
+        });
+        this.natTestIpB = ipB;
+        console.log(`[NAT Test] Second IPv4 ${ipB} — bound IP_B sockets for address-dependent NAT detection.`);
+    }
+
+    /** Bind an IPv4-only UDP socket to a specific local IP:port for the second-IP NAT test. */
+    _bindIpBoundNatSocket(name, ip, port, setup) {
+        const socket = udp.createSocket({ type: 'udp4', reuseAddr: true });
+        socket.on('error', (err) => {
+            console.warn(`${name}: bind to ${ip}:${port} failed (${err.code}) — this IP won't be used for the 2nd-IP test.`);
+            try { socket.close(); } catch (e) {}
+        });
+        socket.on('listening', () => console.log(`${name} listening on ${ip}:${port}`));
+        setup(socket);
+        socket.bind(port, ip);
     }
 
     /**
@@ -307,7 +360,7 @@ class NATServer {
         this.connectionManager.addUDPInfo(address, info.port, localPort);
     }
 
-    handleNATTestMessage(msg, info, isFirstPort) {
+    handleNATTestMessage(msg, info, isFirstPort, serverIp = 'A') {
         try {
             const message = JSON.parse(msg);
             if (message.ID === MessageTypes.NATTest) {
@@ -316,6 +369,18 @@ class NATServer {
 
                 const socket = this.connectionManager.sockets.find(s => s.clientID === message.ClientID);
                 if (!socket) return;
+
+                // Second-IP (IP_B) probe: the client's external port here vs the IP_A observation
+                // reveals ADDRESS-dependent mapping (same port to IP_A but different to IP_B → the
+                // advertised endpoint is wrong for other peers → must relay). Only p1 is used for the
+                // mapping compare; record it and classify, then we're done with this packet.
+                // (IP_B is IPv4-only by design — both server IPs are v4; v6 has no NAT to map.)
+                if (serverIp === 'B') {
+                    if (isFirstPort && !packetIsV6) {
+                        this.connectionManager.recordSecondIpMappingPort(message.ClientID, info.port);
+                    }
+                    return;
+                }
 
                 // Endpoint model: the peer's v6 endpoint always lives in socket.endpointV6, and its
                 // v4 endpoint always lives in udpConnectionInfo (which handleMeshJoinRequest reads to

@@ -8,6 +8,22 @@ const NATTypes = {
     Unknown: -1
 };
 
+// RFC 5780 NAT-behavior axes (v2 NAT test). Integers to mirror the C# enums cleanly on the wire.
+// MAPPING: does the external (ip:port) allocation change per destination?
+const MappingBehaviors = {
+    EndpointIndependent: 0,   // same external port to any destination — advertised endpoint works P2P
+    AddressDependent: 1,      // consistent across PORTS of an IP but differs across IPs — needs relay
+    AddressPortDependent: 2,  // differs per (ip,port) = classic symmetric — needs relay
+    Unknown: -1
+};
+// FILTERING: does the NAT accept inbound from an address/port it hasn't itself sent to?
+const FilteringBehaviors = {
+    EndpointIndependent: 0,   // full cone — accepts from anywhere once mapped
+    AddressDependent: 1,      // accepts from an IP it has sent to (any port)
+    AddressPortDependent: 2,  // port-restricted — only the exact ip:port contacted
+    Unknown: -1
+};
+
 // Message type enumeration
 const MessageTypes = {
     Connected: 0,
@@ -61,9 +77,11 @@ const StatusTypes = {
 // Client<->mediation-server wire-format compatibility window.
 // A client's `ProtocolVersion` field must be within [MIN, MAX] on MeshJoinRequest;
 // otherwise the server rejects the join with `VersionError` set on the response.
+// MAX=2 (2026-07-11): the two-IP RFC 5780 NAT test. MIN stays 1 so v1 clients are STILL ACCEPTED
+// (the new test is additive/self-gated — a v1 client just runs the legacy single-IP path).
 const MediationProtocol = {
     MinSupportedClientVersion: 1,
-    MaxSupportedClientVersion: 1
+    MaxSupportedClientVersion: 2
 };
 
 // Server configuration
@@ -107,6 +125,8 @@ const Config = {
 
 module.exports = {
     NATTypes,
+    MappingBehaviors,
+    FilteringBehaviors,
     MessageTypes,
     StatusTypes,
     Config,

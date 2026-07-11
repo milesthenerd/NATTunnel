@@ -1,5 +1,5 @@
 const { Buffer } = require('buffer');
-const { NATTypes, MessageTypes, StatusTypes, Config } = require('./constants');
+const { NATTypes, MappingBehaviors, MessageTypes, StatusTypes, Config } = require('./constants');
 
 class ConnectionManager {
     constructor() {
@@ -22,6 +22,10 @@ class ConnectionManager {
             localPort: 0,
             externalPortOne: 0,
             externalPortTwo: 0,
+            // External port observed when the client probes the SECOND server IPv4 (IP_B) port 1.
+            // Compared against externalPortOne (IP_A:p1) to detect ADDRESS-dependent mapping. v4-only.
+            externalPortOneB: 0,
+            mappingBehavior: null,   // 'EndpointIndependent' | 'AddressDependent' | 'AddressPortDependent'
             // Separate NAT-test port pair + verdict for IPv6, so a dual-stack peer is classified
             // independently per family (v4 and v6 NAT behavior can differ).
             natTypeV6: NATTypes.Unknown,
@@ -195,14 +199,25 @@ class ConnectionManager {
                 natType = NATTypes.Symmetric;
             }
 
+            const socketInfo = this.sockets.find(s => s.socket === socket);
+
+            // v4 only: fold in the second-IP MAPPING verdict if the IP_B probe already landed.
+            // (v6 has no address translation, so mapping behavior is meaningful for v4 only.)
+            let mappingBehavior;
+            if (!isV6 && socketInfo) {
+                mappingBehavior = this._classifyMapping(externalPortOne, externalPortTwo, socketInfo.externalPortOneB);
+                socketInfo.mappingBehavior = mappingBehavior;
+            }
+
             socket.write(Buffer.from(JSON.stringify({
                 ID: MessageTypes.NATTypeResponse,
                 // v4 keeps the original NATType field (unchanged wire format); v6 uses NATTypeV6.
                 ...(isV6 ? { NATTypeV6: natType } : { NATType: natType }),
+                // v2 clients read MappingBehavior; v1 ignores it (additive, v4-only).
+                ...(mappingBehavior !== undefined ? { MappingBehavior: mappingBehavior } : {}),
             })));
 
             // Store NAT type on socket info (per family).
-            const socketInfo = this.sockets.find(s => s.socket === socket);
             if (socketInfo) {
                 if (isV6) socketInfo.natTypeV6 = natType;
                 else socketInfo.natType = natType;
@@ -211,6 +226,39 @@ class ConnectionManager {
         }
 
         return natType;
+    }
+
+    /**
+     * Classify MAPPING behavior (RFC 5780) from the three v4 observations:
+     *   extA1 = external port at IP_A:p1, extA2 = at IP_A:p2, extB1 = at IP_B:p1.
+     * - extA1 != extA2                  → AddressPortDependent (classic symmetric).
+     * - extA1 == extA2, extB1 differs   → AddressDependent (the misclassified-as-DirectMapping case).
+     * - extA1 == extA2 == extB1         → EndpointIndependent.
+     * Returns Unknown until the IP_B probe (extB1) has arrived (0 = not yet), so the client's
+     * later re-send with the IP_B result upgrades the verdict.
+     */
+    _classifyMapping(extA1, extA2, extB1) {
+        if (!extA1 || !extA2) return MappingBehaviors.Unknown;
+        if (extA1 !== extA2) return MappingBehaviors.AddressPortDependent;
+        if (!extB1) return MappingBehaviors.Unknown; // IP_B probe not yet observed
+        return extA1 === extB1 ? MappingBehaviors.EndpointIndependent : MappingBehaviors.AddressDependent;
+    }
+
+    /**
+     * Record the external port observed when the client probed the SECOND server IPv4 (IP_B:p1),
+     * then re-run the v4 NAT classification so the MappingBehavior verdict (which needs this value)
+     * gets delivered — the IP_B probe often lands after the IP_A ports, so this is what upgrades a
+     * provisional "Unknown mapping" into EndpointIndependent vs AddressDependent.
+     */
+    recordSecondIpMappingPort(clientID, extPort) {
+        const socketInfo = this.sockets.find(s => s.clientID === clientID);
+        if (!socketInfo) return;
+        socketInfo.externalPortOneB = extPort;
+        // Re-classify + re-send the v4 verdict now that we have the address-dependence observation.
+        if (socketInfo.externalPortOne && socketInfo.externalPortTwo && socketInfo.socket) {
+            this.checkNATType(socketInfo.socket, socketInfo.localPort,
+                socketInfo.externalPortOne, socketInfo.externalPortTwo, false);
+        }
     }
 
     findSocketByAddress(address) {
