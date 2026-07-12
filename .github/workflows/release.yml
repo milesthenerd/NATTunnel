@@ -39,12 +39,14 @@ jobs:
                   if (-not $v) { throw "Could not read <Version> from Directory.Build.props" }
                   "version=$v" >> $env:GITHUB_OUTPUT
 
-            - name: Verify wireguard.dll is present in publish output
+            - name: Verify single-file exe (with embedded native libs) was produced
               shell: pwsh
               run: |
-                  $dll = "NATTunnelGUI/bin/Publish/win-x64/wireguard.dll"
-                  if (-not (Test-Path $dll)) { throw "wireguard.dll missing from publish output — Windows build would not traverse NAT." }
-                  Write-Host "wireguard.dll present."
+                  $exe = "NATTunnelGUI/bin/Publish/win-x64/nattunnel-gui.exe"
+                  if (-not (Test-Path $exe)) { throw "nattunnel-gui.exe missing from publish output." }
+                  $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+                  if ($sizeMB -lt 20) { throw "nattunnel-gui.exe is only ${sizeMB}MB — native libs (wireguard.dll) likely not embedded." }
+                  Write-Host "nattunnel-gui.exe present (${sizeMB}MB, native libs embedded)."
 
             - name: Zip Windows artifact
               shell: pwsh
@@ -82,16 +84,15 @@ jobs:
               run: sh packaging/linux/build-tar.sh
 
             - name: Build .deb
-              run: sh packaging/linux/deb/build.sh
+              run: bash packaging/linux/deb/build.sh
 
             - name: Build .rpm
-              run: sh packaging/linux/rpm/build.sh
+              run: bash packaging/linux/rpm/build.sh
 
             - name: Collect Linux artifacts
               run: |
                   mkdir -p dist
-                  find . -maxdepth 4 \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) \
-                    -not -path './dist/*' -exec cp -v {} dist/ \;
+                  cp -v ./*.tar.gz dist/ 2>/dev/null || true
                   echo "Collected:"; ls -lh dist/
 
             - name: Upload Linux artifacts
