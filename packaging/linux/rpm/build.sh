@@ -33,30 +33,30 @@ RPM_TOP="$(mktemp -d)"
 trap 'rm -rf "$RPM_TOP"' EXIT
 mkdir -p "$RPM_TOP"/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
 
-BUILDROOT="$RPM_TOP/BUILDROOT/nattunnel-$VERSION-1.x86_64"
+STAGE="$RPM_TOP/stage"
 
-echo "Staging files in $BUILDROOT..."
-install -m 0755 -d "$BUILDROOT/usr/bin"
-install -m 0755 -d "$BUILDROOT/usr/lib/nattunnel"
-install -m 0755 -d "$BUILDROOT/usr/lib/nattunnel-gui"
-install -m 0755 -d "$BUILDROOT/usr/share/applications"
-install -m 0755 -d "$BUILDROOT/lib/systemd/system"
+echo "Staging files in $STAGE..."
+install -m 0755 -d "$STAGE/usr/bin"
+install -m 0755 -d "$STAGE/usr/lib/nattunnel"
+install -m 0755 -d "$STAGE/usr/lib/nattunnel-gui"
+install -m 0755 -d "$STAGE/usr/share/applications"
+install -m 0755 -d "$STAGE/lib/systemd/system"
 
 # Daemon
-cp -r "$CLI_PUBLISH"/. "$BUILDROOT/usr/lib/nattunnel/"
-chmod 0755 "$BUILDROOT/usr/lib/nattunnel/nattunneld"
-ln -sf /usr/lib/nattunnel/nattunneld "$BUILDROOT/usr/bin/nattunneld"
+cp -r "$CLI_PUBLISH"/. "$STAGE/usr/lib/nattunnel/"
+chmod 0755 "$STAGE/usr/lib/nattunnel/nattunneld"
+ln -sf /usr/lib/nattunnel/nattunneld "$STAGE/usr/bin/nattunneld"
 
 # GUI
-cp -r "$GUI_PUBLISH"/. "$BUILDROOT/usr/lib/nattunnel-gui/"
-chmod 0755 "$BUILDROOT/usr/lib/nattunnel-gui/nattunnel-gui"
-ln -sf /usr/lib/nattunnel-gui/nattunnel-gui "$BUILDROOT/usr/bin/nattunnel-gui"
+cp -r "$GUI_PUBLISH"/. "$STAGE/usr/lib/nattunnel-gui/"
+chmod 0755 "$STAGE/usr/lib/nattunnel-gui/nattunnel-gui"
+ln -sf /usr/lib/nattunnel-gui/nattunnel-gui "$STAGE/usr/bin/nattunnel-gui"
 
 # Desktop entry
-install -m 0644 "$SCRIPT_DIR/../deb/nattunnel.desktop" "$BUILDROOT/usr/share/applications/nattunnel.desktop"
+install -m 0644 "$SCRIPT_DIR/../deb/nattunnel.desktop" "$STAGE/usr/share/applications/nattunnel.desktop"
 
 # systemd unit
-install -m 0644 "$PACKAGING_DIR/nattunnel.service" "$BUILDROOT/lib/systemd/system/nattunnel.service"
+install -m 0644 "$PACKAGING_DIR/nattunnel.service" "$STAGE/lib/systemd/system/nattunnel.service"
 
 # Generate the spec with version substituted
 SPEC_FILE="$RPM_TOP/SPECS/nattunnel.spec"
@@ -65,8 +65,7 @@ sed "s/@VERSION@/$VERSION/g" "$SCRIPT_DIR/nattunnel.spec.in" > "$SPEC_FILE"
 echo "Running rpmbuild..."
 rpmbuild \
     --define "_topdir $RPM_TOP" \
-    --define "_buildrootdir $RPM_TOP/BUILDROOT" \
-    --buildroot "$BUILDROOT" \
+    --define "stagedir $STAGE" \
     -bb "$SPEC_FILE"
 
 OUTPUT_DIR="$REPO_DIR/dist"
