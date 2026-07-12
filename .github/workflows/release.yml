@@ -1,0 +1,126 @@
+name: Release
+
+on:
+    push:
+        tags:
+            - 'v*'
+
+# Least-privilege by default; the release job needs write to publish the Release.
+permissions:
+    contents: read
+
+env:
+    DOTNET_VERSION: '9.0.x'
+    DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+    DOTNET_NOLOGO: '1'
+
+jobs:
+    windows:
+        runs-on: windows-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: ${{ env.DOTNET_VERSION }}
+
+            - name: Restore
+              run: dotnet restore NATTunnelGUI/NATTunnelGUI.csproj
+
+            - name: Publish GUI (win-x64, single-file, no PDBs)
+              run: dotnet publish NATTunnelGUI/NATTunnelGUI.csproj -p:PublishProfile=win-x64 -p:DebugType=None -p:DebugSymbols=false
+
+            - name: Read version
+              id: ver
+              shell: pwsh
+              run: |
+                  $v = ([xml](Get-Content Directory.Build.props)).Project.PropertyGroup.Version
+                  if (-not $v) { throw "Could not read <Version> from Directory.Build.props" }
+                  "version=$v" >> $env:GITHUB_OUTPUT
+
+            - name: Verify wireguard.dll is present in publish output
+              shell: pwsh
+              run: |
+                  $dll = "NATTunnelGUI/bin/Publish/win-x64/wireguard.dll"
+                  if (-not (Test-Path $dll)) { throw "wireguard.dll missing from publish output — Windows build would not traverse NAT." }
+                  Write-Host "wireguard.dll present."
+
+            - name: Zip Windows artifact
+              shell: pwsh
+              run: |
+                  $out = "nattunnel-gui-${{ steps.ver.outputs.version }}-win-x64.zip"
+                  Compress-Archive -Path "NATTunnelGUI/bin/Publish/win-x64/*" -DestinationPath $out -Force
+                  Write-Host "Wrote $out"
+
+            - name: Upload Windows artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: windows
+                  path: nattunnel-gui-*-win-x64.zip
+                  if-no-files-found: error
+
+    linux:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: ${{ env.DOTNET_VERSION }}
+
+            - name: Install packaging tools (dpkg-deb, rpmbuild)
+              run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
+
+            - name: Publish Linux binaries (default path, for deb/rpm)
+              run: |
+                  dotnet publish NATTunnelCLI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
+                  dotnet publish NATTunnelGUI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
+
+            - name: Build tarball
+              run: sh packaging/linux/build-tar.sh
+
+            - name: Build .deb
+              run: sh packaging/linux/deb/build.sh
+
+            - name: Build .rpm
+              run: sh packaging/linux/rpm/build.sh
+
+            - name: Collect Linux artifacts
+              run: |
+                  mkdir -p dist
+                  find . -maxdepth 4 \( -name '*.tar.gz' -o -name '*.deb' -o -name '*.rpm' \) \
+                    -not -path './dist/*' -exec cp -v {} dist/ \;
+                  echo "Collected:"; ls -lh dist/
+
+            - name: Upload Linux artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: linux
+                  path: dist/*
+                  if-no-files-found: error
+
+    release:
+        needs: [windows, linux]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write # create the Release + upload assets
+        steps:
+            - name: Download all artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  path: artifacts
+
+            - name: Flatten artifacts
+              run: |
+                  mkdir -p release
+                  find artifacts -type f -exec cp -v {} release/ \;
+                  echo "Release assets:"; ls -lh release/
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  files: release/*
+                  draft: true
+                  generate_release_notes: true
