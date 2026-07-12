@@ -224,6 +224,22 @@ internal class MeshProtocolEngine
         }
     }
 
+    /// <summary>
+    /// True when a v6 NAT-type verdict is genuinely expected from the server, so the join sequence
+    /// should wait for it before advertising NATTypeV6. Two cases produce a v6 verdict:
+    ///   (a) v6-PRIMARY peer — the primary mediation connection is v6, so the normal NAT test already
+    ///       ran over v6 and the server will return a NATTypeV6.
+    ///   (b) v4-primary peer that ran a SEPARATE v6 probe (SendNatTestV6 found a global v6 route and
+    ///       resolved mediationV6Address).
+    /// A peer with no v6 route at all expects no v6 verdict and must NOT wait (would hang).
+    /// </summary>
+    private bool ExpectV6NatVerdict()
+    {
+        bool v6Primary = endpoint != null && endpoint.Address.AddressFamily == AddressFamily.InterNetworkV6;
+        return v6Primary || mediationV6Address != null;
+    }
+
+
     /// <summary>Mediation server's IPv4 address (A record), resolved once per process.
     /// Null when the primary mediation endpoint is already v4 (the normal NAT test covers it)
     /// or when no A record / hostname is available.</summary>
@@ -294,7 +310,13 @@ internal class MeshProtocolEngine
         {
             if (serverPublicIPv4List == null || serverPublicIPv4List.Length < 2) return;
             if (!IPAddress.TryParse(serverPublicIPv4List[1], out var secondIp)) return;
-            udpClient.Send(natTestBuffer, natTestBuffer.Length, new IPEndPoint(secondIp, portOne));
+            // Send a DISTINCT packet flagged MappingProbe=true (not the shared primary-test buffer), so
+            // the server can tell this apart from a primary NAT test even when a peer's own primary
+            // mediation IP equals this second IP — otherwise the server can't disambiguate and the
+            // peer's primary v4 test gets mis-handled here, leaving its v4 NAT type Unknown.
+            var probeMsg = new MediationMessage(MediationMessageType.NATTest) { ClientID = peerID, MappingProbe = true };
+            byte[] probeBuffer = Encoding.ASCII.GetBytes(probeMsg.Serialize());
+            udpClient.Send(probeBuffer, probeBuffer.Length, new IPEndPoint(secondIp, portOne));
         }
         catch (Exception ex)
         {
@@ -625,6 +647,24 @@ internal class MeshProtocolEngine
         return v4Type;
     }
 
+    /// <summary>True if the address is a private/LAN address (RFC1918 v4, IPv4 link-local, or IPv6
+    /// ULA/link-local/site-local). Used to recognise a same-NAT pair: when the mediation server hands
+    /// us a peer endpoint that is a private address, it has substituted the peer's LAN endpoint because
+    /// the pair is behind the same NAT and can connect locally.</summary>
+    private static bool IsPrivateOrLanAddress(IPAddress ip)
+    {
+        if (ip == null) return false;
+        if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            return ip.IsIPv6LinkLocal || ip.IsIPv6SiteLocal || ip.IsIPv6UniqueLocal;
+        byte[] b = ip.GetAddressBytes();
+        if (b.Length != 4) return false;
+        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 (link-local).
+        return b[0] == 10
+            || (b[0] == 172 && b[1] >= 16 && b[1] <= 31)
+            || (b[0] == 192 && b[1] == 168)
+            || (b[0] == 169 && b[1] == 254);
+    }
+
     /// <summary>
     /// Given a peer's advertised v4 and (optional) v6 endpoints from a MeshConnectionBegin, choose
     /// which one THIS node should hole-punch to. Prefer v6 only when both this node has a global v6
@@ -692,6 +732,12 @@ internal class MeshProtocolEngine
     private object meshLock = new object();
     private Dictionary<string, Tunnel> activePeerTunnels = new Dictionary<string, Tunnel>();
     private Dictionary<string, DateTime> pendingConnectionRequests = new Dictionary<string, DateTime>();
+    // How many discovery polls we've DEFERRED a bootstrap ConnectionRequest to each peer because a
+    // NAT verdict wasn't known yet. Bounded: after DeferProceedThreshold polls we stop deferring and
+    // send the request anyway (the old permissive behavior), so a peer whose verdict never arrives —
+    // e.g. a lost UDP NAT-test probe leaves it Unknown for the whole session — isn't stranded forever.
+    private readonly Dictionary<string, int> deferredRequestCount = new Dictionary<string, int>();
+    private const int DeferProceedThreshold = 4; // ~4 discovery polls (~60s at 15s cadence) then proceed
     // Tracks the last time we logged a "stale pending connection request" warning per peer,
     // so the same ghost peer doesn't spam the log every cycle. Entries persist until the peer
     // either connects or pendingConnectionRequests is cleared en masse (disconnect/rejoin).
@@ -1130,16 +1176,34 @@ internal class MeshProtocolEngine
                 // or via IntroducerPeerID in MeshJoinResponse). Introducers must keep the mediation
                 // TCP connection alive indefinitely so the server can push future requests to us.
 
+                // Family-aware introducer capability: we can only serve as introducer if we're
+                // non-symmetric on at least one family we possess. A peer symmetric on ALL its families
+                // can never form the introducer tunnel to a joiner (see HandleMeshIntroduceRequest).
+                bool jrHaveV4 = detectedNatType != NATType.Unknown;
+                bool jrHaveV6 = detectedNatTypeV6.HasValue;
+                bool jrV4Ok = jrHaveV4 && detectedNatType != NATType.Symmetric;
+                bool jrV6Ok = jrHaveV6 && detectedNatTypeV6.Value != NATType.Symmetric;
+                bool introducerCapable = jrV4Ok || jrV6Ok;
+
                 // Check if the server already told us we're the introducer in the join response.
                 // Also: if we're non-symmetric and no other non-symmetric peer exists in the network,
                 // we'll definitely be the introducer for the next joiner — stay connected proactively.
                 if (!string.IsNullOrEmpty(joinResponse.IntroducerPeerID) &&
                     joinResponse.IntroducerPeerID == peerID.ToString())
                 {
-                    isIntroducer = true;
-                    context.Log(LogLevel.Info, "[Mesh] Server designated us as the introducer in join response");
+                    if (introducerCapable)
+                    {
+                        isIntroducer = true;
+                        context.Log(LogLevel.Info, "[Mesh] Server designated us as the introducer in join response");
+                    }
+                    else
+                    {
+                        // Defensive: server named us introducer but we're symmetric on all families.
+                        // Don't accept — a stale/old server shouldn't strand us in the role.
+                        context.Log(LogLevel.Warning, $"[Mesh] Server named us introducer but we're symmetric on all families (v4={detectedNatType}, v6={(detectedNatTypeV6.HasValue ? detectedNatTypeV6.Value.ToString() : "none")}) — NOT accepting the role");
+                    }
                 }
-                else if (detectedNatType != NATType.Symmetric && joinResponse.Peers != null)
+                else if (introducerCapable && joinResponse.Peers != null)
                 {
                     // Check if any other non-symmetric peer exists (who could serve as introducer instead)
                     bool otherNonSymmetricExists = false;
@@ -1428,6 +1492,7 @@ internal class MeshProtocolEngine
                                 NetworkID = context.Options.NetworkID,
                                 PeerID = peerID.ToString(),
                                 NATType = detectedNatType,
+                                NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
                                 PrivateAddressString = meshIP,
                                 AuthToken = authToken,
                                 ProtocolVersion = MediationProtocol.ClientVersion,
@@ -1850,6 +1915,17 @@ internal class MeshProtocolEngine
                                                         }
                                                     }
 
+                                                    // Same race guard as the main introduce path: if either side's NAT type
+                                                    // is still Unknown, don't emit a ConnectionBegin — a genuinely both-symmetric
+                                                    // pair would otherwise slip past the relay check below and direct-punch with no
+                                                    // re-promotion. Retry on the next introduce poll once the type resolves.
+                                                    if (parsedMsg.NATType == NATType.Unknown || (NATType)exNatType == NATType.Unknown)
+                                                    {
+                                                        context.Log(LogLevel.Debug, $"[Mesh] Reconnect: deferring pair {parsedMsg.PeerID} <-> {exPeerID} — NAT type not yet known " +
+                                                            $"(new={parsedMsg.NATType}, existing={(NATType)exNatType}); will retry on next introduce poll");
+                                                        continue;
+                                                    }
+
                                                     // Symmetric ↔ symmetric reconnect: pick a relay.
                                                     if (parsedMsg.NATType == NATType.Symmetric && (NATType)exNatType == NATType.Symmetric)
                                                     {
@@ -2105,6 +2181,7 @@ internal class MeshProtocolEngine
                                                 NetworkID = context.Options.NetworkID,
                                                 PeerID = peerID.ToString(),
                                                 NATType = detectedNatType,
+                                                NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
                                                 PrivateAddressString = meshIP,
                                                 AuthToken = authToken,
                                                 ProtocolVersion = MediationProtocol.ClientVersion,
@@ -2274,6 +2351,7 @@ internal class MeshProtocolEngine
                                             NetworkID = context.Options.NetworkID,
                                             PeerID = peerID.ToString(),
                                             NATType = detectedNatType,
+                                            NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
                                             PrivateAddressString = meshIP,
                                             AuthToken = authToken,
                                             ProtocolVersion = MediationProtocol.ClientVersion,
@@ -2516,12 +2594,52 @@ internal class MeshProtocolEngine
             }
         }
 
+        // If we probed v6 but its verdict hasn't arrived yet, BLOCK-wait for it (bounded) before
+        // joining. The server's introducer election is family-aware and reads NATTypeV6 from our join;
+        // if we join while detectedNatTypeV6 is still Unknown, the server treats our v6 as permissive
+        // and can wrongly elect us (or a peer) as introducer for a v6 pair that's actually symmetric —
+        // the exact race that made a symmetric-on-v6 peer get named introducer. We only wait when a v6
+        // verdict is genuinely expected (we have a global v6 route / are v6-primary); otherwise a peer
+        // with no v6 would hang here for nothing.
+        if (ExpectV6NatVerdict() && !detectedNatTypeV6.HasValue)
+        {
+            // Use a SHORT read timeout so the loop actually honours the 5s wall-clock deadline. Without
+            // this, ReadOneTcpMessage inherits the 15s handshake ReadTimeout and a single blocking read
+            // (when the v6 verdict was lost and no other message is in flight) stalls the join ~15s, not
+            // 5s. We restore the prior timeout afterwards.
+            int priorReadTimeout = stream.ReadTimeout;
+            stream.ReadTimeout = 500;
+            var v6WaitDeadline = DateTime.UtcNow + TimeSpan.FromSeconds(3);
+            while (!detectedNatTypeV6.HasValue && DateTime.UtcNow < v6WaitDeadline)
+            {
+                MediationMessage extra;
+                try { extra = ReadOneTcpMessage(); }
+                catch (IOException ioe) when (ioe.InnerException is SocketException se &&
+                                             (se.SocketErrorCode == SocketError.TimedOut || se.SocketErrorCode == SocketError.WouldBlock))
+                {
+                    continue; // read-timeout tick — re-check the wall-clock deadline and keep waiting
+                }
+                catch { break; } // real connection issue (closed / other) — proceed with what we have
+                if (extra.ID == MediationMessageType.NATTypeResponse)
+                    ApplyNatTypeResponse(extra);
+                else
+                    break; // unexpected pre-join message — stop waiting, proceed to join
+            }
+            stream.ReadTimeout = priorReadTimeout;
+            if (!detectedNatTypeV6.HasValue)
+                context.Log(LogLevel.Debug, "[Mesh] v6 NAT verdict didn't arrive before join deadline — joining with v6=unknown");
+        }
+
         // 3. Join mesh network
         var joinRequest = new MediationMessage(MediationMessageType.MeshJoinRequest)
         {
             NetworkID = context.Options.NetworkID,
             PeerID = peerID.ToString(),
             NATType = detectedNatType,
+            // Also report the v6 NAT verdict (null if no v6) so the server's introducer election can be
+            // FAMILY-AWARE: a v6-primary peer that is symmetric-on-v6 must not be elected introducer for
+            // a pair that will connect over v6, even if its v4 type looks introducer-eligible.
+            NATTypeV6 = detectedNatTypeV6,
             PrivateAddressString = meshIP,
             AuthToken = authToken,
             ProtocolVersion = MediationProtocol.ClientVersion,
@@ -3053,6 +3171,21 @@ internal class MeshProtocolEngine
                 context.Log(LogLevel.Debug, $"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel is healthy (last pong {(int)(now - lastPong).TotalSeconds}s ago, last inbound {(int)(now - lastInbound).TotalSeconds}s ago)");
                 return;
             }
+            // Freshly-completed tunnel: a tunnel that JUST connected can't have exchanged a pong/heartbeat
+            // yet, so the liveness check above always fails for it. Without this, a re-introduce arriving
+            // seconds after the tunnel came up (common: the mediation-brokered bootstrap ConnectionBegin
+            // establishes the tunnel, then the introducer's MeshConnectionBegin for the SAME peer arrives
+            // over it moments later) TEARS DOWN the working tunnel and re-punches — and a symmetric peer's
+            // re-punch from a fresh socket fails (0 inbound), looping forever. Treat a very-recently-
+            // completed tunnel as healthy and ignore the re-introduce; real staleness is caught later by
+            // the heartbeat/pong path once the tunnel has had time to exchange them.
+            var freshTunnelWindow = TimeSpan.FromSeconds(15);
+            if (tunnelCompletedAt.TryGetValue(remoteMeshIP, out var completedAt) &&
+                now - completedAt < freshTunnelWindow)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh] Ignoring re-introduce for {remotePeerID} ({remoteMeshIP}) — tunnel completed {(int)(now - completedAt).TotalSeconds}s ago (too fresh to be stale; pong/heartbeat not yet exchanged)");
+                return;
+            }
             if (hasRecentPong && !hasRecentInbound)
             {
                 context.Log(LogLevel.Debug, $"[Mesh] Re-introducing {remotePeerID} ({remoteMeshIP}) — outbound liveness OK but no recent inbound (last {(lastHeartbeatReceivedFrom.ContainsKey(remoteMeshIP) ? (int)(now - lastInbound).TotalSeconds + "s ago" : "never")}), asymmetric loss likely");
@@ -3191,6 +3324,19 @@ internal class MeshProtocolEngine
             peerMeshIPs[capturedPeerID.GetHashCode()] = remoteMeshIP;
         }
 
+        // Diagnostic tripwire (log-only): a NON-relay ConnectionBegin for a pair where BOTH sides are
+        // symmetric should not happen — the introducer is supposed to route both-symmetric pairs to a
+        // relay (see the introduce-path race guard). If we ever see one here it means a both-symmetric
+        // direct-punch slipped through; it will spray 256 probes and fail with 0 inbound. We don't refuse
+        // the punch (a same-LAN symmetric pair legitimately reaches here and CAN punch), but we flag it
+        // loudly so a regression is visible in logs instead of silently wasting a full punch timeout.
+        NATType ownNatForPunch = OwnNatTypeForEndpoint(remoteEndpoint);
+        if (ownNatForPunch == NATType.Symmetric && remotePeerNatType == NATType.Symmetric)
+        {
+            context.Log(LogLevel.Warning, $"[Mesh] Both-symmetric direct-punch for {capturedPeerID} at {remoteEndpoint} " +
+                $"(IsRelay=false) — expected a relay assignment. Punch will likely fail unless same-LAN.");
+        }
+
         // Start the tunnel (returns immediately since skipTcpConnection=true)
         System.Threading.Tasks.Task.Run(() =>
         {
@@ -3201,7 +3347,7 @@ internal class MeshProtocolEngine
                 peerTunnel.InjectConnectionBegin(
                     remoteEndpoint,
                     remotePeerNatType,
-                    OwnNatTypeForEndpoint(remoteEndpoint),
+                    ownNatForPunch,
                     remoteMeshIP
                 );
                 context.Log(LogLevel.Info, $"[Mesh] Hole-punching started for {capturedPeerID} at {remoteEndpoint}");
@@ -3324,6 +3470,7 @@ internal class MeshProtocolEngine
             string peerEndpoint = peerObj.GetProperty("endpoint").GetString();
             string peerMeshIP = peerObj.TryGetProperty("meshIP", out JsonElement meshIPElement) ? meshIPElement.GetString() : null;
             int peerNatTypeInt = peerObj.TryGetProperty("natType", out JsonElement natEl) ? natEl.GetInt32() : -1;
+            int peerNatTypeV6Int = peerObj.TryGetProperty("natTypeV6", out JsonElement natV6El) ? natV6El.GetInt32() : -1;
             int peerMinVersion = peerObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
             int peerMaxVersion = peerObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
             string peerIdentityPublicKey = peerObj.TryGetProperty("identityPublicKey", out JsonElement idElD) ? idElD.GetString() : null;
@@ -3331,7 +3478,77 @@ internal class MeshProtocolEngine
             if (targetPeerID == peerID.ToString()) continue;
             if (activePeerTunnels.ContainsKey(targetPeerID) || (peerMeshIP != null && activePeerTunnels.ContainsKey(peerMeshIP))) continue;
             if (pendingConnectionRequests.ContainsKey(targetPeerID)) continue;
-            if (detectedNatType == NATType.Symmetric && (NATType)peerNatTypeInt == NATType.Symmetric) continue;
+            // Bootstrap-connection both-symmetric guard. A ConnectionRequest here makes the mediation
+            // server broker a plain ConnectionBegin (HandleConnectionBegin), which ALWAYS hole-punches
+            // and has no relay fallback — so a both-symmetric pair must never reach it (it would spray
+            // 256 probes and fail with 0 inbound). We can only make that call once BOTH NAT types are
+            // known: peerNatTypeInt defaults to -1 (Unknown) until the server has propagated the peer's
+            // classification, and our own detectedNatType is Unknown until our NAT test completes. While
+            // either is Unknown, DEFER — skip this peer this round. ProcessDiscoveredPeers runs on every
+            // discovery poll, so the next poll retries once the type resolves. Deferring an Unknown peer
+            // costs nothing: a peer that never classifies is unreachable by anyone anyway.
+            // FAMILY-AWARE bootstrap decision. A ConnectionRequest here makes the server broker a plain
+            // ConnectionBegin (HandleConnectionBegin) that ALWAYS hole-punches with no relay fallback, so
+            // a pair symmetric on every family they'd connect over must not send it. We decide PER FAMILY,
+            // and only DEFER when a decision genuinely isn't possible yet — NOT on any single Unknown.
+            //
+            // The old code deferred whenever v4 was Unknown. That permanently stranded a v6-primary peer
+            // whose v4 bonus-probe never lands (v4 stays Unknown forever) — it could never send a request
+            // even though its v6 verdict is known and v6 is the family it connects on. Now:
+            //   - A family is "punchable" if BOTH sides are known on it and at least one is non-symmetric.
+            //   - A family is "known-both-symmetric" if both are known and both symmetric.
+            //   - A family is "pending" if either side is still Unknown on it.
+            // Proceed to punch if any family is punchable. Skip (needs relay) if there's at least one
+            // shared family and every KNOWN-both family is both-symmetric with no family still pending.
+            // Defer only if nothing is decidable yet (a pending family could still become punchable).
+            NATType ourV4 = detectedNatType;
+            NATType ourV6 = detectedNatTypeV6 ?? NATType.Unknown;
+            NATType peerV4 = (NATType)peerNatTypeInt;
+            NATType peerV6 = (NATType)peerNatTypeV6Int;
+
+            bool v4BothKnown = ourV4 != NATType.Unknown && peerV4 != NATType.Unknown;
+            bool v6BothKnown = ourV6 != NATType.Unknown && peerV6 != NATType.Unknown;
+            bool v4Punchable = v4BothKnown && (ourV4 != NATType.Symmetric || peerV4 != NATType.Symmetric);
+            bool v6Punchable = v6BothKnown && (ourV6 != NATType.Symmetric || peerV6 != NATType.Symmetric);
+
+            // A family is "pending" only if it's plausibly reachable but a verdict hasn't arrived.
+            // Approximate reachability by our own knowledge: if WE have a verdict on a family, that
+            // family is in play; if the PEER is Unknown there, it may still resolve on a later poll.
+            bool v4Pending = ourV4 != NATType.Unknown && peerV4 == NATType.Unknown;
+            bool v6Pending = ourV6 != NATType.Unknown && peerV6 == NATType.Unknown;
+
+            if (!v4Punchable && !v6Punchable)
+            {
+                if (v4Pending || v6Pending)
+                {
+                    // Bounded defer: a verdict may still arrive on a later poll — but if it NEVER does
+                    // (a lost UDP NAT-test probe leaves the peer Unknown for the whole session), deferring
+                    // forever would strand a pair the old code connected (the server brokers over endpoints
+                    // regardless of the NAT verdict). After DeferProceedThreshold polls, stop deferring and
+                    // send the request anyway. Worst case is one doomed both-symmetric punch — far better
+                    // than permanently never connecting a pair that might be punchable.
+                    int deferCount = deferredRequestCount.TryGetValue(targetPeerID, out var dc) ? dc : 0;
+                    if (deferCount < DeferProceedThreshold)
+                    {
+                        deferredRequestCount[targetPeerID] = deferCount + 1;
+                        context.Log(LogLevel.Debug, $"[Mesh] Deferring ConnectionRequest to {targetPeerID} — peer NAT type not yet known on a usable family " +
+                            $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}); retry {deferCount + 1}/{DeferProceedThreshold} on next discovery poll");
+                        continue;
+                    }
+                    context.Log(LogLevel.Debug, $"[Mesh] Proceeding with ConnectionRequest to {targetPeerID} despite unknown NAT type after {deferCount} defers " +
+                        $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}) — verdict likely lost; letting the server broker it");
+                    // fall through to send the request
+                }
+                else
+                {
+                    // No punchable family and nothing pending → both symmetric everywhere they can meet.
+                    context.Log(LogLevel.Debug, $"[Mesh] Skipping ConnectionRequest to {targetPeerID} — both symmetric on every shared family " +
+                        $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}); no direct punch possible, needs relay");
+                    continue;
+                }
+            }
+            // Reaching here means we're sending a request — clear any defer count for this peer.
+            deferredRequestCount.Remove(targetPeerID);
             if (IsBlocked(peerIdentityPublicKey))
             {
                 context.Log(LogLevel.Debug, $"[Mesh] Skipping ConnectionRequest to {targetPeerID} — peer fingerprint is on local block list");
@@ -4025,6 +4242,70 @@ internal class MeshProtocolEngine
             activePeerTunnels[msg.PeerID] = peerTunnel;
         }
 
+        NATType bootstrapRemoteNat = RemoteNatTypeForEndpoint(msg.EndpointString, msg.NATType, msg.NATTypeV6);
+        NATType bootstrapOwnNat = OwnNatTypeForEndpoint(msg.EndpointString);
+
+        // RECEIVER-SIDE REFUSE (robust backstop). Refuse ONLY when the pair genuinely can't punch — i.e.
+        // BOTH sides symmetric on every family they could connect over. A symmetric peer CAN punch a
+        // non-symmetric (DirectMapping/Restricted) peer — that's the normal sym↔non-sym case, and it's
+        // exactly how a DirectMapping RELAY peer establishes its initial tunnel. An earlier version
+        // refused on "we are symmetric on all families" ALONE, which wrongly rejected the relay peer's
+        // bootstrap (remote=DirectMapping) and stranded the whole network. Now we also require the REMOTE
+        // to be symmetric/unpunchable. We do NOT refuse a same-LAN peer (two symmetric peers behind one
+        // NAT can still punch locally).
+        bool ownHaveV4 = detectedNatType != NATType.Unknown;
+        bool ownHaveV6 = detectedNatTypeV6.HasValue;
+        NATType remoteV4 = msg.NATType;
+        NATType remoteV6 = msg.NATTypeV6 ?? NATType.Unknown;
+        // Punchable on a family iff both sides are KNOWN on it and at least one is non-symmetric.
+        bool v4Punchable = ownHaveV4 && remoteV4 != NATType.Unknown
+            && (detectedNatType != NATType.Symmetric || remoteV4 != NATType.Symmetric);
+        bool v6Punchable = ownHaveV6 && remoteV6 != NATType.Unknown
+            && (detectedNatTypeV6.Value != NATType.Symmetric || remoteV6 != NATType.Symmetric);
+        // A family is still "pending" if we know our side but the remote's is Unknown — could resolve.
+        bool anyPending = (ownHaveV4 && remoteV4 == NATType.Unknown) || (ownHaveV6 && remoteV6 == NATType.Unknown);
+        // Only refuse when no family is punchable AND nothing is pending → definitively both-symmetric.
+        bool unpunchablePair = !v4Punchable && !v6Punchable && !anyPending;
+
+        // Same-LAN detection — two peers behind one NAT CAN punch over the LAN, so we must NOT refuse
+        // them. Two independent signals, because the bootstrap ConnectionBegin does NOT carry msg.LocalIP
+        // (that field is only set on the mesh-introduce path); for a same-NAT pair the server instead
+        // substitutes the peer's LAN endpoint into EndpointString. So:
+        //   (1) EndpointString host is a PRIVATE/LAN address → the server already decided this is a
+        //       same-NAT pair and handed us a directly-reachable LAN endpoint. This is the reliable
+        //       signal on the bootstrap path.
+        //   (2) msg.LocalIP (when present, e.g. a repair MeshConnectionBegin) shares our LAN /24|/64.
+        bool cbSameLan = false;
+        string cbHost = EndpointUtils.GetHost(msg.EndpointString);
+        if (!string.IsNullOrEmpty(cbHost) && IPAddress.TryParse(cbHost, out var cbHostIp) && IsPrivateOrLanAddress(cbHostIp))
+        {
+            cbSameLan = true;
+        }
+        var ownLanIp = Tunnel.GetLanIPAddress();
+        if (!cbSameLan && !string.IsNullOrEmpty(msg.LocalIP) && ownLanIp != null &&
+            IPAddress.TryParse(msg.LocalIP, out var peerLanIp) &&
+            peerLanIp.AddressFamily == ownLanIp.AddressFamily)
+        {
+            byte[] a = peerLanIp.GetAddressBytes(), b = ownLanIp.GetAddressBytes();
+            // Same /24 for v4, same /64 for v6 — a good-enough same-subnet heuristic.
+            int prefixBytes = ownLanIp.AddressFamily == AddressFamily.InterNetworkV6 ? 8 : 3;
+            cbSameLan = a.Length == b.Length && a.Take(prefixBytes).SequenceEqual(b.Take(prefixBytes));
+        }
+
+        if (unpunchablePair && !cbSameLan)
+        {
+            context.Log(LogLevel.Warning, $"[Mesh] Refusing bootstrap ConnectionBegin from {msg.PeerID} at {msg.EndpointString} — " +
+                $"both symmetric on every shared family (ours v4={detectedNatType}/v6={(detectedNatTypeV6.HasValue ? detectedNatTypeV6.Value.ToString() : "none")}, " +
+                $"theirs v4={remoteV4}/v6={remoteV6}); cannot punch, needs a relay.");
+            pendingConnectionRequests.Remove(msg.PeerID);
+            return;
+        }
+        if (bootstrapRemoteNat == NATType.Symmetric && bootstrapOwnNat == NATType.Symmetric)
+        {
+            context.Log(LogLevel.Warning, $"[Mesh] Both-symmetric bootstrap ConnectionBegin for {msg.PeerID} at {msg.EndpointString} " +
+                $"— should have been filtered in ProcessDiscoveredPeers. Punch will likely fail unless same-LAN.");
+        }
+
         // Start the tunnel asynchronously. pendingTunnelCount is decremented by
         // onConnectionComplete (success) or onConnectionFailure (failure) — not here —
         // so the mediation disconnect only happens after WireGuard setup is fully done.
@@ -4036,8 +4317,8 @@ internal class MeshProtocolEngine
                 // Inject ConnectionBegin directly — preserves LAN endpoints for same-NAT peers.
                 peerTunnel.InjectConnectionBegin(
                     msg.EndpointString,
-                    RemoteNatTypeForEndpoint(msg.EndpointString, msg.NATType, msg.NATTypeV6),
-                    OwnNatTypeForEndpoint(msg.EndpointString),
+                    bootstrapRemoteNat,
+                    bootstrapOwnNat,
                     msg.PrivateAddressString);
             }
             catch (Exception ex)
@@ -4137,12 +4418,34 @@ internal class MeshProtocolEngine
     /// </summary>
     private bool HandleMeshIntroduceRequest(MediationMessage msg)
     {
+        // Decline the introducer role if we are symmetric on EVERY family we have. An introducer must
+        // form a direct WireGuard tunnel to each peer it coordinates; a peer symmetric on all its
+        // families can never punch such a tunnel, so accepting the role only strands joiners in the
+        // introducer-retry loop (and fires doomed both-symmetric punches). Mirrors the server's
+        // family-aware self-election guard — this is the client-side belt-and-suspenders that refuses
+        // even if a stale/old server names us. We're introducer-capable if non-symmetric on at least
+        // one family we actually possess (v4 endpoint or v6 endpoint present).
+        bool haveV4 = detectedNatType != NATType.Unknown;
+        bool haveV6 = detectedNatTypeV6.HasValue;
+        bool v4Ok = haveV4 && detectedNatType != NATType.Symmetric;
+        bool v6Ok = haveV6 && detectedNatTypeV6.Value != NATType.Symmetric;
+        bool symmetricOnAllFamilies = (haveV4 || haveV6) && !v4Ok && !v6Ok;
+
+        string declineReason = null;
         if (IsIncompatible(msg.PeerID, msg.PeerMinVersion, msg.PeerMaxVersion) || IsBlocked(msg.IdentityPublicKey))
         {
-            string reason = IsBlocked(msg.IdentityPublicKey)
+            declineReason = IsBlocked(msg.IdentityPublicKey)
                 ? "peer fingerprint is on local block list"
                 : $"peer-protocol range v{msg.PeerMinVersion}-v{msg.PeerMaxVersion} previously refused";
-            context.Log(LogLevel.Debug, $"[Mesh] Declining introducer role for {msg.PeerID} — {reason}");
+        }
+        else if (symmetricOnAllFamilies)
+        {
+            declineReason = $"we are symmetric on all families (v4={detectedNatType}, v6={(detectedNatTypeV6.HasValue ? detectedNatTypeV6.Value.ToString() : "none")}) — cannot form introducer tunnels";
+        }
+
+        if (declineReason != null)
+        {
+            context.Log(LogLevel.Debug, $"[Mesh] Declining introducer role for {msg.PeerID} — {declineReason}");
             try
             {
                 var ack = new MediationMessage(MediationMessageType.MeshIntroduceAck) { PeerID = msg.PeerID };
@@ -4154,7 +4457,7 @@ internal class MeshProtocolEngine
             return true;
         }
         isIntroducer = true;
-        context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID}");
+        context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID} (v4Ok={v4Ok}, v6Ok={v6Ok})");
 
         // Cache the new peer's info. Clear completedTunnelMeshIPs only if the tunnel is
         // demonstrably stale — a peer whose rejoin was triggered by isolation from a *different*
@@ -4255,6 +4558,24 @@ internal class MeshProtocolEngine
                                msgPublicIP == exPublicIP &&
                                !string.IsNullOrEmpty(msg.LocalIP) &&
                                !string.IsNullOrEmpty(existingPeerLocalIP);
+
+                // Don't emit ANY ConnectionBegin for a non-same-LAN pair while EITHER side's NAT type is
+                // still Unknown. bothSymmetric (the relay gate) is evaluated once here from a snapshot of
+                // both types; if one side hasn't finished classifying (its externalPort/mapping test is
+                // still in flight), the pair reads as NOT-both-symmetric and falls through to a direct
+                // 256-probe punch — which for a pair that's ACTUALLY both-symmetric fails (0 packets) and
+                // is never re-promoted to relay (the pair was never added to relayedPairs, and the
+                // heartbeat backstop is likewise gated on both types being known-Symmetric). Deferring
+                // costs at most one discovery-poll interval: the joining peer keeps polling, and each poll
+                // re-issues MeshIntroduceRequest with the now-resolved type, so this same handler re-runs
+                // and takes the correct branch. Same-LAN pairs are exempt — they never relay, so an
+                // Unknown type there can't cause the bad-punch/no-relay outcome.
+                if (!sameLan && (msg.NATType == NATType.Unknown || (NATType)existingPeerNatType == NATType.Unknown))
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh] Deferring pair {msg.PeerID} <-> {existingPeerID} — NAT type not yet known " +
+                        $"(new={msg.NATType}, existing={(NATType)existingPeerNatType}); will retry on next introduce poll");
+                    continue;
+                }
 
                 if (!sameLan && bothSymmetric)
                 {
@@ -4845,6 +5166,7 @@ internal class MeshProtocolEngine
                     NetworkID = context.Options.NetworkID,
                     PeerID = peerID.ToString(),
                     NATType = detectedNatType,
+                    NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
                     PrivateAddressString = meshIP,
                     AuthToken = authToken,
                     ProtocolVersion = MediationProtocol.ClientVersion,
@@ -5032,6 +5354,7 @@ internal class MeshProtocolEngine
                         NetworkID = context.Options.NetworkID,
                         PeerID = peerID.ToString(),
                         NATType = detectedNatType,
+                        NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
                         PrivateAddressString = meshIP,
                         AuthToken = authToken,
                         ProtocolVersion = MediationProtocol.ClientVersion,

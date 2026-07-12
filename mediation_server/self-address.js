@@ -83,6 +83,21 @@ class SelfAddress {
             this._v6Overridden ? Promise.resolve() : this._discoverFamily('udp6'),
             this._v4ListOverridden ? Promise.resolve() : this._discoverAllV4IPs(),
         ]);
+
+        // Ensure the PRIMARY IP (publicIPv4 — the OS default-source public IP, the address the A-record
+        // points at and peers send their primary NAT test to) is list[0]. _discoverAllV4IPs builds the
+        // list from CONCURRENT STUN queries that resolve in arbitrary order, so without this the primary
+        // could land at list[1] — which is bound as the IP_B mapping socket. A peer's primary v4 test
+        // would then hit IP_B and be mis-handled, leaving its v4 NAT type Unknown. Pinning primary to
+        // list[0] guarantees IP_B is always a DIFFERENT IP than the one peers actually connect to.
+        if (!this._v4ListOverridden && this.publicIPv4 && this.publicIPv4List.length > 1) {
+            const idx = this.publicIPv4List.indexOf(this.publicIPv4);
+            if (idx > 0) {
+                this.publicIPv4List.splice(idx, 1);
+                this.publicIPv4List.unshift(this.publicIPv4);
+                console.log(`[SelfAddress] Reordered publicIPv4List so primary ${this.publicIPv4} is first: ${this.publicIPv4List.join(', ')}`);
+            }
+        }
     }
 
     /**

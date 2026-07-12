@@ -109,6 +109,15 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public System.Guid ClientID { get; set; }
     /// <summary>
+    /// Marks a NATTest packet as the SECOND-IP mapping probe (sent to ServerPublicIPv4List[1] to detect
+    /// address-dependent mapping), as opposed to a primary/normal NAT test. Lets the server distinguish
+    /// the two even when a peer's PRIMARY mediation IP happens to equal the second IP — without this,
+    /// such a peer's primary v4 test landed on the IP_B socket and was mis-handled as a mapping probe,
+    /// leaving its v4 NAT type Unknown. Additive; absent (false) on primary tests and on v1 clients.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool MappingProbe { get; set; }
+    /// <summary>
     ///The private/mesh IP of a peer
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]

@@ -586,6 +586,11 @@ class MessageHandler {
      */
     handleMeshJoinRequest(message, socket) {
         const { NetworkID, PeerID, NATType, PrivateAddressString } = message;
+        // v6 NAT verdict (may be undefined for v1 clients / v4-only peers). Used to make introducer
+        // election FAMILY-AWARE: a peer symmetric on the family a pair will connect over can't serve
+        // as introducer for that pair even if its other-family type looks eligible.
+        const NATTypeV6 = (message.NATTypeV6 !== undefined && message.NATTypeV6 !== null)
+            ? message.NATTypeV6 : NATTypes.Unknown;
         // Peer-to-peer protocol range this client supports. Grandfathered to v1
         const peerMinVersion = message.PeerMinVersion || 1;
         const peerMaxVersion = message.PeerMaxVersion || 1;
@@ -739,8 +744,6 @@ class MessageHandler {
         // that produced a plausible-looking endpoint with the wrong (TCP) port for v6-only peers.
         const endpoint = udpInfo ? formatEndpoint(udpInfo.ip, udpInfo.port) : null;
 
-        const { NATTypes } = require('./constants');
-
         try {
             // Join the network and get list of other peers
             const otherPeers = this.networkRegistry.joinNetwork(
@@ -755,7 +758,8 @@ class MessageHandler {
                 peerMinVersion,        // Peer-to-peer protocol range advertised by this client
                 peerMaxVersion,
                 identityPublicKey,     // Base64 X25519 identity pubkey for block fingerprinting
-                socketInfo.endpointV6  // Publicly-observed IPv6 endpoint, or null if no v6 route
+                socketInfo.endpointV6, // Publicly-observed IPv6 endpoint, or null if no v6 route
+                NATTypeV6              // v6 NAT verdict for family-aware introducer eligibility
             );
 
             console.log(`[MessageHandler] Peer ${PeerID} joined network ${NetworkID} (${otherPeers.length} active peers)`);
@@ -785,7 +789,6 @@ class MessageHandler {
 
             const isEligible = (p) => {
                 if (!p) return false;
-                if (p.natType === NATTypes.Symmetric) return false;
                 const sockInfo = this.connectionManager.sockets.find(s => s.clientID === p.peerID);
                 if (!sockInfo) return false;
                 // Introducer must share a peer-protocol range with the joiner. Without overlap,
@@ -796,13 +799,38 @@ class MessageHandler {
                     const hi = Math.min(p.peerMaxVersion, peerMaxVersion);
                     if (hi < lo) return false;
                 }
-                // Introducer must share a reachable ADDRESS FAMILY with the joiner — it needs its
-                // own tunnel to the joiner to relay introductions. A candidate with NO family in
-                // common (e.g. v4-only candidate + v6-only joiner) can never tunnel to the joiner
-                // and would defer forever. A dual-stack pair shares v4, so this stays permissive.
+                // FAMILY-AWARE introducer eligibility. The introducer must form a DIRECT WireGuard
+                // tunnel to the joiner (to deliver MeshConnectionBegin), which requires a shared
+                // address family where NEITHER side is symmetric — two symmetric NATs can't punch.
+                // The old check only tested the candidate's v4 natType, so a v6-primary candidate that
+                // was symmetric-on-v6 but non-symmetric-on-v4 was wrongly elected, then could never
+                // tunnel to a joiner over v6 → the joiner looped forever retrying the introducer link.
+                // Eligible iff there's a shared family on which the CANDIDATE is non-symmetric. The
+                // candidate must punch a direct tunnel to the joiner (and to future peers), so IT must be
+                // non-symmetric on a family it shares with the joiner. The JOINER's own NAT type does NOT
+                // disqualify: a symmetric joiner ↔ non-symmetric introducer is a normal, punchable pair
+                // (sym↔non-sym). An earlier version wrongly also required the JOINER to be non-symmetric,
+                // which left every symmetric joiner with NO introducer (IntroducerPeerID=null) — degrading
+                // it into introducer-less mode (no relay coordination / repair) even though a perfectly
+                // good non-symmetric introducer existed.
+                //
+                // v4 vs v6 asymmetry on Unknown: v4 is the primary classification path so p.natType is
+                // effectively always known — treating Unknown-v4 as non-symmetric is safe/permissive and
+                // keeps pure-v4 flows unchanged. v6 is different: a v1 candidate can't report its v6 type
+                // and a v2 candidate may have lost its v6 probe, so Unknown-v6 could actually be symmetric.
+                // Electing such a candidate as a v6-ONLY introducer would fail the introducer link. So for
+                // v6 we require the candidate's v6 type to be KNOWN non-symmetric. This only affects a
+                // candidate whose sole shared family is v6 (a v4-eligible candidate still passes via v4Ok).
                 const sharesV4 = !!p.endpoint && !!endpoint;
                 const sharesV6 = !!p.endpointV6 && !!socketInfo.endpointV6;
                 if (!sharesV4 && !sharesV6) return false;
+                const v4Ok = sharesV4 && p.natType !== NATTypes.Symmetric;
+                const v6Ok = sharesV6 && p.natTypeV6 !== NATTypes.Symmetric && p.natTypeV6 !== NATTypes.Unknown;
+                if (!v4Ok && !v6Ok) {
+                    console.log(`[MessageHandler] Candidate ${p.peerID} not introducer-eligible for ${PeerID}: symmetric on every shared family ` +
+                        `(cand v4=${p.natType}/v6=${p.natTypeV6}, joiner v4=${NATType}/v6=${NATTypeV6}, sharesV4=${sharesV4}, sharesV6=${sharesV6})`);
+                    return false;
+                }
                 // Re-register them in the active network if they fell out
                 // (e.g., network was deleted when it emptied, but socket is still alive)
                 const activeNetwork = this.networkRegistry.networks.get(NetworkID);
@@ -812,6 +840,7 @@ class MessageHandler {
                         socket: sockInfo.socket,
                         endpoint: p.endpoint,
                         natType: p.natType,
+                        natTypeV6: p.natTypeV6,   // preserve v6 verdict for family-aware election
                         meshIP: p.meshIP,
                         peerMinVersion: p.peerMinVersion,
                         peerMaxVersion: p.peerMaxVersion,
@@ -834,11 +863,16 @@ class MessageHandler {
                 // election (find → self-election) then picks a valid introducer or none. Without
                 // this, the `stickyID !== PeerID` guard skipped re-validation entirely and a stale
                 // sticky pointing at a now-symmetric peer stuck around.
-                if (NATType === NATTypes.Symmetric) {
-                    console.log(`[MessageHandler] Sticky introducer ${stickyID} (self-rejoin) now Symmetric — clearing stale sticky for ${NetworkID}`);
+                // Family-aware: a self-rejoiner is still introducer-capable if it's non-symmetric on
+                // at least one family it has. Clear the sticky only if symmetric on EVERY family
+                // (so a v6-primary-now-sym-on-v6 peer is correctly dropped, not just a v4-sym one).
+                const rejoinV4Ok = !!endpoint && NATType !== NATTypes.Symmetric;
+                const rejoinV6Ok = !!socketInfo.endpointV6 && NATTypeV6 !== NATTypes.Symmetric;
+                if (!rejoinV4Ok && !rejoinV6Ok) {
+                    console.log(`[MessageHandler] Sticky introducer ${stickyID} (self-rejoin) symmetric on all families (v4=${NATType}/v6=${NATTypeV6}) — clearing stale sticky for ${NetworkID}`);
                     this.networkRegistry.clearIntroducer(NetworkID);
                 }
-                // If still non-symmetric, leave the sticky as-is; self-election below re-confirms it.
+                // If still eligible on some family, leave the sticky as-is; self-election re-confirms it.
             } else if (stickyID) {
                 const sticky = allCandidates.find(p => p.peerID === stickyID);
                 if (isEligible(sticky)) {
@@ -856,16 +890,28 @@ class MessageHandler {
             // perfect candidate in takeover scenarios where it's the last surviving
             // non-symmetric peer. We know its NATType and TCP socket is alive (it just
             // sent us this join).
-            if (!introducer && NATType !== NATTypes.Symmetric) {
+            //
+            // FAMILY-AWARE self-election: refuse if the peer is symmetric on EVERY family it has —
+            // such a peer can never form a direct introducer tunnel to any future joiner and would
+            // strand them in the introducer-retry loop. A peer non-symmetric on at least one family
+            // it possesses can still introduce peers reachable over that family. (The old check tested
+            // only the v4 NATType, so a v6-primary peer symmetric-on-v6 but non-sym-on-v4 self-elected
+            // and then couldn't tunnel to v6 joiners — the root cause of the introducer-link loop.)
+            const selfHasV4 = !!endpoint;
+            const selfHasV6 = !!socketInfo.endpointV6;
+            const selfV4Ok = selfHasV4 && NATType !== NATTypes.Symmetric;
+            const selfV6Ok = selfHasV6 && NATTypeV6 !== NATTypes.Symmetric;
+            if (!introducer && (selfV4Ok || selfV6Ok)) {
                 const selfSockInfo = this.connectionManager.sockets.find(s => s.clientID === PeerID);
                 if (selfSockInfo) {
                     introducer = {
                         peerID: PeerID,
                         endpoint: endpoint,
                         natType: NATType,
+                        natTypeV6: NATTypeV6,
                         meshIP: PrivateAddressString
                     };
-                    console.log(`[MessageHandler] Self-electing ${PeerID} as introducer for ${NetworkID} (no other eligible candidates)`);
+                    console.log(`[MessageHandler] Self-electing ${PeerID} as introducer for ${NetworkID} (no other eligible candidates; v4Ok=${selfV4Ok}, v6Ok=${selfV6Ok})`);
                 }
             }
 
@@ -904,6 +950,7 @@ class MessageHandler {
                     peerID: introducer.peerID,
                     endpoint: introducer.endpoint,
                     natType: introducer.natType,
+                    natTypeV6: introducer.natTypeV6,   // forward v6 verdict so client family-aware logic sees it
                     meshIP: introducer.meshIP,
                     peerMinVersion: introducer.peerMinVersion,
                     peerMaxVersion: introducer.peerMaxVersion,
@@ -950,6 +997,7 @@ class MessageHandler {
                             peerID: PeerID,
                             endpoint,
                             natType: NATType,
+                            natTypeV6: NATTypeV6,
                             meshIP: PrivateAddressString,
                             localIP: socketInfo.localIP,
                             localPort: socketInfo.localPort,
@@ -1076,7 +1124,6 @@ class MessageHandler {
      * supposed to relay to (and may all be disconnected from mediation).
      */
     retryPendingIntroduction(disconnectedPeerID) {
-        const { NATTypes } = require('./constants');
 
         for (const [newPeerID, pending] of this.pendingIntroductions.entries()) {
             if (pending.introducerPeerID !== disconnectedPeerID) continue;
@@ -1099,11 +1146,27 @@ class MessageHandler {
                 return Math.min(p.peerMaxVersion, joinerMax) >= Math.max(p.peerMinVersion, joinerMin);
             };
 
+            // Family-aware replacement eligibility: the replacement introducer must share a family with
+            // the NEW peer on which the CANDIDATE is non-symmetric (same rule as initial election —
+            // the candidate must punch to the new peer; the new peer's own symmetry doesn't disqualify,
+            // sym-joiner↔non-sym-introducer is punchable). newPeerInfo carries the new peer's endpoints.
+            const npInfo = pending.newPeerInfo || {};
+            const npHasV4 = !!npInfo.endpoint;
+            const npHasV6 = !!npInfo.endpointV6;
+            const canIntroduceNewPeer = (cand) => {
+                const candNatV6 = (cand.natTypeV6 !== undefined && cand.natTypeV6 !== null) ? cand.natTypeV6 : NATTypes.Unknown;
+                const v4Ok = npHasV4 && !!cand.endpoint && cand.natType !== NATTypes.Symmetric;
+                // v6 requires a KNOWN non-symmetric candidate type (see isEligible rationale) — don't
+                // gamble a v6-only replacement introducer on an Unknown-v6 candidate.
+                const v6Ok = npHasV6 && !!cand.endpointV6 && candNatV6 !== NATTypes.Symmetric && candNatV6 !== NATTypes.Unknown;
+                return v4Ok || v6Ok;
+            };
+
             // First check active network peers (they have live TCP sockets by definition)
             const networkPeers = this.networkRegistry.getPeersInNetwork(pending.networkID);
             for (const p of networkPeers) {
                 if (p.peerID === newPeerID || p.peerID === disconnectedPeerID) continue;
-                if (p.natType === NATTypes.Symmetric) continue;
+                if (!canIntroduceNewPeer(p)) continue;
                 if (!rangesOverlap(p)) continue;
                 const activePeer = this.networkRegistry.findPeerByID(p.peerID);
                 if (activePeer && activePeer.socket) {
@@ -1118,7 +1181,7 @@ class MessageHandler {
                 const meshMembers = this.networkRegistry.getMeshMembers(pending.networkID, newPeerID);
                 for (const m of meshMembers) {
                     if (m.peerID === disconnectedPeerID) continue;
-                    if (m.natType === NATTypes.Symmetric) continue;
+                    if (!canIntroduceNewPeer(m)) continue;
                     if (!rangesOverlap(m)) continue;
                     // Check if this mesh member has a live TCP socket
                     const sockInfo = this.connectionManager.sockets.find(s => s.clientID === m.peerID);

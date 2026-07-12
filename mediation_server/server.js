@@ -174,14 +174,28 @@ class NATServer {
      */
     _bindSecondIpWhenReady(attempts = 0) {
         const list = selfAddress.publicIPv4List;
-        if (!list || list.length < 2) {
+        // Wait for BOTH a second IP AND the primary (publicIPv4) to be known — we must choose an IP_B
+        // that isn't the primary, so binding before the primary resolves could pick the wrong IP.
+        if (!list || list.length < 2 || !selfAddress.publicIPv4) {
             // Not yet / never. Retry a bounded number of times during startup, then give up quietly.
             if (attempts < 30) setTimeout(() => this._bindSecondIpWhenReady(attempts + 1), 2000);
-            else console.log('[NAT Test] No second public IPv4 discovered — running legacy single-IP NAT test.');
+            else console.log('[NAT Test] No second public IPv4 (or primary) discovered — running legacy single-IP NAT test.');
             return;
         }
 
-        const ipB = list[1];
+        // IP_B must be an IP that is NOT the advertised primary (publicIPv4 — the A-record target peers
+        // send their primary NAT test to). Picking list[1] blindly is unsafe: the list is built from a
+        // STUN race and may put the primary at list[1], which would bind IP_B to the very IP peers hit —
+        // capturing their primary test and leaving v4 = Unknown. Explicitly choose the first non-primary
+        // entry. (The MappingProbe flag also guards this at the packet level, but binding IP_B off the
+        // primary is the clean structural invariant.)
+        const primary = selfAddress.publicIPv4;
+        const ipB = list.find(ip => ip !== primary);
+        if (!ipB) {
+            // All entries equal the primary (shouldn't happen — list is deduped) — no distinct 2nd IP.
+            console.log('[NAT Test] No public IPv4 distinct from primary — running legacy single-IP NAT test.');
+            return;
+        }
         this._bindIpBoundNatSocket('NAT Test 1 (IP_B)', ipB, Config.NAT_TEST_PORT_ONE, (socket) => {
             this.natTestServer1B = socket;
             socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, true, 'B'));
@@ -370,10 +384,15 @@ class NATServer {
                 const socket = this.connectionManager.sockets.find(s => s.clientID === message.ClientID);
                 if (!socket) return;
 
-                // Second-IP (IP_B) probe: the client's external port here vs the IP_A observation
-                // reveals ADDRESS-dependent mapping (same port to IP_A but different to IP_B → the
-                // advertised endpoint is wrong for other peers → must relay). Only p1 is used for the
-                // mapping compare; record it and classify, then we're done with this packet.
+                // ANY packet arriving on the IP_B socket is a second-IP mapping probe, never a primary
+                // NAT test — because IP_B is bound to a public IP that is guaranteed DISTINCT from the
+                // advertised primary (see server.js _bindSecondIpWhenReady, which picks the first non-
+                // primary IP, and self-address.js which pins the primary to list[0]). So a peer's PRIMARY
+                // NAT test can never land here; only the deliberate SendSecondIpMappingProbe does.
+                // Record p1 for address-dependent mapping detection and stop — must NOT feed the primary
+                // classifier (that's the IP_A wildcard socket's job). This holds for both v2 clients
+                // (MappingProbe=true) and legacy v1 clients (no flag; they reuse the shared buffer). The
+                // flag is retained only as a defensive cross-check / for logging clarity.
                 // (IP_B is IPv4-only by design — both server IPs are v4; v6 has no NAT to map.)
                 if (serverIp === 'B') {
                     if (isFirstPort && !packetIsV6) {
