@@ -119,6 +119,13 @@ jobs:
                   find artifacts -type f -exec cp -v {} release/ \;
                   echo "Release assets:"; ls -lh release/
 
+            # Publish SHA-256 checksums so the in-app updater can integrity-check downloads
+            - name: Generate SHA256SUMS
+              run: |
+                  cd release
+                  sha256sum * > SHA256SUMS
+                  echo "Checksums:"; cat SHA256SUMS
+
             - name: Create GitHub Release
               uses: softprops/action-gh-release@v2
               with:

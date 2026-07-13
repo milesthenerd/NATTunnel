@@ -181,6 +181,24 @@
 
                     <Border Height="1" Background="{StaticResource BorderBrushStatic}" Margin="0,4,0,12" />
 
+                    <!-- Appears (IsVisible flipped true) only when the update check finds a newer
+                         release. Accent-blue so it reads as "action available" without alarming. -->
+                    <Button x:Name="UpdateButton"
+                            Content="Update Available"
+                            Click="Update_Click"
+                            Height="32"
+                            Margin="0,0,0,8"
+                            HorizontalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Background="{StaticResource AccentBlueBrush}"
+                            Foreground="#FFFFFF"
+                            BorderBrush="{StaticResource AccentBlueBrush}"
+                            BorderThickness="1"
+                            FontSize="12"
+                            FontWeight="SemiBold"
+                            Cursor="Hand"
+                            IsVisible="False" />
+
                     <Button x:Name="ConnectButton"
                             Content="Disconnect"
                             Click="ConnectDisconnect_Click"

@@ -20,6 +20,12 @@ public partial class MainWindow : Window
 
     private readonly DispatcherTimer pollTimer;
     private readonly HttpClient httpClient;
+
+    private readonly UpdateChecker updateChecker = new UpdateChecker();
+    private readonly DispatcherTimer updateTimer;
+    private UpdateChecker.UpdateInfo? latestUpdateInfo;
+    // Re-check every 6 hours; the first check runs shortly after launch.
+    private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(6);
     private bool isConnected;
     private bool isConnecting;
     private long latestLogSeq;
@@ -48,6 +54,48 @@ public partial class MainWindow : Window
         // Kick off the first poll immediately so the user sees something within ~1s of launch
         // instead of waiting a full polling interval before any UI updates.
         _ = Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(Poll);
+
+        // If we were just updated, the previous exe was renamed to <exe>.bak by the installer's
+        // Windows self-replace. Clean it up.
+        CleanupUpdateBackup();
+
+        // Update check: once shortly after launch, then every UpdateCheckInterval. Best-effort and
+        // fully in the background — a failed/slow check never touches the connection UI.
+        updateTimer = new DispatcherTimer { Interval = UpdateCheckInterval };
+        updateTimer.Tick += async (_, _) => await CheckForUpdate();
+        updateTimer.Start();
+        _ = CheckForUpdate();
+    }
+
+    /// <summary>Delete the exe.bak the updater leaves behind after a Windows self-replace.
+    private static void CleanupUpdateBackup()
+    {
+        try
+        {
+            string? exe = Environment.ProcessPath;
+            if (exe == null) return;
+            string bak = exe + ".bak";
+            if (System.IO.File.Exists(bak)) System.IO.File.Delete(bak);
+        }
+        catch { /* locked / permissions — retried next launch */ }
+    }
+
+    /// <summary>Query GitHub for a newer release and reveal the sidebar Update button if one exists.
+    private async System.Threading.Tasks.Task CheckForUpdate()
+    {
+        var info = await updateChecker.CheckAsync();
+        latestUpdateInfo = info;
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            UpdateButton.IsVisible = info.UpdateAvailable;
+        });
+    }
+
+    private void Update_Click(object? sender, RoutedEventArgs e)
+    {
+        if (latestUpdateInfo is not { UpdateAvailable: true }) return;
+        var win = new UpdateWindow(latestUpdateInfo);
+        win.ShowDialog(this);
     }
 
     private async System.Threading.Tasks.Task Poll()
@@ -330,10 +378,12 @@ public partial class MainWindow : Window
     protected override void OnClosing(WindowClosingEventArgs e)
     {
         pollTimer.Stop();
+        updateTimer.Stop();
         // Windows: GUI owns the daemon, shut it down. Linux: systemd owns it, just disconnect.
         string endpoint = OperatingSystem.IsLinux() ? "/disconnect" : "/shutdown";
         try { httpClient.PostAsync($"http://localhost:51889{endpoint}", null).Wait(500); } catch { }
         httpClient.Dispose();
+        updateChecker.Dispose();
         base.OnClosing(e);
     }
 

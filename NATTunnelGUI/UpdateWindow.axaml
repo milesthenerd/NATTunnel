@@ -1,0 +1,104 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="NATTunnelGUI.UpdateWindow"
+        Title="Update Available"
+        Height="480"
+        Width="620"
+        MinWidth="560"
+        Background="{StaticResource ContentBrush}"
+        WindowStartupLocation="CenterOwner">
+
+    <Window.Styles>
+        <Style Selector="Button.action">
+            <Setter Property="Height" Value="32" />
+            <Setter Property="Padding" Value="12,4" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+    </Window.Styles>
+
+    <Grid Margin="20" RowDefinitions="Auto,Auto,*,Auto">
+
+        <!-- Version header -->
+        <StackPanel Grid.Row="0" Spacing="4">
+            <TextBlock Text="A new version is available"
+                       Foreground="{StaticResource AccentBlueBrush}"
+                       FontSize="16"
+                       FontWeight="Bold" />
+            <TextBlock x:Name="VersionSummary"
+                       Foreground="{StaticResource TextPrimaryBrush}"
+                       FontSize="13"
+                       Margin="0,4,0,0" />
+        </StackPanel>
+
+        <TextBlock Grid.Row="1"
+                   Text="Release notes"
+                   Foreground="{StaticResource TextSecondaryBrush}"
+                   FontSize="11"
+                   FontWeight="Bold"
+                   Margin="0,16,0,6" />
+
+        <!-- Release notes (from the GitHub release body) -->
+        <Border Grid.Row="2"
+                Background="{StaticResource SidebarBrush}"
+                BorderBrush="{StaticResource BorderBrushStatic}"
+                BorderThickness="1"
+                CornerRadius="3"
+                Padding="10">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <TextBlock x:Name="ReleaseNotesText"
+                           Foreground="{StaticResource TextPrimaryBrush}"
+                           FontSize="12"
+                           TextWrapping="Wrap" />
+            </ScrollViewer>
+        </Border>
+
+        <!-- Actions -->
+        <StackPanel Grid.Row="3"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Spacing="8"
+                    Margin="0,16,0,0">
+            <ProgressBar x:Name="InstallProgress"
+                         Width="140"
+                         Height="6"
+                         VerticalAlignment="Center"
+                         Minimum="0"
+                         Maximum="1"
+                         IsVisible="False"
+                         Margin="0,0,8,0" />
+            <TextBlock x:Name="ApplyHint"
+                       VerticalAlignment="Center"
+                       MaxWidth="200"
+                       TextWrapping="Wrap"
+                       Foreground="{StaticResource TextSecondaryBrush}"
+                       FontSize="10"
+                       FontStyle="Italic"
+                       Margin="0,0,8,0" />
+            <Button x:Name="ViewOnGitHubButton"
+                    Content="View on GitHub"
+                    Classes="action"
+                    Click="ViewOnGitHub_Click"
+                    Background="#3E3E42"
+                    Foreground="{StaticResource TextPrimaryBrush}"
+                    BorderBrush="{StaticResource BorderBrushStatic}"
+                    BorderThickness="1" />
+            <Button x:Name="UpdateNowButton"
+                    Content="Update Now"
+                    Classes="action"
+                    Click="UpdateNow_Click"
+                    Background="{StaticResource AccentBlueBrush}"
+                    Foreground="#FFFFFF"
+                    BorderThickness="0" />
+            <Button x:Name="CloseButton"
+                    Content="Close"
+                    Classes="action"
+                    Click="Close_Click"
+                    Background="#3E3E42"
+                    Foreground="{StaticResource TextPrimaryBrush}"
+                    BorderBrush="{StaticResource BorderBrushStatic}"
+                    BorderThickness="1" />
+        </StackPanel>
+    </Grid>
+</Window>
