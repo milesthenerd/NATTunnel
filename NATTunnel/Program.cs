@@ -137,6 +137,11 @@ public static class Program
     /// </summary>
     public static void RunMeshMode()
     {
+        // If a self-update just relaunched us, we've now started successfully — clear the update marker
+        // and the leftover .bak install dirs
+        if (OperatingSystem.IsLinux())
+            Updater.DaemonUpdater.ClearUpdateArtifacts(msg => Log(msg));
+
         UdpClient udpClient = null;
         WireGuardTunnel wireguardTunnel = null;
         WireGuardUdpProxy udpProxy = null;
@@ -409,6 +414,44 @@ public static class Program
                             {
                                 ShutdownRequested = true;
                                 byte[] resp = Encoding.UTF8.GetBytes("{\"status\":\"shutting_down\"}");
+                                context.Response.ContentType = "application/json";
+                                context.Response.ContentLength64 = resp.Length;
+                                context.Response.OutputStream.Write(resp, 0, resp.Length);
+                                context.Response.OutputStream.Close();
+                            }
+                            else if (method == "POST" && rawUrl == "/update")
+                            {
+                                // Daemon self-update (Linux)
+                                bool linux = OperatingSystem.IsLinux();
+                                string body = linux
+                                    ? "{\"status\":\"update_started\"}"
+                                    : "{\"status\":\"unsupported\",\"reason\":\"daemon self-update is Linux-only\"}";
+                                if (linux)
+                                {
+                                    _ = System.Threading.Tasks.Task.Run(async () =>
+                                    {
+                                        try
+                                        {
+                                            using var updater = new Updater.DaemonUpdater(msg => Console.WriteLine(msg));
+                                            var result = await updater.RunAsync(
+                                                currentVersion: MeshProtocolEngine.DaemonAppVersion,
+                                                hostedRelayCount: () => meshEngine?.HostedRelayCount() ?? 0,
+                                                // Real drain: set ShutdownRequested → the engine runs
+                                                // PerformGracefulShutdown (MeshPeerLeave broadcast + drain).
+                                                requestGracefulDrain: () => ShutdownRequested = true,
+                                                // On a successful swap the updater drains then exits; systemd
+                                                // (Restart=always) relaunches the new binary. Exit 0 is fine.
+                                                exitProcess: () => Environment.Exit(0));
+                                            Console.WriteLine($"[Update] Result: ok={result.Ok} — {result.Message}");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"[Update] Unhandled updater error: {ex.Message}");
+                                        }
+                                    });
+                                }
+                                byte[] resp = Encoding.UTF8.GetBytes(body);
+                                context.Response.StatusCode = linux ? 202 : 400;
                                 context.Response.ContentType = "application/json";
                                 context.Response.ContentLength64 = resp.Length;
                                 context.Response.OutputStream.Write(resp, 0, resp.Length);

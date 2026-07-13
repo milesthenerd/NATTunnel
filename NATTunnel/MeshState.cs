@@ -67,6 +67,12 @@ public class MeshState
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string LastErrorKind { get; set; }
 
+    /// <summary>The daemon's own application version,
+    /// so the updater can tell whether the running daemon is behind the latest release. Distinct from
+    /// the protocol versions below, which are wire-compat numbers, not the app build.</summary>
+    [JsonPropertyName("daemonVersion")]
+    public string DaemonVersion { get; set; }
+
     /// <summary>Mediation-server wire version this daemon speaks.</summary>
     [JsonPropertyName("mediationProtocolVersion")]
     public int MediationProtocolVersion { get; set; }

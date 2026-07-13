@@ -7,7 +7,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/nattunneld
-Restart=on-failure
+# Restart=always (not on-failure) so the daemon's self-update can replace its own binary and exit
+# cleanly, letting systemd relaunch it at the new version
+Restart=always
 RestartSec=5s
 # Root needed for CAP_NET_ADMIN (interface create + IP assignment) and /proc/sys/net/ipv4/ip_forward.
 User=root

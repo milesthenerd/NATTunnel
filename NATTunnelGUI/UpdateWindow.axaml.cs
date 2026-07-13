@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
@@ -35,16 +36,18 @@ public partial class UpdateWindow : Window
             ? "(No release notes provided.)"
             : info.ReleaseNotes;
 
-        // "Update Now" needs: a platform download, a checksum to verify it, AND a platform whose in-app
-        // apply is supported (Windows only for now — on Linux the root systemd daemon can't be swapped
-        // by the user-space GUI; those users update via package manager / GitHub).
+        // "Update Now" behaves differently per platform:
+        //   • Windows: the GUI does the swap in-process. Needs a platform asset+checksum.
+        //   • Linux: the GUI can't touch the root systemd daemon, so it asks the DAEMON to self-update via
+        //     POST /update; the daemon downloads/verifies/drains/swaps both binaries and restarts.
         bool haveAsset = !string.IsNullOrEmpty(info.PlatformAssetUrl) && !string.IsNullOrEmpty(info.ChecksumsUrl);
-        bool canInstall = haveAsset && OperatingSystem.IsWindows();
+        bool canInstall = OperatingSystem.IsWindows() ? haveAsset : OperatingSystem.IsLinux();
         UpdateNowButton.IsEnabled = canInstall;
-        ApplyHint.Text = canInstall
-            ? "Downloads, verifies, and restarts."
-            : OperatingSystem.IsWindows()
-                ? "No verified download for this platform — use “View on GitHub”."
+        ApplyHint.Text = OperatingSystem.IsWindows()
+            ? (canInstall ? "Downloads, verifies, and restarts."
+                          : "No verified download for this platform — use “View on GitHub”.")
+            : OperatingSystem.IsLinux()
+                ? "Asks the daemon to update itself and restart."
                 : "Update via your package manager, or “View on GitHub”.";
     }
 
@@ -65,6 +68,12 @@ public partial class UpdateWindow : Window
         UpdateNowButton.IsEnabled = false;
         CloseButton.IsEnabled = false;
         InstallProgress.IsVisible = true;
+
+        if (OperatingSystem.IsLinux())
+        {
+            await TriggerDaemonUpdate();
+            return;
+        }
 
         var progress = new Progress<InstallProgress>(p =>
         {
@@ -104,6 +113,44 @@ public partial class UpdateWindow : Window
             CloseButton.IsEnabled = true;
             UpdateNowButton.IsEnabled = true;
         }
+    }
+
+    /// <summary>Linux: the GUI can't swap the root daemon, so it asks the daemon to self-update via
+    /// POST /update. The daemon downloads/verifies/drains/swaps both binaries and restarts itself; the
+    /// GUI just fires the request and reports that it started (the daemon does the rest out-of-band).</summary>
+    private async Task TriggerDaemonUpdate()
+    {
+        InstallProgress.IsIndeterminate = true;
+        ApplyHint.Text = "Asking the daemon to update…";
+        try
+        {
+            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            var resp = await client.PostAsync("http://localhost:51889/update", null);
+            if (resp.StatusCode == System.Net.HttpStatusCode.Accepted)
+            {
+                ApplyHint.Text = "Daemon is updating and will restart shortly. You can close this window.";
+                CloseButton.IsEnabled = true;
+            }
+            else
+            {
+                ApplyHint.Text = $"Daemon refused the update ({(int)resp.StatusCode}).";
+                ResetAfterFailure();
+            }
+        }
+        catch (Exception ex)
+        {
+            ApplyHint.Text = $"Couldn't reach the daemon: {ex.Message}";
+            ResetAfterFailure();
+        }
+    }
+
+    private void ResetAfterFailure()
+    {
+        installing = false;
+        InstallProgress.IsVisible = false;
+        InstallProgress.IsIndeterminate = false;
+        CloseButton.IsEnabled = true;
+        UpdateNowButton.IsEnabled = true;
     }
 
     private void Close_Click(object? sender, RoutedEventArgs e) => Close();

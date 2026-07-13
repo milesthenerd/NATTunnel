@@ -145,6 +145,17 @@ internal class MeshProtocolEngine
     /// <summary>SHA-256(pubkey)[..8] hex of our own identity key, or null pre-Run.</summary>
     internal string OwnFingerprint => ownIdentityPublicKey != null ? ComputeFingerprint(ownIdentityPublicKey) : null;
 
+    /// <summary>The daemon's app version (Directory.Build.props Version → AssemblyVersion X.Y.Z.0),
+    /// as "X.Y.Z" for the updater to compare against the latest GitHub release. "0.0.0" if unreadable.</summary>
+    internal static string DaemonAppVersion
+    {
+        get
+        {
+            var v = typeof(MeshProtocolEngine).Assembly.GetName().Version;
+            return v == null ? "0.0.0" : $"{v.Major}.{v.Minor}.{(v.Build < 0 ? 0 : v.Build)}";
+        }
+    }
+
     /// <summary>Fingerprint of the peer at <paramref name="meshIP"/>, or null if we don't know
     /// their identity yet (identity hasn't been echoed via mediation, or the peer is on an older
     /// build that doesn't advertise one). Live — updates as the identity is filled in.</summary>
@@ -5613,7 +5624,7 @@ internal class MeshProtocolEngine
         }
     }
 
-    private int HostedRelayCount() { lock (hostedRelayLock) return hostedRelays.Count; }
+    internal int HostedRelayCount() { lock (hostedRelayLock) return hostedRelays.Count; }
 
     private bool AddHostedRelay(string pairKey) { lock (hostedRelayLock) return hostedRelays.Add(pairKey); }
 
@@ -5779,6 +5790,7 @@ internal class MeshProtocolEngine
                 HostedRelayPairs = HostedRelayCount(),
                 LastError = lastError,
                 LastErrorKind = lastErrorKind,
+                DaemonVersion = DaemonAppVersion,
                 MediationProtocolVersion = MediationProtocol.ClientVersion,
                 PeerProtocolMinVersion = MediationProtocol.PeerMinVersion,
                 PeerProtocolMaxVersion = MediationProtocol.PeerMaxVersion,
