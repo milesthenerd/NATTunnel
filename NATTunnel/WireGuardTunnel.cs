@@ -318,8 +318,11 @@ namespace NATTunnel
 
                 // Native interface-status diagnostic (no wg.exe). The bundled WireGuard-NT driver is
                 // the only WireGuard component we require, so query it directly rather than shelling
-                // to the WG-for-Windows CLI (which fresh installs no longer have).
-                Program.Log(LogLevel.Debug, $"WireGuard status: driver v0x{WireGuardNTAPI.WireGuardGetRunningDriverVersion():X}, interface {interfaceName}");
+                // to the WG-for-Windows CLI (which fresh installs no longer have). WINDOWS-ONLY: this
+                // P/Invokes wireguard.dll (WireGuard-NT); Linux uses the kernel module + wg/ip, so
+                // calling it there throws "cannot load wireguard.dll" and kills daemon startup.
+                if (OperatingSystem.IsWindows())
+                    Program.Log(LogLevel.Debug, $"WireGuard status: driver v0x{WireGuardNTAPI.WireGuardGetRunningDriverVersion():X}, interface {interfaceName}");
 
                 // Initialize tunnel based on mode
                 if (!skipTunnelCreation)
@@ -414,8 +417,10 @@ namespace NATTunnel
                     }
 
                     // Native driver-version status (no wg.exe). Detailed per-peer status is available
-                    // via the HTTP /status endpoint; here we just confirm the driver is live.
-                    Program.Log(LogLevel.Debug, $"[Status Check] WireGuard-NT driver v0x{WireGuardNTAPI.WireGuardGetRunningDriverVersion():X}");
+                    // via the HTTP /status endpoint; here we just confirm the driver is live. WINDOWS-ONLY
+                    // (WireGuard-NT P/Invoke via wireguard.dll — absent on Linux, which uses the kernel module).
+                    if (OperatingSystem.IsWindows())
+                        Program.Log(LogLevel.Debug, $"[Status Check] WireGuard-NT driver v0x{WireGuardNTAPI.WireGuardGetRunningDriverVersion():X}");
                 });
 
                 tunnelStarted = true;
