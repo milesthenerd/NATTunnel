@@ -278,6 +278,7 @@
                 <DataGrid x:Name="PeerListView"
                           AutoGenerateColumns="False"
                           IsReadOnly="True"
+                          CanUserResizeColumns="True"
                           GridLinesVisibility="None"
                           HeadersVisibility="Column"
                           Background="Transparent"
@@ -333,7 +334,7 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                        <DataGridTemplateColumn Header="Proto" Width="70">
+                        <DataGridTemplateColumn Header="Protocol" Width="90" MinWidth="70">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding PeerVersionDisplay}" TextTrimming="None"
@@ -341,10 +342,11 @@
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>
                         </DataGridTemplateColumn>
-                        <DataGridTemplateColumn Header="Status" Width="100">
+                        <DataGridTemplateColumn Header="Status" Width="130" MinWidth="90">
                             <DataGridTemplateColumn.CellTemplate>
                                 <DataTemplate>
                                     <TextBlock Text="{Binding StatusDisplay}" TextTrimming="None"
+                                               ToolTip.Tip="{Binding StatusDisplay}"
                                                VerticalAlignment="Center" Margin="8,0,8,0" />
                                 </DataTemplate>
                             </DataGridTemplateColumn.CellTemplate>

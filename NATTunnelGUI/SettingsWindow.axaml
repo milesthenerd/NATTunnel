@@ -51,7 +51,7 @@
                 <TextBox x:Name="NetworkIDBox" Classes="input" />
 
                 <TextBlock Text="Network Secret" Classes="label" />
-                <TextBox x:Name="NetworkSecretBox" Classes="input" PasswordChar="•" />
+                <TextBox x:Name="NetworkSecretBox" Classes="input" />
 
                 <TextBlock Text="Mesh Subnet Prefix" Classes="label" />
                 <TextBox x:Name="MeshSubnetBox" Classes="input" />

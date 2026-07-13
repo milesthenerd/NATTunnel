@@ -36,6 +36,11 @@ public partial class MainWindow : Window
     // Track the last error text we already popped a dialog for, so the same error doesn't
     // spam the user on every /status poll.
     private string? lastShownError;
+    // On Linux the GUI attaches to a systemd daemon it doesn't own; if that daemon isn't running,
+    // the .desktop launch shows no console, so surface it as a dialog — once, not every poll.
+    private bool daemonDownDialogShown;
+    // Grace polls before deciding the daemon is really down (vs. still starting) at GUI launch.
+    private int consecutiveDaemonDownPolls;
 
     public MainWindow()
     {
@@ -270,7 +275,26 @@ public partial class MainWindow : Window
             StatusDot.Fill = (IBrush)this.FindResource("StatusRedBrush")!;
             StatusText.Text = "Engine not running";
             ConnectButton.IsEnabled = false;
+
+            // The daemon is unreachable. Give it a couple of grace polls (it may still be starting),
+            // then then inform the user if it persists.
+            consecutiveDaemonDownPolls++;
+            if (!daemonDownDialogShown && consecutiveDaemonDownPolls >= 3)
+            {
+                daemonDownDialogShown = true;
+                string body = OperatingSystem.IsLinux()
+                    ? "The NATTunnel daemon isn't running. Start it with:\n\n" +
+                      "    sudo systemctl start nattunnel\n\n" +
+                      "To have it start automatically on boot:\n\n" +
+                      "    sudo systemctl enable nattunnel"
+                    : "The NATTunnel engine isn't responding. Try closing and reopening the app; " +
+                      "if it persists, reinstall NATTunnel.";
+                _ = DialogHelpers.ShowInfoAsync(this, "NATTunnel daemon not running", body);
+            }
+            return;
         }
+        // Reached only on a successful /status — the daemon is up, so reset the down-tracking.
+        consecutiveDaemonDownPolls = 0;
     }
 
     private async System.Threading.Tasks.Task PollLogs()
@@ -360,7 +384,11 @@ public partial class MainWindow : Window
         ConnectButton.IsEnabled = false;
         SettingsButton.IsEnabled = false;
         StatusText.Text = "Stopping...";
-        try { await httpClient.PostAsync("http://localhost:51889/shutdown", null); }
+        // Windows: the GUI is the daemon, so Stop shuts it down + closes.
+        // Linux: the daemon is a systemd service the GUI only attaches to — stop just DISCONNECTS from the
+        // mesh (leaves systemd to keep the daemon alive) and closes the GUI; reopening reconnects.
+        string endpoint = OperatingSystem.IsLinux() ? "/disconnect" : "/shutdown";
+        try { await httpClient.PostAsync($"http://localhost:51889{endpoint}", null); }
         catch { }
         Close();
     }
@@ -379,7 +407,7 @@ public partial class MainWindow : Window
     {
         pollTimer.Stop();
         updateTimer.Stop();
-        // Windows: GUI owns the daemon, shut it down. Linux: systemd owns it, just disconnect.
+        // Windows: GUI is the daemon, shut it down. Linux: systemd owns it, just disconnect.
         string endpoint = OperatingSystem.IsLinux() ? "/disconnect" : "/shutdown";
         try { httpClient.PostAsync($"http://localhost:51889{endpoint}", null).Wait(500); } catch { }
         httpClient.Dispose();
