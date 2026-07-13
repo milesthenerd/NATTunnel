@@ -27,7 +27,7 @@ cp "$REPO_ROOT/NATTunnelCLI/bin/Publish/$RID/"* "$STAGE/"
 cp "$REPO_ROOT/NATTunnelGUI/bin/Publish/$RID/"* "$STAGE/"
 
 cp "$SCRIPT_DIR/nattunnel.service" "$STAGE/"
-cp "$SCRIPT_DIR/deb/nattunnel.desktop" "$STAGE/"
+cp "$SCRIPT_DIR/nattunnel.desktop" "$STAGE/"
 cp "$SCRIPT_DIR/install.sh" "$STAGE/"
 cp "$SCRIPT_DIR/uninstall.sh" "$STAGE/"
 

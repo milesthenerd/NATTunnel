@@ -116,32 +116,103 @@ public partial class UpdateWindow : Window
     }
 
     /// <summary>Linux: the GUI can't swap the root daemon, so it asks the daemon to self-update via
-    /// POST /update. The daemon downloads/verifies/drains/swaps both binaries and restarts itself; the
-    /// GUI just fires the request and reports that it started (the daemon does the rest out-of-band).</summary>
+    /// POST /update. The daemon downloads/verifies/drains/swaps both binaries and restarts itself. We
+    /// then POLL /status until the daemon comes back reporting the new version, so the modal shows a
+    /// real "updating → updated" flow instead of hanging on the spinner.</summary>
     private async Task TriggerDaemonUpdate()
     {
         InstallProgress.IsIndeterminate = true;
         ApplyHint.Text = "Asking the daemon to update…";
+        using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         try
         {
-            using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
             var resp = await client.PostAsync("http://localhost:51889/update", null);
-            if (resp.StatusCode == System.Net.HttpStatusCode.Accepted)
-            {
-                ApplyHint.Text = "Daemon is updating and will restart shortly. You can close this window.";
-                CloseButton.IsEnabled = true;
-            }
-            else
+            if (resp.StatusCode != System.Net.HttpStatusCode.Accepted)
             {
                 ApplyHint.Text = $"Daemon refused the update ({(int)resp.StatusCode}).";
                 ResetAfterFailure();
+                return;
             }
         }
         catch (Exception ex)
         {
             ApplyHint.Text = $"Couldn't reach the daemon: {ex.Message}";
             ResetAfterFailure();
+            return;
         }
+
+        // Update accepted. The daemon downloads/verifies/drains, then exits → systemd relaunches it at
+        // the new version. Poll /status through that window: it'll briefly fail (connection refused
+        // during the restart), then come back reporting daemonVersion == the target we're updating to.
+        string? target = info.LatestVersion?.ToString(3);
+        ApplyHint.Text = "Daemon is updating and will restart…";
+        var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(3);
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(2000);
+            string? reported = await TryGetDaemonVersion(client);
+            if (reported != null && (target == null || reported == target))
+            {
+                // Daemon is back on the new version. The daemon also swapped the GUI binary on disk
+                // (before it exited, so it's in place by the time /status reports the new version) —
+                // Restart the current process.
+                InstallProgress.IsIndeterminate = false;
+                InstallProgress.IsVisible = false;
+                ApplyHint.Text = $"Updated to v{reported}. Restarting…";
+                RelaunchGuiAndExit();
+                return;
+            }
+        }
+
+        // Timed out waiting for the daemon to report the new version. It may still be finishing (large
+        // download / slow restart); don't claim failure, just stop blocking and let the user close.
+        InstallProgress.IsIndeterminate = false;
+        InstallProgress.IsVisible = false;
+        ApplyHint.Text = "Update is taking longer than expected — the daemon will restart when ready.";
+        CloseButton.IsEnabled = true;
+    }
+
+    /// <summary>Relaunch the (now-updated-on-disk) GUI binary and shut this old instance down.</summary>
+    private static void RelaunchGuiAndExit()
+    {
+        try
+        {
+            string? exe = Environment.ProcessPath;
+            if (!string.IsNullOrEmpty(exe))
+            {
+                // Resolve the symlink so we exec the swapped /usr/lib/nattunnel-gui binary, not the link.
+                try { exe = new System.IO.FileInfo(exe).ResolveLinkTarget(true)?.FullName ?? exe; } catch { }
+                Process.Start(new ProcessStartInfo(exe)
+                {
+                    UseShellExecute = true,
+                    WorkingDirectory = System.IO.Path.GetDirectoryName(exe) ?? Environment.CurrentDirectory
+                });
+            }
+        }
+        catch { /* if relaunch fails, we still shut down; the user reopens manually */ }
+
+        // Shut this (old) instance down so the relaunched process takes over.
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (Application.Current?.ApplicationLifetime is
+                Avalonia.Controls.ApplicationLifetimes.IClassicDesktopStyleApplicationLifetime desktop)
+                desktop.Shutdown();
+            else
+                Environment.Exit(0);
+        });
+    }
+
+    /// <summary>GET /status and return the daemon's reported app version ("X.X.X"), or null if the
+    /// daemon is unreachable (e.g. mid-restart) or the field is absent.</summary>
+    private static async Task<string?> TryGetDaemonVersion(System.Net.Http.HttpClient client)
+    {
+        try
+        {
+            string json = await client.GetStringAsync("http://localhost:51889/status");
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            return doc.RootElement.TryGetProperty("daemonVersion", out var v) ? v.GetString() : null;
+        }
+        catch { return null; } // connection refused during restart, timeout, etc.
     }
 
     private void ResetAfterFailure()

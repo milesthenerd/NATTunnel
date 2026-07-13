@@ -72,22 +72,11 @@ jobs:
               with:
                   dotnet-version: ${{ env.DOTNET_VERSION }}
 
-            - name: Install packaging tools (dpkg-deb, rpmbuild)
-              run: sudo apt-get update && sudo apt-get install -y dpkg-dev rpm
-
-            - name: Publish Linux binaries (default path, for deb/rpm)
-              run: |
-                  dotnet publish NATTunnelCLI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
-                  dotnet publish NATTunnelGUI -r linux-x64 --no-self-contained -c Release -p:DebugType=None -p:DebugSymbols=false
-
+            # Linux ships as a single tar.gz (deb/rpm dropped 2026-07-13 — they conflicted with the
+            # daemon self-update, which swaps binaries under the package manager). build-tar.sh does
+            # its own publish via the linux-x64 profile (which force-copies libsodium.so loose).
             - name: Build tarball
               run: sh packaging/linux/build-tar.sh
-
-            - name: Build .deb
-              run: bash packaging/linux/deb/build.sh
-
-            - name: Build .rpm
-              run: bash packaging/linux/rpm/build.sh
 
             - name: Collect Linux artifacts
               run: |

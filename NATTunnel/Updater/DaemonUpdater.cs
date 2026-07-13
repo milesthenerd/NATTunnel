@@ -226,8 +226,12 @@ public sealed class DaemonUpdater : IDisposable
         return null;
     }
 
-    /// <summary>Copy just one executable's publish files (the exe + its sidecar DLLs/configs) from the
-    /// flat tar root into a clean staging dir.
+    // Files in the flat tar root that are packaging extras, NOT part of an installed runtime dir.
+    private static readonly string[] PackagingExtras =
+    { "install.sh", "uninstall.sh", "nattunnel.service", "nattunnel.desktop", "README.md", "LICENCE", "LICENSE" };
+
+    /// <summary>
+    /// Stage the runtime files for ONE binary from the flat tar root into a clean staging dir.
     private static void StagePublishSubset(string tarRoot, string stageDir, string keepExe)
     {
         string otherExe = keepExe == "nattunneld" ? "nattunnel-gui" : "nattunneld";
@@ -236,9 +240,8 @@ public sealed class DaemonUpdater : IDisposable
         foreach (var file in Directory.EnumerateFiles(tarRoot))
         {
             string name = Path.GetFileName(file);
-            if (name == otherExe) continue; // don't ship the sibling exe into this tree
-            // Skip packaging extras that aren't part of the installed runtime dir.
-            if (name is "install.sh" or "uninstall.sh" or "nattunnel.service" or "nattunnel.desktop") continue;
+            if (name == otherExe) continue;                        // sibling exe belongs to the other dir
+            if (PackagingExtras.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
             File.Copy(file, Path.Combine(stageDir, name), overwrite: true);
         }
     }

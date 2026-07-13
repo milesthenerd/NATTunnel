@@ -28,4 +28,18 @@
     <Delete Files="$(PublishDir)wireguard.dll" />
   </Target>
 
+  <Target Name="CopyLibsodiumLooseOnLinuxPublish" AfterTargets="Publish"
+          Condition="$(RuntimeIdentifier.StartsWith('linux'))">
+    <ItemGroup>
+      <_LibsodiumNative Include="@(NativeCopyLocalItems)" Condition="'%(Filename)' == 'libsodium'" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_LibsodiumNative)" DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true" Condition="'@(_LibsodiumNative)' != ''" />
+    <Copy SourceFiles="$(OutDir)runtimes/linux-x64/native/libsodium.so" DestinationFolder="$(PublishDir)"
+          SkipUnchangedFiles="true"
+          Condition="'@(_LibsodiumNative)' == '' And Exists('$(OutDir)runtimes/linux-x64/native/libsodium.so')" />
+    <Error Text="libsodium.so was not found to copy into the Linux GUI publish — the app would crash at startup."
+           Condition="!Exists('$(PublishDir)libsodium.so')" />
+  </Target>
+
 </Project>
