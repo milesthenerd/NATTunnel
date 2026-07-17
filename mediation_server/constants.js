@@ -101,6 +101,30 @@ const Config = {
     // mediation over one family can still run its NAT test over the other. PUBLIC_IPV4/PUBLIC_IPV6
     // env vars, if set, override auto-discovery (escape hatch for unusual setups). No manual config
     // is required in the common case — STUN handles public VPS, cloud 1:1 NAT, and port-forward-behind-NAT.
+    PUBLIC_IPV4: process.env.PUBLIC_IPV4 || null,
+    PUBLIC_IPV6: process.env.PUBLIC_IPV6 || null,
+
+    // Two-IP RFC 5780 NAT test (v2). Detecting ADDRESS-dependent mapping needs the server to have TWO
+    // distinct public IPv4s: the client probes a primary (IP_A) and a second (IP_B) and the server
+    // compares the external ports. Auto-discovery finds both when they're directly assigned, but two
+    // pinning overrides exist for setups STUN can't resolve:
+    //
+    //   NAT_TEST_IPV4_LIST="pub1,pub2"         Directly-assigned public IPs (bind == advertise). [0] is
+    //                                          the PRIMARY (advertised endpoint); [1] is IP_B.
+    //
+    //   NAT_TEST_IPV4_MAP="localB=pubB,..."    1:1 / cloud-NAT hosts, where the machine's LOCAL address
+    //                                          (e.g. 10.0.0.232) differs from the PUBLIC IP clients reach.
+    //                                          Each pair is local=public; the socket BINDS the local addr
+    //                                          but ADVERTISES the public IP. First pair = PRIMARY, rest are
+    //                                          IP_B candidates. Use this when local addrs are private, or
+    //                                          two publics share one interface without source routing.
+    //                                          Put the STABLE ip first if the primary is ephemeral, so the
+    //                                          advertised endpoint doesn't churn (ephemeral becomes IP_B,
+    //                                          which only degrades the optional test if it changes).
+    //
+    // If neither is set and STUN finds only one public IPv4, the server runs the legacy single-IP NAT test.
+    NAT_TEST_IPV4_LIST: process.env.NAT_TEST_IPV4_LIST || null,
+    NAT_TEST_IPV4_MAP: process.env.NAT_TEST_IPV4_MAP || null,
 
     // TLS configuration. TLS is always on.
     // Cert/key are auto-generated with openssl on first startup if not present.

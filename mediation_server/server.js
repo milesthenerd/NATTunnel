@@ -179,7 +179,10 @@ class NATServer {
         if (!list || list.length < 2 || !selfAddress.publicIPv4) {
             // Not yet / never. Retry a bounded number of times during startup, then give up quietly.
             if (attempts < 30) setTimeout(() => this._bindSecondIpWhenReady(attempts + 1), 2000);
-            else console.log('[NAT Test] No second public IPv4 (or primary) discovered — running legacy single-IP NAT test.');
+            else console.log('[NAT Test] No second public IPv4 discovered — running legacy single-IP NAT test. ' +
+                'If this host DOES have two public IPv4s but they are behind 1:1/cloud NAT (local addrs are ' +
+                'private, e.g. 10.x/172.16-31/192.168.x) OR share one interface without source routing, STUN ' +
+                'cannot discover the second — set NAT_TEST_IPV4_LIST="<ip1>,<ip2>" to pin them explicitly.');
             return;
         }
 
@@ -196,16 +199,22 @@ class NATServer {
             console.log('[NAT Test] No public IPv4 distinct from primary — running legacy single-IP NAT test.');
             return;
         }
-        this._bindIpBoundNatSocket('NAT Test 1 (IP_B)', ipB, Config.NAT_TEST_PORT_ONE, (socket) => {
+        // ipB is the PUBLIC IP advertised to clients. On a 1:1/cloud-NAT host the socket can't bind to the
+        // public IP (the machine doesn't have it locally — EADDRNOTAVAIL), so bind the mapped LOCAL addr
+        // instead (from NAT_TEST_IPV4_MAP). On a directly-assigned dual-IP host local==public, so bindAddr
+        // falls through to ipB itself. Kernel delivers inbound by DESTINATION IP, so binding the local addr
+        // still receives probes the client sends to the public IP.
+        const bindAddr = (selfAddress.localForPublic && selfAddress.localForPublic[ipB]) || ipB;
+        this._bindIpBoundNatSocket('NAT Test 1 (IP_B)', bindAddr, Config.NAT_TEST_PORT_ONE, (socket) => {
             this.natTestServer1B = socket;
             socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, true, 'B'));
         });
-        this._bindIpBoundNatSocket('NAT Test 2 (IP_B)', ipB, Config.NAT_TEST_PORT_TWO, (socket) => {
+        this._bindIpBoundNatSocket('NAT Test 2 (IP_B)', bindAddr, Config.NAT_TEST_PORT_TWO, (socket) => {
             this.natTestServer2B = socket;
             socket.on('message', (msg, info) => this.handleNATTestMessage(msg, info, false, 'B'));
         });
-        this.natTestIpB = ipB;
-        console.log(`[NAT Test] Second IPv4 ${ipB} — bound IP_B sockets for address-dependent NAT detection.`);
+        this.natTestIpB = ipB; // advertised public IP (what clients probe)
+        console.log(`[NAT Test] Second IPv4 ${ipB} (bound on ${bindAddr}) — IP_B sockets up for address-dependent NAT detection.`);
     }
 
     /** Bind an IPv4-only UDP socket to a specific local IP:port for the second-IP NAT test. */

@@ -19,6 +19,7 @@
 
 const dgram = require('dgram');
 const dns = require('dns').promises;
+const { Config } = require('./constants');
 
 const STUN_MAGIC_COOKIE = 0x2112a442;
 const STUN_BINDING_REQUEST = 0x0001;
@@ -37,17 +38,44 @@ const STARTUP_RETRY_MS = 10 * 1000;        // fast retry until the first family 
 
 class SelfAddress {
     constructor() {
-        this.publicIPv4 = process.env.PUBLIC_IPV4 || null;
-        this.publicIPv6 = process.env.PUBLIC_IPV6 || null;
+        this.publicIPv4 = Config.PUBLIC_IPV4;
+        this.publicIPv6 = Config.PUBLIC_IPV6;
         // All distinct public IPv4 addresses this host has (for the two-IP RFC 5780 NAT test).
         // publicIPv4 stays the PRIMARY (first/default); publicIPv4List carries every one found.
-        // NAT_TEST_IPV4_LIST env (comma-separated) overrides discovery for pinned deployments.
-        this.publicIPv4List = process.env.NAT_TEST_IPV4_LIST
-            ? process.env.NAT_TEST_IPV4_LIST.split(',').map(s => s.trim()).filter(Boolean)
-            : (process.env.PUBLIC_IPV4 ? [process.env.PUBLIC_IPV4] : []);
-        this._v4Overridden = !!process.env.PUBLIC_IPV4;
-        this._v6Overridden = !!process.env.PUBLIC_IPV6;
-        this._v4ListOverridden = !!process.env.NAT_TEST_IPV4_LIST;
+        //
+        // Two env overrides for pinned deployments:
+        //   NAT_TEST_IPV4_LIST="pub1,pub2"          — directly-assigned public IPs (bind==advertise).
+        //   NAT_TEST_IPV4_MAP="localB=pubB,..."     — 1:1/cloud-NAT hosts, where the machine's LOCAL addr
+        //                                             (e.g. 10.0.0.232) differs from the PUBLIC IP clients
+        //                                             probe. Advertise the public IP; BIND the local addr.
+        // localForPublic maps advertised-public → local-bind so _bindSecondIpWhenReady binds correctly.
+        this.localForPublic = {};
+        if (Config.NAT_TEST_IPV4_MAP) {
+            const pubs = [];
+            for (const pair of Config.NAT_TEST_IPV4_MAP.split(',')) {
+                const [local, pub] = pair.split('=').map(s => s.trim());
+                if (local && pub) { this.localForPublic[pub] = local; pubs.push(pub); }
+            }
+            this.publicIPv4List = pubs;
+            this._v4ListOverridden = true;
+        } else {
+            this.publicIPv4List = Config.NAT_TEST_IPV4_LIST
+                ? Config.NAT_TEST_IPV4_LIST.split(',').map(s => s.trim()).filter(Boolean)
+                : (Config.PUBLIC_IPV4 ? [Config.PUBLIC_IPV4] : []);
+            this._v4ListOverridden = !!Config.NAT_TEST_IPV4_LIST;
+        }
+        this._v4Overridden = !!Config.PUBLIC_IPV4;
+        this._v6Overridden = !!Config.PUBLIC_IPV6;
+        // When the v4 list is pinned via env, list[0] is the intended PRIMARY (advertised endpoint / IP_B
+        // reference). Pin publicIPv4 to it too, UNLESS PUBLIC_IPV4 was set explicitly. Without this, STUN's
+        // default-source discovery could set publicIPv4 to a DIFFERENT list entry (e.g. an ephemeral IP that
+        // owns the default route), making the advertised primary and list[0] disagree and picking the wrong
+        // IP_B. Critical when the default-route IP is NOT the one you want advertised (e.g. ephemeral primary
+        // + static secondary: pin the static as list[0] and it becomes the stable advertised primary).
+        if (this._v4ListOverridden && !this._v4Overridden && this.publicIPv4List.length > 0) {
+            this.publicIPv4 = this.publicIPv4List[0];
+            this._v4Overridden = true; // stop STUN default-source discovery from overwriting the pinned primary
+        }
         this._timer = null;
     }
 
@@ -123,15 +151,23 @@ class SelfAddress {
             }
         }
 
+        console.log(`[SelfAddress] Enumerated ${locals.length} local IPv4(s) for two-IP discovery: ${locals.join(', ') || '(none)'}`);
         const found = [];
         // Query each local IP against the STUN servers, bound to that local address.
         await Promise.all(locals.map(async (localIP) => {
             for (const server of STUN_SERVERS) {
                 try {
                     const addr = await this._stunQuery('udp4', server.host, server.port, localIP);
+                    // DIAGNOSTIC: show what public IP each local bind actually reflected. If two local IPs
+                    // both return the SAME public IP, the second isn't source-routed (socket bound to it
+                    // still egresses via the primary) — that's why the list stays length 1 and IP_B never binds.
+                    console.log(`[SelfAddress]   local ${localIP} via ${server.host} → public ${addr || '(no answer)'}`);
                     if (addr && !found.includes(addr)) found.push(addr);
                     if (addr) return; // one answer per local IP is enough
-                } catch (e) { /* try next STUN server */ }
+                } catch (e) {
+                    console.log(`[SelfAddress]   local ${localIP} via ${server.host} → error: ${e.message}`);
+                    /* try next STUN server */
+                }
             }
         }));
 
@@ -176,11 +212,17 @@ class SelfAddress {
     _stunQuery(socketType, host, port, localAddress = null) {
         return new Promise(async (resolve, reject) => {
             let resolved = false;
+            // socket/timeout are declared with `let` and referenced (not accessed) here so the DNS-failure
+            // path below can call done() BEFORE they're assigned without hitting a temporal-dead-zone
+            // ReferenceError (the bug: const socket/timeout declared later, but done() closed over them and
+            // ran early on dns.lookup rejection → "Cannot access 'timeout' before initialization").
+            let socket = null;
+            let timeout = null;
             const done = (val, err) => {
                 if (resolved) return;
                 resolved = true;
-                try { socket.close(); } catch (e) {}
-                clearTimeout(timeout);
+                if (socket) { try { socket.close(); } catch (e) {} }
+                if (timeout) clearTimeout(timeout);
                 if (err) reject(err); else resolve(val);
             };
 
@@ -207,7 +249,7 @@ class SelfAddress {
             for (let i = 8; i < 20; i++) req[i] = Math.floor(Math.random() * 256);
             const txId = req.slice(8, 20);
 
-            const socket = dgram.createSocket(socketType);
+            socket = dgram.createSocket(socketType);
             socket.on('error', (err) => done(null, err));
             socket.on('message', (msg) => {
                 try {
@@ -218,7 +260,7 @@ class SelfAddress {
                 }
             });
 
-            const timeout = setTimeout(() => done(null, new Error('STUN timeout')), 3000);
+            timeout = setTimeout(() => done(null, new Error('STUN timeout')), 3000);
 
             const fire = () => socket.send(req, port, dest, (err) => { if (err) done(null, err); });
             if (localAddress) {
