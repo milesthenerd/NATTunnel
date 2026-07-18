@@ -30,6 +30,7 @@
 const crypto = require('crypto');
 const { RTCPeerConnection, CandidatePairState } = require('werift');
 const { Config } = require('./constants');
+const selfAddress = require('./self-address');
 
 // All NAT-test settings live in constants.js's Config block — see there for
 // the env-var overrides each one supports.
@@ -63,10 +64,18 @@ async function handleOffer(req, res) {
             // Empty iceServers: server emits host candidates only. The browser
             // does its own STUN/TURN gathering via the iceServers it got from
             // /nat-test/config.
+            // Behind 1:1/cloud NAT the OS default-source is a PRIVATE local IP (e.g. 10.0.0.x), so werift's
+            // host candidates would advertise an address the browser can't reach → ICE times out ("blocked").
+            // Reuse the PUBLIC IPv4 already discovered by self-address.js (STUN / env override) and advertise
+            // it as an additional host candidate so the browser gets a reachable one. Read at request time
+            // (not import) because STUN discovery is async. On a directly-assigned-public-IP host this is the
+            // same as the local addr — harmless. Empty (discovery not done yet) → omit, no worse than before.
+            const advertiseIp = selfAddress.publicIPv4;
             const pc = new RTCPeerConnection({
                 iceServers: [],
                 iceUseIpv6: false,
                 icePortRange: [Config.NAT_TEST_ICE_PORT_MIN, Config.NAT_TEST_ICE_PORT_MAX],
+                iceAdditionalHostAddresses: advertiseIp ? [advertiseIp] : undefined,
             });
 
             debugLog(`[nat-webrtc/${sessionId}] new session`);
