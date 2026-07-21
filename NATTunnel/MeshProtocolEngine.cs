@@ -581,6 +581,10 @@ internal class MeshProtocolEngine
     /// <summary>RFC 5780 mapping/filtering behavior (v4), from a v2+ server's two-IP test. Null on a
     /// v1 server. AddressDependent-or-worse mapping ⇒ this peer must relay (endpoint not P2P-usable).</summary>
     private MappingBehavior? detectedMappingBehavior;
+    /// <summary>Whether this client can use the ICMP transport tier (has an available capture backend).
+    /// Computed once (probing sockets/Npcap is not free) and advertised in every MeshJoinRequest so the
+    /// engine can gate the tier on BOTH peers being capable. See <see cref="Icmp.IcmpCapture.AnyCaptureAvailable"/>.</summary>
+    private readonly bool localIcmpCapable = Icmp.IcmpCapture.AnyCaptureAvailable();
     private FilteringBehavior? detectedFilteringBehavior;
 
     /// <summary>Applies a NATTypeResponse: stores the v4 verdict (if present) or the v6 verdict
@@ -758,6 +762,10 @@ internal class MeshProtocolEngine
     private Dictionary<int, string> connectionIDToPeerID = new Dictionary<int, string>();
     private Dictionary<int, string> peerMeshIPs = new Dictionary<int, string>();
     private int pendingTunnelCount = 0;
+    // Peers we currently have an in-flight ICMP-transport punch attempt toward (Tier-2, the both-symmetric
+    // direct-connect path). Guards against launching a duplicate attempt on every discovery poll while one is
+    // still punching. Cleared on punch success (a tunnel registers) or failure/timeout (relay can proceed).
+    private readonly HashSet<string> pendingIcmpAttempts = new HashSet<string>();
     private Dictionary<string, List<MediationMessage>> deferredIntroductions = new Dictionary<string, List<MediationMessage>>();
 
     /// <summary>
@@ -909,7 +917,17 @@ internal class MeshProtocolEngine
         }
         catch (SocketException ex)
         {
-            Console.Error.WriteLine($"[Mesh] Cannot bind mesh control port {meshControlPort}/UDP — another instance may already be running. ({ex.Message})");
+            // Port already held — almost always a PREVIOUS/zombie instance of this app still running (it also
+            // leaves the WireGuard service half-torn-down, hence the "service already deleted" cleanup line). Surface
+            // this through the NORMAL log + lastError so the GUI SHOWS it, instead of a silent stderr write + return
+            // that reads as a mystery "connected then immediately exited" (WG inits fine, then Run() bails here
+            // before any mesh activity). Set ConfigError so the GUI reflects a real, actionable state.
+            string msg = $"Mesh control port {meshControlPort}/UDP is already in use — another instance of this app " +
+                         $"is likely still running. Close it (or kill the leftover process) and reconnect. ({ex.SocketErrorCode})";
+            context.Log(LogLevel.Error, $"[Mesh] {msg}");
+            lastError = msg;
+            lastErrorKind = "PortInUse";
+            context.ConnectionState = MeshConnectionState.Disconnected;
             return;
         }
 
@@ -1504,6 +1522,7 @@ internal class MeshProtocolEngine
                                 PeerID = peerID.ToString(),
                                 NATType = detectedNatType,
                                 NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
+                                IcmpCapable = localIcmpCapable,  // gates the ICMP transport tier (both peers must be capable)
                                 PrivateAddressString = meshIP,
                                 AuthToken = authToken,
                                 ProtocolVersion = MediationProtocol.ClientVersion,
@@ -2193,6 +2212,7 @@ internal class MeshProtocolEngine
                                                 PeerID = peerID.ToString(),
                                                 NATType = detectedNatType,
                                                 NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
+                                                IcmpCapable = localIcmpCapable,  // gates the ICMP transport tier (both peers must be capable)
                                                 PrivateAddressString = meshIP,
                                                 AuthToken = authToken,
                                                 ProtocolVersion = MediationProtocol.ClientVersion,
@@ -2363,6 +2383,7 @@ internal class MeshProtocolEngine
                                             PeerID = peerID.ToString(),
                                             NATType = detectedNatType,
                                             NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
+                                            IcmpCapable = localIcmpCapable,  // gates the ICMP transport tier (both peers must be capable)
                                             PrivateAddressString = meshIP,
                                             AuthToken = authToken,
                                             ProtocolVersion = MediationProtocol.ClientVersion,
@@ -2651,6 +2672,7 @@ internal class MeshProtocolEngine
             // FAMILY-AWARE: a v6-primary peer that is symmetric-on-v6 must not be elected introducer for
             // a pair that will connect over v6, even if its v4 type looks introducer-eligible.
             NATTypeV6 = detectedNatTypeV6,
+            IcmpCapable = localIcmpCapable,  // gates the ICMP transport tier (both peers must be capable)
             PrivateAddressString = meshIP,
             AuthToken = authToken,
             ProtocolVersion = MediationProtocol.ClientVersion,
@@ -3482,6 +3504,11 @@ internal class MeshProtocolEngine
             string peerMeshIP = peerObj.TryGetProperty("meshIP", out JsonElement meshIPElement) ? meshIPElement.GetString() : null;
             int peerNatTypeInt = peerObj.TryGetProperty("natType", out JsonElement natEl) ? natEl.GetInt32() : -1;
             int peerNatTypeV6Int = peerObj.TryGetProperty("natTypeV6", out JsonElement natV6El) ? natV6El.GetInt32() : -1;
+            // Whether the peer can use the ICMP transport tier. Absent (v1 peer / old server) ⇒ not capable.
+            bool peerIcmpCapable = peerObj.TryGetProperty("icmpCapable", out JsonElement icmpEl)
+                && icmpEl.ValueKind == JsonValueKind.True;
+            // Both peers capable ⇒ the ICMP tier is a candidate for a both-symmetric pair (Phase 4 uses this).
+            bool bothIcmpCapable = localIcmpCapable && peerIcmpCapable;
             int peerMinVersion = peerObj.TryGetProperty("peerMinVersion", out JsonElement pminEl) ? pminEl.GetInt32() : 1;
             int peerMaxVersion = peerObj.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
             string peerIdentityPublicKey = peerObj.TryGetProperty("identityPublicKey", out JsonElement idElD) ? idElD.GetString() : null;
@@ -3553,6 +3580,19 @@ internal class MeshProtocolEngine
                 else
                 {
                     // No punchable family and nothing pending → both symmetric everywhere they can meet.
+                    // TIER 2: this is EXACTLY the case the ICMP transport exists for. If BOTH peers can capture
+                    // ICMP, attempt a direct ICMP hole-punch instead of relaying. The punch is peer-symmetric
+                    // (both sides spray + listen), so no extra coordination is needed — the other peer reaches
+                    // this same branch on its own poll and attempts concurrently. On success an ICMP-backed
+                    // tunnel registers; on failure/timeout the pair still relays via the normal introducer flow.
+                    if (bothIcmpCapable)
+                    {
+                        TryStartIcmpTunnel(targetPeerID, peerMeshIP, peerEndpoint);
+                        // Don't send the bootstrap ConnectionRequest (that path only does UDP punches, which
+                        // can't work here). The relay fallback is driven by the introducer flow independently,
+                        // so skipping the request doesn't strand the pair if ICMP fails.
+                        continue;
+                    }
                     context.Log(LogLevel.Debug, $"[Mesh] Skipping ConnectionRequest to {targetPeerID} — both symmetric on every shared family " +
                         $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}); no direct punch possible, needs relay");
                     continue;
@@ -3591,6 +3631,142 @@ internal class MeshProtocolEngine
             writeStream.Flush();
             pendingConnectionRequests[targetPeerID] = DateTime.UtcNow;
         }
+    }
+
+    /// <summary>
+    /// TIER 2 — attempt a direct ICMP hole-punch to a both-symmetric peer both peers can capture ICMP for.
+    /// Non-blocking: spins up an IcmpTransport, and on PUNCH SUCCESS builds an ICMP-backed Tunnel wired into
+    /// the same post-connect flow (Noise handshake + activePeerTunnels registration) a UDP tunnel produces.
+    /// On failure/timeout the pair simply isn't connected via ICMP — the relay path (introducer flow) still
+    /// applies, so ICMP is purely additive and never strands a pair that would otherwise relay.
+    /// </summary>
+    private void TryStartIcmpTunnel(string remotePeerID, string remoteMeshIP, string remoteEndpointStr)
+    {
+        // Guard: one in-flight attempt per peer, and skip if already connected.
+        lock (meshLock)
+        {
+            if (activePeerTunnels.ContainsKey(remotePeerID)) return;
+            if (!string.IsNullOrEmpty(remoteMeshIP) && activePeerTunnels.ContainsKey(remoteMeshIP)) return;
+            if (!pendingIcmpAttempts.Add(remotePeerID)) return; // already attempting
+        }
+
+        if (!EndpointUtils.TryParseEndpoint(remoteEndpointStr, out var remoteEp))
+        {
+            lock (meshLock) { pendingIcmpAttempts.Remove(remotePeerID); }
+            return;
+        }
+
+        context.Log(LogLevel.Debug, $"[Mesh][ICMP] Attempting direct ICMP hole-punch to {remotePeerID} at {remoteEp} (both-symmetric, both ICMP-capable)");
+
+        // The post-punch transport is now SYMMETRIC: both peers ping AND both answer the other's pings with data
+        // as matched replies (see IcmpTransport). This flag no longer drives behavior — it only gives the two
+        // peers OPPOSITE, stable rx-diagnostic labels ("P"/"R") so their logs are distinguishable side-by-side.
+        bool rxLabelP = string.CompareOrdinal(peerID.ToString(), remotePeerID) > 0;
+
+        System.Threading.Tasks.Task.Run(async () =>
+        {
+            var transport = new Icmp.IcmpTransport(remoteEp, rxLabelP, punchTimeout: TimeSpan.FromSeconds(25));
+            bool punched = false;
+            try
+            {
+                punched = await transport.StartAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                context.Log(LogLevel.Error, $"[Mesh][ICMP] Punch attempt to {remotePeerID} threw: {ex.Message}");
+            }
+
+            if (!punched)
+            {
+                if (!transport.CaptureAvailable)
+                    context.Log(LogLevel.Debug, $"[Mesh][ICMP] Capture unavailable locally — ICMP tier unusable; relay will handle {remotePeerID}");
+                else
+                    context.Log(LogLevel.Debug, $"[Mesh][ICMP] Punch to {remotePeerID} timed out — falling back to relay");
+                transport.Dispose();
+                lock (meshLock) { pendingIcmpAttempts.Remove(remotePeerID); }
+                return;
+            }
+
+            context.Log(LogLevel.Debug, $"[Mesh][ICMP] PUNCHED {remotePeerID} — building ICMP-backed tunnel");
+
+            var capturedPeerID = remotePeerID;
+            var capturedMeshIP = remoteMeshIP;
+            Tunnel icmpTunnel = null;
+            icmpTunnel = new Tunnel(
+                onConnectionFailure: () =>
+                {
+                    context.Log(LogLevel.Error, $"[Mesh][ICMP] Tunnel for {capturedPeerID} failed — cleaning up");
+                    lock (meshLock)
+                    {
+                        activePeerTunnels.Remove(capturedPeerID);
+                        if (!string.IsNullOrEmpty(capturedMeshIP)) activePeerTunnels.Remove(capturedMeshIP);
+                        pendingIcmpAttempts.Remove(capturedPeerID);
+                    }
+                    if (!string.IsNullOrEmpty(capturedMeshIP) && IPAddress.TryParse(capturedMeshIP, out var mip))
+                    {
+                        var hp = host.GetPeer(mip);
+                        if (hp != null) host.RemovePeer(hp.ConnectionId);
+                    }
+                    System.Threading.Interlocked.Increment(ref metricTunnelsFailed);
+                },
+                meshPeerEndpoint: remoteEndpointStr,
+                sharedClientID: peerID,
+                ownMeshIP: meshIP,
+                icmpTransport: transport,
+                onConnectionComplete: () =>
+                {
+                    context.Log(LogLevel.Debug, $"[Mesh][ICMP] Tunnel for {capturedPeerID} up (ICMP channel)");
+                    System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
+                    lock (meshLock)
+                    {
+                        pendingIcmpAttempts.Remove(capturedPeerID);
+                        if (!string.IsNullOrEmpty(capturedMeshIP))
+                        {
+                            completedTunnelMeshIPs.Add(capturedMeshIP);
+                            tunnelCompletedAt[capturedMeshIP] = DateTime.UtcNow;
+                        }
+                    }
+                    // NOTE: no direct SendMeshVersionHello here. In daemon mode mesh-control rides INSIDE
+                    // WireGuard (which is now encapsulated over ICMP), so it flows once the WG handshake
+                    // completes — sending to the raw mesh IP before that has no route ("invalid argument").
+                    // The version hello is re-sent on the mesh ping loop anyway.
+                }
+            );
+
+            // Wire into the host (Noise/proxy setup) + register into the tunnel maps — same as the UDP path.
+            host?.ConfigureNewTunnel(icmpTunnel, remotePeerID, remoteMeshIP);
+            lock (meshLock)
+            {
+                activeConnectionTunnels[capturedPeerID.GetHashCode()] = icmpTunnel;
+                activePeerTunnels[remotePeerID] = icmpTunnel;
+                if (!string.IsNullOrEmpty(remoteMeshIP))
+                {
+                    activePeerTunnels[remoteMeshIP] = icmpTunnel;
+                    peerMeshIPs[capturedPeerID.GetHashCode()] = remoteMeshIP;
+                }
+            }
+
+            // Populate the status roster for this peer. The ICMP path bypasses the mediation/introducer message
+            // handlers that normally fill peerInfoByMeshIP, so the GUI would otherwise show "Unknown" for the
+            // peer's ID / NAT / endpoint even though the tunnel is up. Register what we know (both sides are
+            // Symmetric — that's the gate for taking this path); preserve any richer entry a discovery message
+            // already wrote (identity key, versions) by only filling gaps.
+            if (!string.IsNullOrEmpty(remoteMeshIP))
+            {
+                if (peerInfoByMeshIP.TryGetValue(remoteMeshIP, out var prior))
+                {
+                    peerInfoByMeshIP[remoteMeshIP] = (
+                        string.IsNullOrEmpty(prior.peerID) ? remotePeerID : prior.peerID,
+                        string.IsNullOrEmpty(prior.endpoint) ? remoteEndpointStr : prior.endpoint,
+                        prior.natType == NATType.Unknown ? NATType.Symmetric : prior.natType,
+                        prior.peerMinVersion, prior.peerMaxVersion, prior.identityPublicKey, prior.endpointV6);
+                }
+                else
+                {
+                    peerInfoByMeshIP[remoteMeshIP] = (remotePeerID, remoteEndpointStr, NATType.Symmetric, 1, 1, null, null);
+                }
+            }
+        });
     }
 
     private void DrainInboundQueues()
@@ -5178,6 +5354,7 @@ internal class MeshProtocolEngine
                     PeerID = peerID.ToString(),
                     NATType = detectedNatType,
                     NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
+                    IcmpCapable = localIcmpCapable,  // gates the ICMP transport tier (both peers must be capable)
                     PrivateAddressString = meshIP,
                     AuthToken = authToken,
                     ProtocolVersion = MediationProtocol.ClientVersion,
@@ -5366,6 +5543,7 @@ internal class MeshProtocolEngine
                         PeerID = peerID.ToString(),
                         NATType = detectedNatType,
                         NATTypeV6 = detectedNatTypeV6,   // family-aware introducer election (see primary join)
+                        IcmpCapable = localIcmpCapable,  // gates the ICMP transport tier (both peers must be capable)
                         PrivateAddressString = meshIP,
                         AuthToken = authToken,
                         ProtocolVersion = MediationProtocol.ClientVersion,

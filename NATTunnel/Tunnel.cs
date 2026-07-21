@@ -56,6 +56,13 @@ internal class Tunnel : IDisposable
     public IPAddress privateIP = null;
     private WireGuardTunnel wireguardTunnel;
 
+    // ICMP-transport mode (the direct-connect path for full-range both-symmetric pairs). When non-null, this
+    // tunnel is backed by a pre-punched ICMP channel instead of the UDP socket: SendDataPacket routes through
+    // it, and inbound ICMP payloads are fed into the SAME ProcessUdpPacketBody dispatch. The entire UDP
+    // punch/probe machinery is bypassed in this mode. Additive — a null value is the normal UDP path.
+    private Icmp.IcmpTransport icmpTransport;
+    private bool IsIcmpBacked => icmpTransport != null;
+
     /// <summary>
     /// Raised when a non-WireGuard, non-mediation binary packet arrives from the peer.
     /// Only fires when wireguardTunnel is null (i.e., embedded/library mode, no kernel WG).
@@ -81,6 +88,9 @@ internal class Tunnel : IDisposable
     private int maxRetryAttempts = 1;
     private int retryCooldown = 10;  // seconds before retrying after failure
     private bool wgKeySent = false;  // Track if we've already sent our WireGuard public key
+    private bool wgPeerAdded = false; // Set once we've added the peer's WG key
+    private volatile bool wgHandshakeSeen = false; // Set on first inbound WG-proto byte — stops the key-resend timer
+    private Timer wgKeyResendTimer;   // ICMP-backed only: periodically re-sends our WG key until the peer is added
     private SHA256 shaHashGen;
     private Guid clientID;
     private Action onConnectionFailure; // Callback for when connection fails completely
@@ -102,7 +112,7 @@ internal class Tunnel : IDisposable
     private IPAddress ownMeshIP = null; // Our own mesh IP
     private IPAddress peerMeshIP = null; // Remote peer's mesh IP
 
-    public Tunnel(Action onConnectionFailure = null, UdpClient sharedUdpClient = null, string meshPeerEndpoint = null, bool retryInPlace = false, Guid? sharedClientID = null, string ownMeshIP = null, Action onConnectionComplete = null)
+    public Tunnel(Action onConnectionFailure = null, UdpClient sharedUdpClient = null, string meshPeerEndpoint = null, bool retryInPlace = false, Guid? sharedClientID = null, string ownMeshIP = null, Action onConnectionComplete = null, Icmp.IcmpTransport icmpTransport = null)
     {
         connectionTimeout = maxConnectionTimeout;
         shaHashGen = SHA256.Create();
@@ -129,6 +139,42 @@ internal class Tunnel : IDisposable
         // Parse mesh peer endpoint if provided — handles IPv4, [IPv6]:port, and v4-mapped forms
         if (meshPeerEndpoint != null && EndpointUtils.TryParseEndpoint(meshPeerEndpoint, out var parsedPeerEp))
             this.meshPeerEndpoint = parsedPeerEp;
+
+        // ICMP-BACKED MODE: this tunnel rides a pre-punched ICMP channel instead of the UDP socket. The
+        // caller (the engine's Tier-2 branch) has already run IcmpTransport.StartAsync() and it PUNCHED, so
+        // the tunnel is effectively already connected. We skip the entire UDP punch machinery: mark connected,
+        // set the target endpoint (so ProcessUdpPacketBody's IP checks pass), wire the transport's inbound
+        // event into the SAME dispatch a UDP receive uses, and fire onConnectionComplete right away.
+        if (icmpTransport != null)
+        {
+            this.icmpTransport = icmpTransport;
+            // We still keep a udpClient object around only because a few lifecycle/dispose paths reference it;
+            // it is never used to send/receive in this mode. Use the shared one if given, else a throwaway.
+            udpClient = sharedUdpClient ?? SocketUtils.CreateUdpClient();
+            ownsUdpClient = sharedUdpClient == null;
+
+            // Synthesize the resolved peer endpoint from the ICMP transport's peer (the punch target). The
+            // envelope-dispatch IP/port checks in ProcessUdpPacketBody compare against these.
+            var icmpPeer = icmpTransport.PeerEndpoint;
+            targetPeerIp = icmpPeer.Address;
+            targetPeerPort = icmpPeer.Port > 0 ? icmpPeer.Port : 1; // non-zero so SendDataPacket's guard passes
+            connected = true;
+
+            // Inbound ICMP payloads flow into the exact same dispatch as UDP packets, so all envelope handling
+            // (0x01 data / 0x20 mesh-control / 0x10 handshake / WG bytes in daemon mode) is reused verbatim.
+            icmpTransport.PacketReceived += OnIcmpPayload;
+
+            initialConnectionTimer = new Timer(1000) { AutoReset = true, Enabled = false };
+            initialConnectionTimer.Elapsed += ConnectionTimer;
+
+            // The channel is already open — signal completion so the engine wires up Noise + registration,
+            // exactly as it does when a UDP tunnel reaches 'connected'. In DAEMON mode the WireGuard key
+            // exchange is then kicked from SetWireGuardTunnel (called by host.ConfigureNewTunnel after this
+            // ctor returns) — because an ICMP tunnel's "connected" moment is the punch, not a UDP hole-punch
+            // threshold, so it never hits the UDP path's key-send trigger.
+            try { onConnectionComplete?.Invoke(); } catch (Exception ex) { Program.Log(LogLevel.Error, ex.ToString()); }
+            return;
+        }
 
         // Use shared UDP client if provided, otherwise create a new one
         if (sharedUdpClient != null)
@@ -192,6 +238,14 @@ internal class Tunnel : IDisposable
     public void SetWireGuardTunnel(WireGuardTunnel tunnel)
     {
         wireguardTunnel = tunnel;
+        // For an ICMP-backed tunnel, THIS is the moment daemon mode becomes possible: the ICMP channel is
+        // already punched (connected=true from the ctor) and now WireGuard is wired in. The UDP path kicks the
+        // WG key exchange on hole-punch-threshold, but an ICMP tunnel never gets that trigger — so kick it here.
+        if (IsIcmpBacked)
+        {
+            Program.Log(LogLevel.Debug, $"[Mesh][ICMP] SetWireGuardTunnel on ICMP tunnel (connected={connected}) — kicking WG key exchange");
+            if (connected) SendOurWireGuardKey();
+        }
     }
 
     /// <summary>
@@ -731,32 +785,7 @@ internal class Tunnel : IDisposable
                 }
 
                 // Send WireGuard public key to peer immediately
-                if (wireguardTunnel != null && !wgKeySent)
-                {
-                    wgKeySent = true;
-                    try
-                    {
-                        string configPath = wireguardTunnel.GetConfigPath();
-                        string wgPublicKey = WireGuardConfig.GetPublicKeyFromConfig(configPath);
-
-                        MediationMessage wgMessage = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
-                        wgMessage.WireGuardPublicKey = wgPublicKey;
-                        wgMessage.WireGuardPublicKeyHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(wgPublicKey));
-
-                        // Include our mesh IP
-                        if (ownMeshIP != null)
-                        {
-                            wgMessage.SetPrivateAddress(ownMeshIP);
-                        }
-
-                        byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(wgMessage.Serialize());
-                        udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
-                    }
-                    catch (Exception wgEx)
-                    {
-                        Program.Log(LogLevel.Error, $"[Mesh] Error sending WireGuard public key: {wgEx.Message}");
-                    }
-                }
+                SendOurWireGuardKey();
             }
         }
 
@@ -788,6 +817,13 @@ internal class Tunnel : IDisposable
                 break;
             case MediationMessageType.WireGuardPublicKeyExchange:
                 {
+                    // Already added the peer? Ignore repeat key messages. The lossy ICMP channel + the peer's
+                    // resend timer deliver this many times; re-running AddPeer for an already-added peer replaces
+                    // the WireGuard peer and RESETS its handshake state, so WG never completes (observed: key
+                    // exchange loops every 2s, only json/mesh-ctrl crosses, never wg-proto). Add once, then let
+                    // WireGuard handshake in peace.
+                    if (wgPeerAdded) break;
+
                     // Only process if this message is meant for THIS tunnel.
                     // All mesh tunnels share the same UDP socket, so we must filter.
                     //
@@ -850,17 +886,22 @@ internal class Tunnel : IDisposable
                                     // Refuse to add a peer whose key matches our own — wg.exe silently
                                     // no-ops in that case, leaving the interface peerless and every send broken.
                                     string ourWgKey = WireGuardConfig.GetPublicKeyFromConfig(wireguardTunnel.GetConfigPath());
+                                    Program.Log(LogLevel.Debug, $"[WG] key-exchange compare: RECEIVED={receivedMessage.WireGuardPublicKey?.Substring(0, Math.Min(12, receivedMessage.WireGuardPublicKey?.Length ?? 0))}... vs OURS={ourWgKey?.Substring(0, Math.Min(12, ourWgKey?.Length ?? 0))}...");
                                     if (receivedMessage.WireGuardPublicKey == ourWgKey)
                                     {
                                         Program.Log($"[WG] Refusing to add peer with our own public key ({ourWgKey[..8]}...). " +
-                                                    "Likely cause: both peers share the same keys file. Delete the *_keys.txt on one peer to regenerate.");
+                                                    "This means we RECEIVED OUR OWN key back — the ICMP channel is looping our packets, OR the peer echoed our key. Not a shared-file issue if keys are unique.");
                                         break;
                                     }
 
                                     Program.Log(LogLevel.Debug, $"[WG] Adding peer: key={receivedMessage.WireGuardPublicKey.Substring(0, 8)}... ip={peerTunnelIp} endpoint={peerEndpoint}");
-                                    // Add peer with their public key and tunnel IP
-                                    // Pass our tunnel socket for proxy routing
-                                    var serverPeer = wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient);
+                                    // Add peer with their public key and tunnel IP. For an ICMP-backed tunnel,
+                                    // hand WireGuard an ICMP send delegate so its outbound packets ride the ICMP
+                                    // channel (encapsulation) instead of the UDP socket; inbound already flows
+                                    // back into WireGuard via OnIcmpPayload → ProcessUdpPacketBody → the proxy.
+                                    var serverPeer = IsIcmpBacked
+                                        ? wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient, icmpTransport.Send)
+                                        : wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient);
                                     peerAddedSuccessfully = true;
                                     ConnectionEstablished?.Invoke();
                                     onConnectionComplete?.Invoke();
@@ -888,7 +929,9 @@ internal class Tunnel : IDisposable
                                                 replyMsg.SetPrivateAddress(privateIP);
 
                                             byte[] replyBuffer = Encoding.ASCII.GetBytes(replyMsg.Serialize());
-                                            udpClient.Send(replyBuffer, replyBuffer.Length, peerEndpoint);
+                                            // ICMP-backed: send the key reply over the ICMP channel, not UDP.
+                                            if (IsIcmpBacked) icmpTransport.Send(replyBuffer);
+                                            else udpClient.Send(replyBuffer, replyBuffer.Length, peerEndpoint);
                                             Program.Log(LogLevel.Debug, $"[WG] Sent our public key back to {peerEndpoint}");
                                         }
                                         catch (Exception replyEx)
@@ -906,9 +949,14 @@ internal class Tunnel : IDisposable
                                 {
                                     // Mark connection as complete
                                     connected = true;
+                                    wgPeerAdded = true;     // stop the ICMP WG-key resend timer — exchange done
+                                    StopWgKeyResend();
                                     retryAttempt = 0;  // Reset for future connections
-                                    initialConnectionTimer.Enabled = false;
-                                    connectionAttempt.Enabled = false;
+                                    // ICMP-backed tunnels never create connectionAttempt (the ICMP ctor returns
+                                    // early), so null-guard both timers — an unguarded deref here threw an NRE
+                                    // right after AddPeer, aborting completion so the tunnel never finalized.
+                                    if (initialConnectionTimer != null) initialConnectionTimer.Enabled = false;
+                                    if (connectionAttempt != null) connectionAttempt.Enabled = false;
                                     Program.Log(LogLevel.Info, "Connection established successfully!");
                                 }
                             }
@@ -976,7 +1024,101 @@ internal class Tunnel : IDisposable
     {
         if (!connected || targetPeerIp == null || targetPeerPort == 0)
             throw new InvalidOperationException("Tunnel is not connected yet.");
+        // ICMP-backed tunnels carry data over the punched ICMP channel instead of the UDP socket.
+        if (IsIcmpBacked) { icmpTransport.Send(data); return; }
         udpClient.Send(data, data.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+    }
+
+    /// <summary>
+    /// Sends OUR WireGuard public key to the peer to initiate the WG key exchange (daemon mode). Idempotent
+    /// via wgKeySent. Routes over the ICMP channel for an ICMP-backed tunnel, else the UDP socket. Called from
+    /// the UDP path on hole-punch success, AND directly from the ICMP-backed ctor (whose "connected" moment is
+    /// the punch, not a UDP-threshold crossing — so it must kick the exchange itself).
+    /// </summary>
+    private void SendOurWireGuardKey()
+    {
+        if (wireguardTunnel == null || wgKeySent)
+        {
+            Program.Log(LogLevel.Debug, $"[Mesh][ICMP] SendOurWireGuardKey skipped (wgTunnel={(wireguardTunnel != null)}, wgKeySent={wgKeySent})");
+            return;
+        }
+        wgKeySent = true;
+        EmitOurWireGuardKey();
+
+        // ICMP channel is lossy: a single key burst can drop entirely. Keep re-sending OUR key until we actually
+        // see the WireGuard handshake flowing (inbound wg-proto bytes) — NOT until WE add THEIR peer. Those are
+        // independent directions: on a receive-asymmetric NAT pair, OUR side may receive the peer's key first
+        // (and add them, setting wgPeerAdded) while the PEER has NOT yet received our key. If we stopped resending
+        // at wgPeerAdded, the peer would be stranded with no key forever (observed: one box adds the peer + stops
+        // resending; the other loops sending its own key and never gets ours). Resending until the WG handshake
+        // is actually seen guarantees the peer eventually gets our key. UDP tunnels don't need this.
+        if (IsIcmpBacked && wgKeyResendTimer == null)
+        {
+            wgKeyResendTimer = new Timer(2000) { AutoReset = true, Enabled = true };
+            wgKeyResendTimer.Elapsed += (_, _) =>
+            {
+                if (wgHandshakeSeen || disposed != 0) { StopWgKeyResend(); return; }
+                EmitOurWireGuardKey();
+            };
+        }
+    }
+
+    /// <summary>Builds and sends our WG public-key message once, over ICMP (backed) or UDP. No one-shot guard —
+    /// the caller owns whether to send; used by both the initial send and the ICMP resend timer.</summary>
+    private void EmitOurWireGuardKey()
+    {
+        try
+        {
+            string configPath = wireguardTunnel.GetConfigPath();
+            string wgPublicKey = WireGuardConfig.GetPublicKeyFromConfig(configPath);
+            string keyTag = string.IsNullOrEmpty(wgPublicKey) ? "(null)" : wgPublicKey.Substring(0, Math.Min(12, wgPublicKey.Length));
+            Program.Log(LogLevel.Debug, $"[WG] EmitOurWireGuardKey: sending OUR pubkey={keyTag}...");
+
+            MediationMessage wgMessage = new MediationMessage(MediationMessageType.WireGuardPublicKeyExchange);
+            wgMessage.WireGuardPublicKey = wgPublicKey;
+            wgMessage.WireGuardPublicKeyHash = shaHashGen.ComputeHash(Encoding.UTF8.GetBytes(wgPublicKey));
+            if (ownMeshIP != null) wgMessage.SetPrivateAddress(ownMeshIP);
+
+            byte[] wgKeyBuffer = Encoding.ASCII.GetBytes(wgMessage.Serialize());
+            // ICMP-backed tunnels send the key over the ICMP channel (UDP won't reach a both-symmetric peer).
+            if (IsIcmpBacked)
+            {
+                Program.Log(LogLevel.Debug, $"[Mesh][ICMP] Sending WG public key ({wgKeyBuffer.Length}B) over ICMP channel to {targetPeerIp}");
+                icmpTransport.Send(wgKeyBuffer);
+            }
+            else udpClient.Send(wgKeyBuffer, wgKeyBuffer.Length, new IPEndPoint(targetPeerIp, targetPeerPort));
+        }
+        catch (Exception wgEx)
+        {
+            Program.Log(LogLevel.Error, $"[Mesh] Error sending WireGuard public key: {wgEx.Message}");
+        }
+    }
+
+    private void StopWgKeyResend()
+    {
+        var t = wgKeyResendTimer;
+        wgKeyResendTimer = null;
+        if (t != null) { try { t.Enabled = false; t.Dispose(); } catch { } }
+    }
+
+    /// <summary>
+    /// Inbound bridge for the ICMP-backed mode: an ICMP payload arrived from the peer. Feed it into the SAME
+    /// envelope dispatch a UDP packet uses (ProcessUdpPacketBody), so 0x01/0x20/0x10/WG-bytes route identically.
+    /// The synthetic source endpoint is the ICMP peer (matches targetPeerIp/Port set in the ctor).
+    /// </summary>
+    private void OnIcmpPayload(byte[] payload)
+    {
+        if (payload == null || payload.Length == 0) return;
+        totalBytesReceived += payload.Length;
+        UpdateActivity();
+        // Classify the inbound. A WG-proto first byte (0x01-0x04) means the peer's WireGuard is talking to us —
+        // which proves the peer has OUR key. That's the real signal to stop resending our key (see the resend
+        // timer): it decouples "we added them" from "they added us", which diverge on receive-asymmetric NATs.
+        byte b0 = payload[0];
+        bool wgProto = b0 >= 1 && b0 <= 4;
+        if (wgProto && !wgHandshakeSeen) { wgHandshakeSeen = true; StopWgKeyResend(); }
+        try { ProcessUdpPacketBody(payload, new IPEndPoint(targetPeerIp, targetPeerPort)); }
+        catch (Exception ex) { Program.Log(LogLevel.Error, $"[ICMP] payload dispatch error: {ex.Message}"); }
     }
 
     /// <summary>
@@ -1070,6 +1212,15 @@ internal class Tunnel : IDisposable
             initialConnectionTimer?.Dispose();
             connectionAttempt?.Stop();
             connectionAttempt?.Dispose();
+            StopWgKeyResend();
+
+            // Tear down the ICMP transport (unsubscribe first so no inbound fires mid-dispose).
+            if (icmpTransport != null)
+            {
+                try { icmpTransport.PacketReceived -= OnIcmpPayload; } catch { }
+                try { icmpTransport.Dispose(); } catch { }
+                icmpTransport = null;
+            }
 
             // Close UDP client only if we own it (not shared)
             if (ownsUdpClient)

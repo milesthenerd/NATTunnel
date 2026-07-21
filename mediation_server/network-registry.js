@@ -43,7 +43,7 @@ class NetworkRegistry {
      * @param {string} meshIP - Peer's mesh IP address (optional)
      * @returns {object[]} List of other peers in the same network
      */
-    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1, identityPublicKey = null, endpointV6 = null, natTypeV6 = -1) {
+    joinNetwork(networkID, peerID, socket, endpoint, natType, meshIP = null, localIP = null, localPort = null, peerMinVersion = 1, peerMaxVersion = 1, identityPublicKey = null, endpointV6 = null, natTypeV6 = -1, icmpCapable = false) {
         if (!networkID || !peerID) {
             throw new Error('networkID and peerID are required');
         }
@@ -70,6 +70,7 @@ class NetworkRegistry {
             existingPeer.endpoint = endpoint;
             existingPeer.natType = natType;
             existingPeer.natTypeV6 = natTypeV6;
+            existingPeer.icmpCapable = icmpCapable;
             existingPeer.meshIP = meshIP;
             existingPeer.localIP = localIP;
             existingPeer.localPort = localPort;
@@ -86,6 +87,7 @@ class NetworkRegistry {
                 endpoint,
                 natType,
                 natTypeV6,
+                icmpCapable,
                 meshIP,
                 localIP,
                 localPort,
@@ -104,6 +106,7 @@ class NetworkRegistry {
             endpoint,
             natType,
             natTypeV6,
+            icmpCapable,
             meshIP,
             localIP,
             localPort,
@@ -124,6 +127,7 @@ class NetworkRegistry {
                     endpoint: peer.endpoint,
                     natType: peer.natType,
                     natTypeV6: peer.natTypeV6,
+                    icmpCapable: peer.icmpCapable,
                     meshIP: peer.meshIP,
                     localIP: peer.localIP,
                     localPort: peer.localPort,
@@ -227,6 +231,7 @@ class NetworkRegistry {
                 endpoint: member.endpoint,
                 natType: member.natType,
                 natTypeV6: member.natTypeV6,
+                icmpCapable: member.icmpCapable,
                 meshIP: member.meshIP,
                 localIP: member.localIP,
                 localPort: member.localPort,
@@ -337,6 +342,7 @@ class NetworkRegistry {
             endpoint: peer.endpoint,
             natType: peer.natType,
             natTypeV6: peer.natTypeV6,
+            icmpCapable: peer.icmpCapable,   // ICMP-tier capability for both-symmetric direct-connect gating
             endpointV6: peer.endpointV6,   // needed by family-aware canIntroduceNewPeer (v6 replacement path)
             peerMinVersion: peer.peerMinVersion,
             peerMaxVersion: peer.peerMaxVersion,

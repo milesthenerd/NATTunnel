@@ -4,6 +4,9 @@
     <PackageReference Include="tomlyn" Version="0.16.2" />
     <PackageReference Include="Noise.NET" Version="1.0.0" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+    <!-- Managed libpcap/Npcap wrapper for the optional NpcapCapture backend (user-installed Npcap = the
+         unprivileged Windows ICMP-capture path; SharpPcap itself is a wrapper, no driver bundled). -->
+    <PackageReference Include="SharpPcap" Version="6.3.1" />
   </ItemGroup>
 
   <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish.
@@ -13,6 +16,21 @@
     <Content Include="..\lib\win-x64\wireguard.dll" Pack="false">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>wireguard.dll</Link>
+    </Content>
+  </ItemGroup>
+
+  <!-- WinDivert (LGPLv3, unmodified official v2.2.2 binaries) — the ICMP-transport capture driver on Windows.
+       Loaded at runtime via P/Invoke (dynamic link keeps us LGPLv3-compliant; do NOT static-link or modify).
+       Pack="false": embedded consumers who don't enable the ICMP transport don't need it; the daemon bundles
+       it via dist/ packaging. See THIRD-PARTY-NOTICES.md for attribution + source pointer. -->
+  <ItemGroup>
+    <Content Include="..\lib\win-x64\WinDivert.dll" Pack="false">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>WinDivert.dll</Link>
+    </Content>
+    <Content Include="..\lib\win-x64\WinDivert64.sys" Pack="false">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>WinDivert64.sys</Link>
     </Content>
   </ItemGroup>
 

@@ -496,16 +496,17 @@ namespace NATTunnel
             return AddPeer(publicKey, endpoint, isPersistent, null);
         }
 
-        public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, bool isPersistent, UdpClient tunnelSocket)
+        public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, bool isPersistent, UdpClient tunnelSocket, Action<byte[]> icmpSend = null)
         {
             var peer = peerManager.AddPeer(publicKey, endpoint, isPersistent);
             Program.Log(LogLevel.Debug, $"Added peer dynamically: {publicKey.Substring(0, 8)}... -> {peer.PrivateAddress} (proxy port: {peer.ProxyPort}, total peers: {peerManager.GetPeerCount()})");
 
-            // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support
-            // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture)
+            // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support.
+            // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture), OR an
+            // icmpSend delegate for an ICMP-backed peer — then WireGuard is encapsulated over the ICMP channel.
             if (udpProxy != null)
             {
-                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress, tunnelSocket);
+                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress, tunnelSocket, icmpSend);
             }
             else
             {
@@ -586,16 +587,17 @@ namespace NATTunnel
             return AddPeer(publicKey, endpoint, privateAddress, isPersistent, null);
         }
 
-        public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, bool isPersistent, UdpClient tunnelSocket)
+        public WireGuardPeer AddPeer(string publicKey, IPEndPoint endpoint, IPAddress privateAddress, bool isPersistent, UdpClient tunnelSocket, Action<byte[]> icmpSend = null)
         {
             var peer = peerManager.AddPeer(publicKey, endpoint, privateAddress, isPersistent);
             Program.Log(LogLevel.Debug, $"Added peer dynamically: {publicKey.Substring(0, 8)}... -> {privateAddress} (proxy port: {peer.ProxyPort}, total peers: {peerManager.GetPeerCount()})");
 
-            // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support
-            // Pass the specific tunnel socket for this peer (critical for multi-tunnel architecture)
+            // Register peer with UDP proxy for outbound routing WITH tunnel IP for multi-peer support.
+            // Pass the specific tunnel socket for this peer (multi-tunnel architecture), OR an icmpSend delegate
+            // for an ICMP-backed peer — then WireGuard is encapsulated over the ICMP channel.
             if (udpProxy != null)
             {
-                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress, tunnelSocket);
+                udpProxy.RegisterPeer(endpoint, peer.ProxyPort, peer.PrivateAddress, tunnelSocket, icmpSend);
             }
             else
             {

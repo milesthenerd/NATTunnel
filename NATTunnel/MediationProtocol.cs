@@ -15,8 +15,12 @@ internal static class MediationProtocol
     /// deliver MappingBehavior on NATTypeResponse. Backward-compatible (the new probe/fields are
     /// additive + self-gated on the server advertising a second IP), but bumped to anchor the first
     /// substantive evolution of the mediation protocol since v1.
+    /// v3 (2026-07-20): ICMP-transport capability — client advertises IcmpCapable in MeshJoinRequest and the
+    /// server echoes it in peer lists, so a both-symmetric pair where BOTH peers can capture ICMP can attempt
+    /// the direct ICMP hole-punch tier instead of relaying. Additive + self-gated (absent ⇒ false ⇒ no ICMP
+    /// tier ⇒ existing relay behavior), so v2 clients/servers are unaffected.
     /// </summary>
-    public const int ClientVersion = 2;
+    public const int ClientVersion = 3;
 
     /// <summary>
     /// Peer-to-peer wire-format version range this build supports. Each peer sends its range

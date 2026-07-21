@@ -36,6 +36,15 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public NATType? NATTypeV6 { get; set; }
     /// <summary>
+    /// Whether this client can use the ICMP transport tier (direct-connect for full-range both-symmetric
+    /// pairs). True only when the client has an available ICMP-capture backend (elevated WinDivert, a
+    /// user-installed Npcap, or CAP_NET_RAW on Linux). Advertised in MeshJoinRequest and echoed by the server
+    /// in the peer list so the engine can gate the ICMP tier on BOTH peers being capable. Nullable/additive:
+    /// absent from v1 clients / older servers ⇒ treated as not-capable ⇒ never offered the ICMP tier.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool? IcmpCapable { get; set; }
+    /// <summary>
     /// RFC 5780 MAPPING behavior (IPv4), delivered on NATTypeResponse by a v2+ mediation server that
     /// ran the two-IP test. Nullable/additive — absent from a v1 server or before the second-IP probe
     /// settles. AddressDependent-or-worse ⇒ the server-observed endpoint won't work peer-to-peer ⇒

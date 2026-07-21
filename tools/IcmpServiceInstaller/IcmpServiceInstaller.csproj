@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- nattunnel-icmp-service.exe — the standalone WinDivert persistent-service registrator an embedded
+       integrator runs ONCE (elevated) from their installer, so the unprivileged host game can use the ICMP
+       transport at runtime. Bundled with the NuGet under tools/. Links the installer logic from the library. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>nattunnel-icmp-service</AssemblyName>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>false</SelfContained>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <!-- Manifest: request admin so double-clicking / installer-invoke triggers UAC (installing a kernel-driver
+       service is privileged). Integrators invoking from an already-elevated installer get no extra prompt. -->
+  <ItemGroup>
+    <Content Include="app.manifest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Reuse the library's installer logic (source-linked; it's public but self-contained). -->
+    <Compile Include="..\..\NATTunnel\Icmp\WinDivertServiceInstaller.cs" Link="WinDivertServiceInstaller.cs" />
+  </ItemGroup>
+
+  <!-- The driver must sit next to this exe so ResolveDriverPath finds it. -->
+  <ItemGroup>
+    <Content Include="..\..\lib\win-x64\WinDivert64.sys">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>WinDivert64.sys</Link>
+    </Content>
+    <Content Include="..\..\lib\win-x64\WinDivert.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>WinDivert.dll</Link>
+    </Content>
+  </ItemGroup>
+</Project>

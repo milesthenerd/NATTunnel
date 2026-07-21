@@ -591,6 +591,9 @@ class MessageHandler {
         // as introducer for that pair even if its other-family type looks eligible.
         const NATTypeV6 = (message.NATTypeV6 !== undefined && message.NATTypeV6 !== null)
             ? message.NATTypeV6 : NATTypes.Unknown;
+        // Whether this client can use the ICMP transport tier (has a capture backend). Absent for v1 clients
+        // ⇒ false. Stored + echoed in peer lists so a client can gate the tier on BOTH peers being capable.
+        const IcmpCapable = message.IcmpCapable === true;
         // Peer-to-peer protocol range this client supports. Grandfathered to v1
         const peerMinVersion = message.PeerMinVersion || 1;
         const peerMaxVersion = message.PeerMaxVersion || 1;
@@ -759,7 +762,8 @@ class MessageHandler {
                 peerMaxVersion,
                 identityPublicKey,     // Base64 X25519 identity pubkey for block fingerprinting
                 socketInfo.endpointV6, // Publicly-observed IPv6 endpoint, or null if no v6 route
-                NATTypeV6              // v6 NAT verdict for family-aware introducer eligibility
+                NATTypeV6,             // v6 NAT verdict for family-aware introducer eligibility
+                IcmpCapable            // whether this client can use the ICMP transport tier
             );
 
             console.log(`[MessageHandler] Peer ${PeerID} joined network ${NetworkID} (${otherPeers.length} active peers)`);

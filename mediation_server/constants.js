@@ -77,11 +77,13 @@ const StatusTypes = {
 // Client<->mediation-server wire-format compatibility window.
 // A client's `ProtocolVersion` field must be within [MIN, MAX] on MeshJoinRequest;
 // otherwise the server rejects the join with `VersionError` set on the response.
-// MAX=2 (2026-07-11): the two-IP RFC 5780 NAT test. MIN stays 1 so v1 clients are STILL ACCEPTED
-// (the new test is additive/self-gated — a v1 client just runs the legacy single-IP path).
+// MAX=2 (2026-07-11): the two-IP RFC 5780 NAT test.
+// MAX=3 (2026-07-20): ICMP-transport capability (IcmpCapable advertised in join, echoed in peer lists).
+// MIN stays 1 so v1/v2 clients are STILL ACCEPTED (both new features are additive/self-gated — an older
+// client simply doesn't advertise IcmpCapable and never gets offered the ICMP tier).
 const MediationProtocol = {
     MinSupportedClientVersion: 1,
-    MaxSupportedClientVersion: 2
+    MaxSupportedClientVersion: 3
 };
 
 // Server configuration

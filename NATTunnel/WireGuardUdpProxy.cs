@@ -76,11 +76,12 @@ internal class WireGuardUdpProxy : IDisposable
     /// Register a peer with its tunnel IP and real endpoint
     /// Creates a dedicated listener on the peer's proxy port with a specific tunnel socket
     /// </summary>
-    public void RegisterPeer(IPEndPoint peerEndpoint, int proxyPort, IPAddress tunnelIp, UdpClient peerTunnelSocket = null)
+    public void RegisterPeer(IPEndPoint peerEndpoint, int proxyPort, IPAddress tunnelIp, UdpClient peerTunnelSocket = null, Action<byte[]> icmpSend = null)
     {
         lock (proxyLock)
         {
-            // Use provided socket or fall back to shared socket
+            // Use provided socket or fall back to shared socket. For an ICMP-backed peer, icmpSend is set and
+            // the listener sends WireGuard packets through it instead of the socket.
             UdpClient socketToUse = peerTunnelSocket ?? tunnelSocket;
 
             // Check if this tunnel IP already exists with a different endpoint
@@ -101,7 +102,7 @@ internal class WireGuardUdpProxy : IDisposable
             // Create dedicated listener for this peer if it doesn't exist
             if (!peerListeners.ContainsKey(proxyPort))
             {
-                var listener = new PeerProxyListener(proxyPort, peerEndpoint, socketToUse, tunnelSocketLock);
+                var listener = new PeerProxyListener(proxyPort, peerEndpoint, socketToUse, tunnelSocketLock, icmpSend);
                 peerListeners[proxyPort] = listener;
             }
             else
@@ -305,13 +306,18 @@ internal class PeerProxyListener : IDisposable
     private readonly Task listenTask;
     private bool disposed;
     private readonly object endpointLock = new object();
+    // When set, this peer is ICMP-backed: outbound WireGuard packets are sent through the ICMP transport
+    // (icmpSend) instead of the UDP tunnelSocket. Null = the normal UDP path. This is what makes ICMP a
+    // true WireGuard ENCAPSULATOR in daemon mode — WG runs over ICMP exactly as it runs over UDP.
+    private readonly Action<byte[]> icmpSend;
 
-    public PeerProxyListener(int proxyPort, IPEndPoint peerEndpoint, UdpClient tunnelSocket, object tunnelSocketLock)
+    public PeerProxyListener(int proxyPort, IPEndPoint peerEndpoint, UdpClient tunnelSocket, object tunnelSocketLock, Action<byte[]> icmpSend = null)
     {
         this.proxyPort = proxyPort;
         this.peerEndpoint = peerEndpoint;
         this.tunnelSocket = tunnelSocket;
         this.tunnelSocketLock = tunnelSocketLock;
+        this.icmpSend = icmpSend;
         this.cancellation = new CancellationTokenSource();
 
         // Create listener for this specific port
@@ -374,6 +380,16 @@ internal class PeerProxyListener : IDisposable
                 {
                     try
                     {
+                        // ICMP-backed peer: encapsulate the WireGuard packet in the ICMP channel instead of a
+                        // UDP send. The peer's tunnel forwards received ICMP payloads back into WireGuard, so
+                        // WG runs fully over ICMP. (targetEndpoint is unused here — the ICMP transport already
+                        // knows its peer.)
+                        if (icmpSend != null)
+                        {
+                            icmpSend(result.Buffer);
+                            continue;
+                        }
+
                         UdpClient socketToUse;
                         lock (tunnelSocketLock)
                         {

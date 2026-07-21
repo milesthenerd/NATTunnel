@@ -12,3 +12,4 @@ dist/
 node_modules/
 *.tar.gz
 stage/
+experiments/
