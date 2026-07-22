@@ -523,6 +523,19 @@ internal sealed class IcmpTransport : IDisposable
         int v = (id << 16) | seq;
         _lastHeardReq = v;
         _lastHeardReqUtc = DateTime.UtcNow;
+        NoteHeardSlot(id, seq);
+    }
+
+    /// <summary>
+    /// Adds an (id, seq) to the FANOUT RING only, without promoting it to the primary reply slot.
+    /// Used for inbound REPLIES: their (id,seq) is a poorer bet than a request's (the NAT entry that admitted
+    /// the reply is already consumed), so it must not become `_lastHeardReq` — but it is still worth having in
+    /// the ring, because EmitFrameRedundant needs SEVERAL distinct holes and a peer that receives few requests
+    /// would otherwise have an almost-empty ring and send every frame down a single hole.
+    /// </summary>
+    private void NoteHeardSlot(ushort id, ushort seq)
+    {
+        int v = (id << 16) | seq;
         _heardReqs.Enqueue(v);
         if (Interlocked.Increment(ref _heardReqCount) > HEARD_REQ_MAX && _heardReqs.TryDequeue(out _))
             Interlocked.Decrement(ref _heardReqCount);
@@ -586,13 +599,6 @@ internal sealed class IcmpTransport : IDisposable
                     $"| sendTo blocked: {Interlocked.Read(ref _sendBlockedMs)}ms total over {Interlocked.Read(ref _sendBlockedCount)} slow sends of {Interlocked.Read(ref _sendTotal)}");
             }
         }
-        // Track a live (id,seq) to put OUR data-replies on. THE ASYMMETRY BUG (both-end capture, 08:xx): this only
-        // updated on inbound REQUESTS (type-8), but the peer FLOODS US WITH REPLIES (type-0) — the capture showed
-        // lassi's replies reaching Miles at 120/s sustained, while lassi's requests reached Miles ~never. So the
-        // side that receives mostly REPLIES never refreshed _lastHeardReq → it drained its data onto a STALE id →
-        // its replies never reached the peer → that direction died (req=0, DATA=0, handshake stuck). The channel was
-        // WIDE OPEN the whole time (120/s of packets landing!); we just weren't tracking a live return slot from it.
-        // FIX: refresh from ANY inbound packet — a reply's (id,seq) is just as live a return path as a request's.
         // Track the slot to put OUR data-replies on — but ONLY from inbound REQUESTS.
         //
         // This used to refresh from ANY inbound packet, which fixed a starvation bug but silently created a worse
@@ -607,8 +613,38 @@ internal sealed class IcmpTransport : IDisposable
         // 21:25 run the SERVER saw req=26/13/11 while the CLIENT saw req=0 for the whole run, so restricting slots
         // to requests alone left that side with nothing to send onto and the tunnel stalled outright. A reply-slot
         // is a poor slot, but a poor slot beats no slot.
+        // REGRESSION FIX (cold start got ~3x slower). Restricting this to type-8 starved the FANOUT RING.
+        //
+        // `_heardReqs` feeds RecentHeardReqs(), which EmitFrameRedundant uses to spread each frame across
+        // ~FRAME_FANOUT distinct holes. Filling it only from inbound REQUESTS means the side that receives
+        // almost none (observed: req=0 for entire runs on one peer) ends up with a ring of 0-1 entries, so every
+        // frame rides one hole instead of four. Steady-state throughput looks unchanged, but the WG handshake —
+        // whose few critical packets need redundancy most — takes far longer to complete. That is exactly the
+        // "same speed once up, 3x longer to start flowing" symptom.
+        //
+        // So: REQUESTS still set the primary slot (`_lastHeardReq`, the guaranteed-forwardable kind), but BOTH
+        // types feed the fanout ring. A reply-derived slot is a worse bet per-hole, yet four mediocre holes beat
+        // one good one for a packet that must not be lost.
         if (type == ICMP_ECHO_REQUEST) NoteHeardReq(id, seq);
-        else _lastHeardAny = (id << 16) | seq;
+        else
+        {
+            _lastHeardAny = (id << 16) | seq;
+            NoteHeardSlot(id, seq);   // ring only — does NOT touch _lastHeardReq
+        }
+
+        // COUNT FIRST, REPORT SECOND. `_reqSeen` used to be incremented ~40 lines BELOW the ReportDeliveryStats()
+        // call here, so every stats line reported the request count as of BEFORE the packet that triggered it. On a
+        // peer whose inbound is almost entirely 18B keepalives (no data frames), ReportDeliveryStats is driven ONLY
+        // from this rate-limited block — and since the rx-log gate (1s) and the stats gate (5s) are independent, the
+        // reported delta sampled at arbitrary moments and systematically missed the request stream.
+        // THAT is why one peer logged `[ICMP][rx] type=8` repeatedly while the same log line said `req=0`: the
+        // requests were arriving and being counted, but the DELTA was computed at the wrong instant. Two of my own
+        // counters disagreed and I trusted the wrong one for several rounds of debugging.
+        if (_punched && type == ICMP_ECHO_REQUEST)
+        {
+            _lastReqRxUtc = DateTime.UtcNow;
+            Interlocked.Increment(ref _reqSeen); // inbound type-8 = a live slot the peer just handed us
+        }
 
         // Rate-limited RX visibility (~1/s): what TYPE + how big is the peer actually sending us? Tells us if the
         // responder is even hearing the pinger's requests, and whether the NAT rewrote the type.
@@ -653,10 +689,7 @@ internal sealed class IcmpTransport : IDisposable
             // piggyback our queued data on the REPLY — immediately, on the capture thread. One request in → data out
             // in the same instant = ONE RTT, which is what makes real ICMP tunnels fast.
             //
-            // Mark the role clock: receiving the peer's REQUESTS means the peer's requests reach us, so WE are the
-            // SERVER (the send loop then stays idle and lets this path do all the sending). See ServerRoleWindow.
-            _lastReqRxUtc = DateTime.UtcNow;
-            Interlocked.Increment(ref _reqSeen); // count inbound type-8 requests
+            // (_lastReqRxUtc / _reqSeen are updated at the TOP of this method — count-before-report, see there.)
 
             // Drain up to DRAIN_PER_ITER frames onto THIS request's (id,seq). The NAT forwards ~one reply per
             // request, so extra copies here can be dropped — but a client sending a dense request stream gives us a
