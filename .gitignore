@@ -1,5 +1,6 @@
 obj
 bin
+publish*
 /.vs/
 /.idea/
 .jshintrc
@@ -12,4 +13,8 @@ dist/
 node_modules/
 *.tar.gz
 stage/
-experiments/
+experiments/BirthdayPunchProbe
+experiments/IcmpBandwidth
+experiments/IcmpEchoApiProbe
+experiments/IcmpTransportTest
+experiments/NpcapLatencyProbe
