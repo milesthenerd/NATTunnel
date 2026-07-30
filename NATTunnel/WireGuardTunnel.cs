@@ -781,6 +781,11 @@ namespace NATTunnel
         /// </summary>
         public bool EnableForwarding() => backend.EnableForwarding(interfaceName);
 
+        /// <summary>Lower the interface MTU below the WireGuard-NT default so ICMP-encapsulated
+        /// packets (adds ~28B IP+ICMP header overhead) don't get fragmented/dropped on tighter
+        /// real-world path MTUs. Only called for ICMP-backed tunnels.</summary>
+        public void SetMtu(int mtu) => backend.SetMtu(interfaceName, mtu);
+
         public WireGuardPeer GetPeer(int connectionId) => peerManager.GetPeer(connectionId);
         public WireGuardPeer GetPeer(IPAddress privateAddress) => peerManager.GetPeer(privateAddress);
         public WireGuardPeer GetPeer(IPEndPoint endpoint) => peerManager.GetPeer(endpoint);

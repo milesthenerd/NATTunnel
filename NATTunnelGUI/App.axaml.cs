@@ -54,7 +54,16 @@ public partial class App : Application
                     try { Program.RunMeshMode(); }
                     catch (Exception ex)
                     {
-                        Dispatcher.UIThread.Post(() => Console.Error.WriteLine($"[GUI] Mesh engine error: {ex}"));
+                        try { Program.Log(LogLevel.Error, $"[GUI] Mesh engine failed to start: {ex}"); } catch { }
+                        try
+                        {
+                            string crashPath = System.IO.Path.Combine(
+                                System.AppContext.BaseDirectory, "nattunnel-startup-error.log");
+                            System.IO.File.AppendAllText(crashPath,
+                                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Mesh engine failed to start:{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
+                        }
+                        catch { /* last-resort diagnostic; never let it mask the original failure */ }
+                        Console.Error.WriteLine($"[GUI] Mesh engine error: {ex}");
                     }
                 });
             }
@@ -72,10 +81,21 @@ public partial class App : Application
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(500) };
             using var resp = http.GetAsync("http://localhost:51889/status").GetAwaiter().GetResult();
-            return resp.IsSuccessStatusCode;
+            if (!resp.IsSuccessStatusCode) return false;
+
+            // A 200 is NOT enough. Port 51889 is hardcoded, so any unrelated local service answering there
+            // used to be mistaken for our own engine: we'd skip starting the engine entirely and then poll
+            // that stranger forever, presenting an empty log panel and "engine isn't responding". Require the
+            // service marker from MeshState so we only ever adopt a real NATTunnel endpoint.
+            string body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            return doc.RootElement.TryGetProperty("service", out var svc) &&
+                   svc.ValueKind == System.Text.Json.JsonValueKind.String &&
+                   svc.GetString() == "nattunnel";
         }
         catch
         {
+            // Includes malformed/non-JSON responses from whatever else holds the port — correctly "not ours".
             return false;
         }
     }

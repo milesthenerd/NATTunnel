@@ -78,8 +78,43 @@ internal sealed class WindowsWireGuardBackend : IWireGuardBackend
             WireGuardNTAPI.WIREGUARD_ADAPTER_STATE.WIREGUARD_ADAPTER_STATE_UP);
         if (!ok)
         {
+            // THROW, don't just log. Logging and continuing left startup running with a DISCONNECTED
+            // adapter — the node would hole-punch, exchange keys and report success while unable to pass
+            // any traffic, with the one error line buried under normal-looking activity.
             int error = Marshal.GetLastWin32Error();
-            Program.Log(LogLevel.Error, $"Failed to set adapter state to UP (Error: {error})");
+            string hint = error == 5 // ERROR_ACCESS_DENIED
+                ? " — access denied: the daemon must run elevated (Administrator), and any other WireGuard" +
+                  " instance holding this adapter (wg-quick, the WireGuard for Windows UI, a stale service)" +
+                  " must be stopped first"
+                : "";
+            throw new InvalidOperationException(
+                $"Failed to bring WireGuard adapter '{interfaceName}' UP (Win32 error {error}){hint}.");
+        }
+    }
+
+    public void SetMtu(string interfaceName, int mtu)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "netsh",
+            Arguments = $"interface ipv4 set subinterface \"{interfaceName}\" mtu={mtu} store=active",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+        using (var p = Process.Start(psi))
+        {
+            p.WaitForExit();
+            if (p.ExitCode != 0)
+            {
+                string err = p.StandardError.ReadToEnd();
+                Program.Log(LogLevel.Warning, $"netsh set MTU failed for {interfaceName}: {err}");
+            }
+            else
+            {
+                Program.Log(LogLevel.Debug, $"Set MTU {mtu} on interface {interfaceName}");
+            }
         }
     }
 

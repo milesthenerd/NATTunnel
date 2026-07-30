@@ -37,6 +37,14 @@ internal class WireGuardUdpProxy : IDisposable
     private static UdpClient inboundForwarder;
     private static readonly object inboundForwarderLock = new object();
 
+    // Inbound WireGuard packets that arrived BEFORE their peer was registered (see ForwardToWireGuard).
+    // Keyed by source endpoint; replayed through the correct per-peer listener by RegisterPeer. Without this
+    // they were forwarded from the shared socket's source port, which WG-NT rejects — the peer's handshake
+    // INITs were effectively discarded until registration happened to complete.
+    private readonly Dictionary<IPEndPoint, List<byte[]>> pendingPreRegistration = new();
+    private readonly object pendingLock = new object();
+    private const int MaxPendingPerEndpoint = 16;
+
     public WireGuardUdpProxy(UdpClient holePunchedSocket)
     {
         this.tunnelSocket = holePunchedSocket;
@@ -58,6 +66,10 @@ internal class WireGuardUdpProxy : IDisposable
                 $"Cannot bind WireGuard proxy port 51821/UDP — another instance may already be running. ({ex.Message})", ex);
         }
         wireguardListener.Client.ReceiveBufferSize = 128000;
+        // Same poisoning risk as the per-peer listeners: this socket also sends to 51820, so a
+        // port-unreachable would otherwise fault its next receive. (inboundForwarder aliases this
+        // socket, so it's covered too.) See SocketUtils.DisableUdpConnReset.
+        SocketUtils.DisableUdpConnReset(wireguardListener);
 
         // Initialize the inbound forwarder
         lock (inboundForwarderLock)
@@ -112,6 +124,25 @@ internal class WireGuardUdpProxy : IDisposable
                 peerListeners[proxyPort].UpdateTunnelSocket(socketToUse);
             }
 
+            // Replay whatever arrived from this peer before registration, now that its listener exists.
+            List<byte[]> replay = null;
+            lock (pendingLock)
+            {
+                if (pendingPreRegistration.TryGetValue(peerEndpoint, out var q))
+                {
+                    replay = q;
+                    pendingPreRegistration.Remove(peerEndpoint);
+                }
+            }
+            if (replay != null && replay.Count > 0)
+            {
+                var target = peerListeners[proxyPort];
+                Program.Log(LogLevel.Debug,
+                    $"[Proxy] Replaying {replay.Count} pre-registration WireGuard packet(s) from {peerEndpoint} " +
+                    $"through proxyPort={proxyPort}");
+                foreach (var held in replay)
+                    target.ForwardInboundPacket(held);
+            }
         }
     }
 
@@ -127,6 +158,11 @@ internal class WireGuardUdpProxy : IDisposable
                 // Remove from all tracking dictionaries
                 tunnelIpToPeerEndpoint.Remove(tunnelIp);
                 peerLastActivity.Remove(tunnelIp);
+
+                // Drop any held pre-registration packets for this endpoint — the tunnel is going away, so
+                // replaying them later would inject a dead handshake attempt, and keeping them leaks memory
+                // for a peer that may never come back on this endpoint.
+                lock (pendingLock) { pendingPreRegistration.Remove(endpoint); }
 
                 if (peerEndpointToPort.TryGetValue(endpoint, out var port))
                 {
@@ -189,6 +225,12 @@ internal class WireGuardUdpProxy : IDisposable
                             peerLastActivity[peerTunnelIp] = DateTime.UtcNow;
                         }
 
+                        // DIAGNOSTIC (WG handshake stall investigation): confirm the exact-match path is what's
+                        // actually delivering WG-proto bytes, and via which local proxyPort (must match what
+                        // WG-NT was configured to expect FROM for this peer, or it silently drops the packet).
+                        if (packet.Length > 0 && packet[0] >= 1 && packet[0] <= 4)
+                            Program.Log(LogLevel.Debug, $"[Proxy][fwd] EXACT src={sourceEndpoint} -> proxyPort={proxyPort} wgType={packet[0]}");
+
                         listener.ForwardInboundPacket(packet);
 
                         // Notify activity callback
@@ -221,6 +263,9 @@ internal class WireGuardUdpProxy : IDisposable
                                 peerLastActivity[peerTunnelIp] = DateTime.UtcNow;
                             }
 
+                            if (packet.Length > 0 && packet[0] >= 1 && packet[0] <= 4)
+                                Program.Log(LogLevel.Debug, $"[Proxy][fwd] IP-ONLY-FALLBACK src={sourceEndpoint} registeredKey={kvp.Key} -> proxyPort={proxyPort} wgType={packet[0]}");
+
                             listener.ForwardInboundPacket(packet);
 
                             if (peerTunnelIp != null)
@@ -233,7 +278,32 @@ internal class WireGuardUdpProxy : IDisposable
                 }
             }
 
-            // Fallback: use the shared inbound forwarder on port 51821
+            // No peer registered yet: HOLD WG packets rather than misrouting them. Registration needs the peer's
+            // public key, but the peer starts sending handshake INITs as soon as the ICMP channel is up. Sending
+            // those via the shared forwarder means the wrong source port, and WG-NT discards them (it associates
+            // a peer with its per-peer proxy port). Queue and replay on RegisterPeer instead.
+            bool isWgProto = packet.Length > 0 && packet[0] >= 1 && packet[0] <= 4;
+            if (isWgProto)
+            {
+                lock (pendingLock)
+                {
+                    if (!pendingPreRegistration.TryGetValue(sourceEndpoint, out var q))
+                    {
+                        q = new List<byte[]>();
+                        pendingPreRegistration[sourceEndpoint] = q;
+                    }
+                    // Cap so a peer that never registers can't grow this without bound. WG retries, so dropping
+                    // the OLDEST is right: the newest init is the one whose handshake attempt is still live.
+                    if (q.Count >= MaxPendingPerEndpoint) q.RemoveAt(0);
+                    q.Add(packet);
+                    Program.Log(LogLevel.Debug,
+                        $"[Proxy][fwd] HELD src={sourceEndpoint} wgType={packet[0]} — no peer registered yet " +
+                        $"(queued {q.Count}/{MaxPendingPerEndpoint}); will replay on registration");
+                }
+                return;
+            }
+
+            // Non-WG traffic: unchanged best-effort path via the shared inbound forwarder on port 51821.
             lock (inboundForwarderLock)
             {
                 if (inboundForwarder != null)
@@ -311,6 +381,14 @@ internal class PeerProxyListener : IDisposable
     // true WireGuard ENCAPSULATOR in daemon mode — WG runs over ICMP exactly as it runs over UDP.
     private readonly Action<byte[]> icmpSend;
 
+    /// <summary>
+    /// Lifetime count of datagrams WireGuard-NT has handed to a peer proxy listener (i.e. WG's OUTBOUND
+    /// direction, before encapsulation). Diagnostic only. Static so IcmpTransport can fold it into its
+    /// per-window stats line without plumbing a reference through — there is at most one proxy per process
+    /// and this is a debug counter, so precision across multiple listeners doesn't matter.
+    /// </summary>
+    internal static long WgToProxyPackets;
+
     public PeerProxyListener(int proxyPort, IPEndPoint peerEndpoint, UdpClient tunnelSocket, object tunnelSocketLock, Action<byte[]> icmpSend = null)
     {
         this.proxyPort = proxyPort;
@@ -323,6 +401,9 @@ internal class PeerProxyListener : IDisposable
         // Create listener for this specific port
         listener = new UdpClient(new IPEndPoint(IPAddress.Loopback, proxyPort));
         listener.Client.ReceiveBufferSize = 128000;
+        // Without this, a single ICMP port-unreachable (e.g. WireGuard-NT not yet listening on 51820)
+        // permanently kills this listener's receive loop. See SocketUtils.DisableUdpConnReset.
+        SocketUtils.DisableUdpConnReset(listener);
 
         // Start listening task
         listenTask = Task.Run(() => ListenLoop(cancellation.Token));
@@ -367,7 +448,28 @@ internal class PeerProxyListener : IDisposable
         {
             while (!token.IsCancellationRequested)
             {
-                var result = await listener.ReceiveAsync(token);
+                // A receive fault must NOT kill this loop. This await used to sit outside any handler, so one
+                // transient socket error (e.g. a UDP ConnectionReset from an ICMP port-unreachable when nothing
+                // was listening on 51820 yet) exited the loop permanently and the peer's proxy went silently
+                // deaf. Log and keep serving.
+                UdpReceiveResult result;
+                try
+                {
+                    result = await listener.ReceiveAsync(token);
+                }
+                catch (OperationCanceledException) { break; }   // shutdown
+                catch (ObjectDisposedException) { break; }      // socket really is gone
+                catch (SocketException ex)
+                {
+                    Program.Log(LogLevel.Warning,
+                        $"[PeerProxy:{proxyPort}] Receive error ({ex.SocketErrorCode}) — continuing: {ex.Message}");
+                    continue;
+                }
+
+                // Ticks once per datagram WG-NT hands us. Reported as wgOut/s: compare against attempted/s —
+                // wgOut>0 with attempted=0 means we're losing frames before IcmpTransport.Send; both at 0 while
+                // inbound continues means WG itself went quiet.
+                Interlocked.Increment(ref WgToProxyPackets);
 
                 // Forward packet from WireGuard to the real peer endpoint via tunnel socket
                 IPEndPoint targetEndpoint;

@@ -478,7 +478,20 @@ public static class Program
                 }
                 catch (Exception ex)
                 {
+                    // This message is CORRECT but was effectively invisible: Log() writes to the in-memory
+                    // buffer that is only readable over /logs — on the very port that just failed to bind. A
+                    // user hit exactly this (51889 already in use) and saw only the GUI's "engine isn't
+                    // responding" dialog with an empty log panel, so there was nothing to diagnose from.
+                    // Also persist to a file next to the executable, which is the one place they can retrieve.
                     Log($"[Mesh] Failed to start HTTP status endpoint on port 51889 — another instance may already be running. ({ex.Message})");
+                    try
+                    {
+                        System.IO.File.AppendAllText(
+                            System.IO.Path.Combine(AppContext.BaseDirectory, "nattunnel-startup-error.log"),
+                            $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Failed to bind control/status endpoint on port 51889 " +
+                            $"(another instance, or another application, is already using it).{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
+                    }
+                    catch { /* diagnostic only — never mask the original failure */ }
                 }
             });
 

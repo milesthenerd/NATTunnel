@@ -38,9 +38,22 @@ internal static class SocketUtils
             client.Client.Bind(new IPEndPoint(IPAddress.Any, port));
         }
 
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            client.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+        DisableUdpConnReset(client);
 
         return client;
+    }
+
+    /// <summary>
+    /// Windows-only: stop this UDP socket from faulting when an ICMP port-unreachable comes back.
+    /// Windows surfaces that error as a fatal ConnectionReset on the socket's NEXT receive — on a
+    /// connectionless socket — so any receive loop treating exceptions as terminal dies permanently
+    /// while the socket is otherwise fine. Apply BEFORE any traffic: one bounced datagram poisons it.
+    /// No-op on non-Windows.
+    /// </summary>
+    public static void DisableUdpConnReset(UdpClient client)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return;
+        try { client.Client.IOControl((IOControlCode)SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null); }
+        catch { /* best-effort: an older stack that rejects the ioctl still works, just less robustly */ }
     }
 }

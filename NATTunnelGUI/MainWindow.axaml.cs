@@ -117,6 +117,12 @@ public partial class MainWindow : Window
             var state = JsonSerializer.Deserialize<MeshState>(json);
             if (state == null) return;
 
+            // 51889 is hardcoded, so confirm this is actually our engine and not another local service that
+            // happens to answer with JSON. Throwing routes it through the same diagnostics as a dead engine.
+            if (state.Service != "nattunnel")
+                throw new InvalidOperationException(
+                    $"Port 51889 is served by something that is not NATTunnel (service=\"{state.Service ?? "<absent>"}\").");
+
             // Daemon has moved past its idle placeholder once it reports anything besides Disconnected.
             if (state.ConnectionState != "Disconnected") waitingForRealState = false;
 
@@ -270,7 +276,9 @@ public partial class MainWindow : Window
                 _ = DialogHelpers.ShowInfoAsync(this, title, body);
             }
         }
-        catch
+        // Capture WHY the poll failed — a bare catch made a dead engine, a port-51889 conflict, a blocked
+        // loopback and a non-JSON response from another process all produce the same useless dialog.
+        catch (Exception pollEx)
         {
             StatusDot.Fill = (IBrush)this.FindResource("StatusRedBrush")!;
             StatusText.Text = "Engine not running";
@@ -282,13 +290,43 @@ public partial class MainWindow : Window
             if (!daemonDownDialogShown && consecutiveDaemonDownPolls >= 3)
             {
                 daemonDownDialogShown = true;
-                string body = OperatingSystem.IsLinux()
-                    ? "The NATTunnel daemon isn't running. Start it with:\n\n" +
-                      "    sudo systemctl start nattunnel\n\n" +
-                      "To have it start automatically on boot:\n\n" +
-                      "    sudo systemctl enable nattunnel"
-                    : "The NATTunnel engine isn't responding. Try closing and reopening the app; " +
-                      "if it persists, reinstall NATTunnel.";
+
+                // Distinguish "nothing is listening" (daemon down/crashed) from "something answered but not
+                // the daemon" (port taken, or a proxy/AV intercepting loopback) — different fixes entirely.
+                bool refused = pollEx is HttpRequestException hre &&
+                               hre.InnerException is System.Net.Sockets.SocketException se &&
+                               (se.SocketErrorCode == System.Net.Sockets.SocketError.ConnectionRefused ||
+                                se.SocketErrorCode == System.Net.Sockets.SocketError.HostUnreachable);
+
+                string body;
+                if (OperatingSystem.IsLinux())
+                {
+                    body = "The NATTunnel daemon isn't running. Start it with:\n\n" +
+                           "    sudo systemctl start nattunnel\n\n" +
+                           "To have it start automatically on boot:\n\n" +
+                           "    sudo systemctl enable nattunnel";
+                }
+                else if (refused)
+                {
+                    // No "run as administrator" advice: the manifest is requireAdministrator, so if this is
+                    // running it's already elevated.
+                    body = "The NATTunnel engine isn't running — nothing is listening on port 51889.\n\n" +
+                           "It most likely stopped during startup. Check the log panel for the last message " +
+                           "before it stopped, then:\n\n" +
+                           "  • Make sure no other NATTunnel instance is still running (check Task Manager)\n" +
+                           "  • Confirm wireguard.dll is present next to the application\n" +
+                           "  • Reboot if a previous run left the network adapter in a bad state";
+                }
+                else
+                {
+                    body = "The NATTunnel engine isn't responding on port 51889, but something is listening " +
+                           "there — another application may be using the port, or security software may be " +
+                           "blocking local connections.\n\n" +
+                           "Try closing and reopening the app; if it persists, reinstall NATTunnel.";
+                }
+
+                // Always include the raw error — this is the one line that makes a user report actionable.
+                body += $"\n\nDetails: {pollEx.GetType().Name}: {pollEx.Message}";
                 _ = DialogHelpers.ShowInfoAsync(this, "NATTunnel daemon not running", body);
             }
             return;

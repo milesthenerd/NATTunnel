@@ -89,43 +89,28 @@ internal sealed class NpcapCapture : IIcmpCapture
 
         foreach (var dev in candidates)
         {
-            // Try PROMISCUOUS first, then NON-promiscuous. "Unable to activate the adapter (Generic)" on a NIC
-            // that opened fine earlier is almost always a promiscuous-mode conflict: another capture (Wireshark)
-            // holds the adapter promiscuous, or a stale handle from an unclean shutdown lingers. Killer NICs are
-            // especially strict about a second promiscuous handle. We only need packets addressed to us + our BPF
-            // src filter, so NON-promiscuous works fine and sidesteps the conflict.
-            foreach (var mode in new[] { DeviceModes.Promiscuous, DeviceModes.None })
+            // Promiscuous first, None as fallback. "Unable to activate the adapter (Generic)" on a NIC that
+            // opened fine earlier is usually a promiscuous conflict (Wireshark holding it, or a stale handle);
+            // Killer NICs are especially strict. None works fine for us — the BPF filter is
+            // `icmp and src host <peer>` and those packets are addressed to us anyway.
+            //
+            // Mode may also be a perf lever: the peer running None shows syscall=61-90us per raw send vs
+            // 420-500us here on Promiscuous. Untested as such (an earlier A/B was confounded by a handshake bug
+            // since fixed), so retest before concluding. NATTUNNEL_NPCAP_NONFIRST=1 flips the order.
+            bool noneFirst = Environment.GetEnvironmentVariable("NATTUNNEL_NPCAP_NONFIRST") == "1";
+            var modeOrder = noneFirst
+                ? new[] { DeviceModes.None, DeviceModes.Promiscuous }
+                : new[] { DeviceModes.Promiscuous, DeviceModes.None };
+            foreach (var mode in modeOrder)
             {
                 try
                 {
-                    // ★ LATENCY-CRITICAL, AND UNRESOLVED — READ BEFORE CHANGING ★
-                    //
-                    // libpcap BATCHES captured packets: it hands them up only when the kernel buffer fills or the
-                    // read timeout expires. Our packets are tiny (~50B at ~60/s) so the buffer never fills, and every
-                    // inbound packet waits out the timeout. That is measurably most of our latency: transport RTT
-                    // (`[ICMP][rtt]`, a raw request→reply with no WireGuard in the path) sat at a rock-steady
-                    // ~800-900ms while the send path was proven instant (~0.05ms per SendTo) and the real network
-                    // RTT is ~8-40ms.
-                    //
-                    // The out-of-band probe (experiments/NpcapLatencyProbe — same Npcap, same SharpPcap 6.3.1, same
-                    // StartCapture() path) measured send→capture-delivered latency against a host with a real ~8ms
-                    // RTT, including a config that reproduces this transport's callback workload (24 synchronous raw
-                    // sends inside OnPacketArrival, like the punch-time ACK hammer):
-                    //     ReadTimeout=1000                          → delivered 56/56, avg 520ms  ← this config
-                    //     ReadTimeout=100 + Immediate               → delivered 56/56, avg   9ms
-                    //     ReadTimeout=100 + Immediate + sends-in-cb → delivered 56/56, avg   9ms
-                    //     ReadTimeout=1000 + sends-in-cb            → delivered 56/56, avg 518ms
-                    //
-                    // This was briefly reverted to a bare ReadTimeout=1000 on the theory that Immediate mode was
-                    // causing a post-handshake silence. That theory was WRONG and the next run disproved it: the
-                    // silence persisted unchanged with ReadTimeout=1000. The real cause was in the transport — data
-                    // was being sent as unsolicited echo REQUESTS, which a symmetric NAT drops (see IcmpTransport's
-                    // matched-reply notes). The revert then sat here unnoticed, costing ~520ms of capture-delivery
-                    // delay on BOTH peers in every subsequent run.
-                    //
-                    // Immediate mode is correct and measured: it delivers every packet at ~9ms (≈ the wire RTT),
-                    // including under a callback that does 24 synchronous raw sends — the transport's own workload.
-                    // The read timeout is now only a backstop for a platform that ignores immediate mode.
+                    // KEEP Immediate=true. libpcap otherwise batches until the kernel buffer fills or the read
+                    // timeout expires, and our packets are far too small/sparse to fill it — so every inbound
+                    // packet waits out the timeout. Measured (experiments/NpcapLatencyProbe, ~8ms real RTT):
+                    // ReadTimeout=1000 alone → ~520ms delivery; ReadTimeout=100 + Immediate → ~9ms, including
+                    // under a callback doing 24 synchronous raw sends. The timeout is just a backstop for
+                    // platforms that ignore Immediate.
                     dev.Open(new DeviceConfiguration { Mode = mode, ReadTimeout = 100, Immediate = true });
                     dev.Filter = $"icmp and src host {_peer}";
                     dev.OnPacketArrival += OnPacketArrival;

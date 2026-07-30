@@ -21,6 +21,9 @@ internal class Tunnel : IDisposable
 
     // Connection constants
     private const int HOLE_PUNCH_THRESHOLD = 3;  // Number of hole punch packets required before confirming connection.
+    // Conservative MTU for ICMP-backed tunnels: leaves headroom for the ~28B IP+ICMP header overhead
+    // added on top of every WireGuard packet, so encapsulated packets stay under real-world path MTUs.
+    private const int IcmpTunnelMtu = 1200;
                                                  // A single stray packet from a symmetric peer can land on a probe
                                                  // whose NAT mapping expires immediately after — declaring success
                                                  // there gets us stuck with a "one-way" tunnel
@@ -899,6 +902,16 @@ internal class Tunnel : IDisposable
                                     // hand WireGuard an ICMP send delegate so its outbound packets ride the ICMP
                                     // channel (encapsulation) instead of the UDP socket; inbound already flows
                                     // back into WireGuard via OnIcmpPayload → ProcessUdpPacketBody → the proxy.
+                                    if (IsIcmpBacked)
+                                    {
+                                        // ICMP adds ~28B (IP+ICMP headers) of overhead on top of whatever WireGuard
+                                        // hands us; the adapter's default MTU (~1420) leaves no room for that, so
+                                        // full-size WG data packets risk fragmentation/drops on real-world paths
+                                        // (many tunneled/mobile paths have an effective MTU well under 1500).
+                                        // Shrinking the interface MTU makes WireGuard itself keep packets small
+                                        // enough to survive ICMP encapsulation intact.
+                                        wireguardTunnel.SetMtu(IcmpTunnelMtu);
+                                    }
                                     var serverPeer = IsIcmpBacked
                                         ? wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient, icmpTransport.Send)
                                         : wireguardTunnel.AddPeer(receivedMessage.WireGuardPublicKey, peerEndpoint, peerTunnelIp, true, udpClient);

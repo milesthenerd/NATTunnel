@@ -12,7 +12,10 @@ internal class WireGuardPeer
     public string AllowedIPs { get; private set; }
     public bool IsPersistent { get; private set; }
     public int ConnectionId { get; private set; }
-    public int KeepAliveInterval { get; set; } = 5;
+    // 25s (WireGuard's default), NOT 5: at 5 the keepalive tick restarts negotiation before an in-flight
+    // handshake can finish. Both peers then emitted wgType=1 and =2 every 5.0s in lockstep with init/resp
+    // climbing and DATA=0 — connections only succeeded if they completed inside one window.
+    public int KeepAliveInterval { get; set; } = 25;
     public int ProxyPort { get; private set; } // Unique localhost port for this peer
     public DateTime LastActivity { get; set; } = DateTime.UtcNow; // Track when we last received traffic from this peer
 
@@ -69,7 +72,7 @@ internal class WireGuardPeer
         p.ConnectionId = connectionId;
         p.IsPersistent = false;
         p.ProxyPort = 0;
-        p.KeepAliveInterval = 5;
+        p.KeepAliveInterval = 25;   // see the field default — 5 collides with handshake establishment
         p.LastActivity = DateTime.UtcNow;
         p.AllowedIPs = privateAddress != null ? $"{privateAddress}/32" : "";
         return p;

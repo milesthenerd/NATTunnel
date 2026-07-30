@@ -9,6 +9,16 @@ namespace NATTunnel;
 /// </summary>
 public class MeshState
 {
+    /// <summary>
+    /// Fixed marker identifying this as a genuine NATTunnel control endpoint. The control port (51889) is
+    /// hardcoded, so if another application happens to be serving it, a bare "did I get HTTP 200?" probe
+    /// concludes our engine is already running — the GUI then skips starting its own engine and polls a
+    /// stranger's server forever, showing an empty log panel and an "engine isn't responding" dialog. Clients
+    /// must check this field, not just the status code. See [[project_hardcoded_ports_flexible]].
+    /// </summary>
+    [JsonPropertyName("service")]
+    public string Service { get; set; } = "nattunnel";
+
     [JsonPropertyName("networkID")]
     public string NetworkID { get; set; }
 

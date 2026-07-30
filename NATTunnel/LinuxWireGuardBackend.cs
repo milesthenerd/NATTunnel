@@ -87,6 +87,12 @@ internal sealed class LinuxWireGuardBackend : IWireGuardBackend
         Program.Log(LogLevel.Debug, $"Interface {interfaceName} is up");
     }
 
+    public void SetMtu(string interfaceName, int mtu)
+    {
+        RunIp($"link set dev {interfaceName} mtu {mtu}");
+        Program.Log(LogLevel.Debug, $"Set MTU {mtu} on interface {interfaceName}");
+    }
+
     public bool AddOrUpdatePeer(string interfaceName, WireGuardPeer peer)
     {
         try

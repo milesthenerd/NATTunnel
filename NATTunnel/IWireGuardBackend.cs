@@ -15,6 +15,11 @@ internal interface IWireGuardBackend
     /// <summary>Bring the interface administratively up.</summary>
     void SetInterfaceUp(string interfaceName);
 
+    /// <summary>Set the interface MTU. Used to shrink below the default so ICMP-encapsulated
+    /// WireGuard packets (which add IP+ICMP header overhead on top) don't get fragmented/dropped
+    /// on tighter-than-Ethernet paths.</summary>
+    void SetMtu(string interfaceName, int mtu);
+
     /// <summary>Add or update a single peer without disturbing others. False = caller should fall back to <see cref="ApplyFullConfig"/>.</summary>
     bool AddOrUpdatePeer(string interfaceName, WireGuardPeer peer);
 
