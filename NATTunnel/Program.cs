@@ -145,17 +145,44 @@ public static class Program
         UdpClient udpClient = null;
         WireGuardTunnel wireguardTunnel = null;
         WireGuardUdpProxy udpProxy = null;
+        // FAIL FAST IF THE CONTROL PORT IS TAKEN — do not continue into driver setup.
+        //
+        // The listener below runs fire-and-forget, so a bind failure used to just log while startup carried on
+        // to create the WireGuard adapter and start Npcap capture. That turned one stuck instance into a
+        // cascade: a zombie holds 51889, the user relaunches, the new instance can't bind but still grabs the
+        // drivers, then wedges on ITS shutdown too — one more zombie per retry, all unkillable. Bind it here,
+        // synchronously, and refuse to start if we can't own it.
+        HttpListener controlListener;
         try
         {
-            // Start the HTTP control/status endpoint first so the GUI can fetch logs
-            // (and serve `/status` etc.) immediately, before any of the slow setup below.
+            controlListener = new HttpListener();
+            controlListener.Prefixes.Add("http://localhost:51889/");
+            controlListener.Start();
+        }
+        catch (Exception ex)
+        {
+            string msg = "Cannot bind control port 51889 — another NATTunnel instance is already running " +
+                         "(or a previous one is stuck holding the port). Not starting: continuing would claim " +
+                         "the WireGuard adapter and capture driver a second time.";
+            Log($"[Mesh] {msg} ({ex.Message})");
+            try
+            {
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(AppContext.BaseDirectory, "nattunnel-startup-error.log"),
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {msg}{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
+            }
+            catch { }
+            throw new InvalidOperationException(msg, ex);
+        }
+
+        try
+        {
+            // Serve the already-bound control/status endpoint so the GUI can fetch logs immediately.
             System.Threading.Tasks.Task.Run(() =>
             {
                 try
                 {
-                    var httpListener = new HttpListener();
-                    httpListener.Prefixes.Add("http://localhost:51889/");
-                    httpListener.Start();
+                    var httpListener = controlListener;
                     Log("[Mesh] HTTP status endpoint listening on http://localhost:51889/status");
 
                     while (true)

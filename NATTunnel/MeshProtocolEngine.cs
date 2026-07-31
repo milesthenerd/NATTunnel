@@ -3573,6 +3573,28 @@ internal class MeshProtocolEngine
                             $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}); retry {deferCount + 1}/{DeferProceedThreshold} on next discovery poll");
                         continue;
                     }
+                    // Defer budget spent. DECIDE ON WHAT IS ACTUALLY KNOWN — do not blindly fall through to the
+                    // UDP ConnectionRequest. Observed: ours v4=Symmetric/v6=Symmetric, theirs v4=Symmetric with
+                    // v6=Unknown (their v6 probe never landed). v4 is CONCLUSIVELY both-symmetric there, so the
+                    // pair needs the ICMP tier or a relay — but the fall-through sent the request anyway, which
+                    // only ever does UDP punches and cannot work for a both-symmetric pair. The pending v6 was
+                    // worth waiting for (it could have become punchable); it is not worth discarding a known v4
+                    // verdict over.
+                    bool knownBothSymmetric =
+                        (v4BothKnown && ourV4 == NATType.Symmetric && peerV4 == NATType.Symmetric) ||
+                        (v6BothKnown && ourV6 == NATType.Symmetric && peerV6 == NATType.Symmetric);
+                    if (knownBothSymmetric)
+                    {
+                        context.Log(LogLevel.Debug, $"[Mesh] Defer budget spent for {targetPeerID} and every KNOWN shared family is both-symmetric " +
+                            $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}) — taking the both-symmetric path, not a doomed UDP punch");
+                        if (bothIcmpCapable)
+                        {
+                            TryStartIcmpTunnel(targetPeerID, peerMeshIP, peerEndpoint, peerIdentityPublicKey);
+                            continue;
+                        }
+                        context.Log(LogLevel.Debug, $"[Mesh] Skipping ConnectionRequest to {targetPeerID} — both symmetric and no ICMP tier available; needs relay");
+                        continue;
+                    }
                     context.Log(LogLevel.Debug, $"[Mesh] Proceeding with ConnectionRequest to {targetPeerID} despite unknown NAT type after {deferCount} defers " +
                         $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}) — verdict likely lost; letting the server broker it");
                     // fall through to send the request
@@ -3587,7 +3609,7 @@ internal class MeshProtocolEngine
                     // tunnel registers; on failure/timeout the pair still relays via the normal introducer flow.
                     if (bothIcmpCapable)
                     {
-                        TryStartIcmpTunnel(targetPeerID, peerMeshIP, peerEndpoint);
+                        TryStartIcmpTunnel(targetPeerID, peerMeshIP, peerEndpoint, peerIdentityPublicKey);
                         // Don't send the bootstrap ConnectionRequest (that path only does UDP punches, which
                         // can't work here). The relay fallback is driven by the introducer flow independently,
                         // so skipping the request doesn't strand the pair if ICMP fails.
@@ -3640,8 +3662,18 @@ internal class MeshProtocolEngine
     /// On failure/timeout the pair simply isn't connected via ICMP — the relay path (introducer flow) still
     /// applies, so ICMP is purely additive and never strands a pair that would otherwise relay.
     /// </summary>
-    private void TryStartIcmpTunnel(string remotePeerID, string remoteMeshIP, string remoteEndpointStr)
+    private void TryStartIcmpTunnel(string remotePeerID, string remoteMeshIP, string remoteEndpointStr, string peerIdentityPublicKey = null)
     {
+        // Block list applies to EVERY transport. The callers reach this branch with `continue`, skipping the
+        // IsBlocked check further down the discovery loop that guards the UDP path — so without this a blocked
+        // fingerprint could still connect over the ICMP tier. Enforced here rather than at the call sites so a
+        // future caller cannot reintroduce the bypass.
+        if (!string.IsNullOrEmpty(peerIdentityPublicKey) && IsBlocked(peerIdentityPublicKey))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh][ICMP] Refusing ICMP punch to {remotePeerID} — peer fingerprint is on local block list");
+            return;
+        }
+
         // Guard: one in-flight attempt per peer, and skip if already connected.
         lock (meshLock)
         {

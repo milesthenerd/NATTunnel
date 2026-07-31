@@ -107,5 +107,17 @@ public partial class App : Application
         Program.ShutdownRequested = true;
         if (meshTask != null)
             await Task.WhenAny(meshTask, Task.Delay(3000));
+
+        // LAST RESORT: guarantee the process actually dies. A wedged native thread (Npcap/WireGuard-NT driver
+        // calls) can keep the process alive after the UI closes — it then still holds port 51889, so the next
+        // launch finds the port taken and reports "the engine isn't responding". Worse, that zombie ignores
+        // `taskkill /F`. A managed exit can't always dislodge a thread stuck in a driver, but Environment.Exit
+        // skips finalizers/cleanup that would otherwise wait on it, which is exactly what we want here.
+        // Fire-and-forget on a background timer so it can't interfere with a normal, prompt shutdown.
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(4000);
+            Environment.Exit(0);
+        });
     }
 }

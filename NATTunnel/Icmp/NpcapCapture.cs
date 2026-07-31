@@ -94,14 +94,9 @@ internal sealed class NpcapCapture : IIcmpCapture
             // Killer NICs are especially strict. None works fine for us — the BPF filter is
             // `icmp and src host <peer>` and those packets are addressed to us anyway.
             //
-            // Mode may also be a perf lever: the peer running None shows syscall=61-90us per raw send vs
-            // 420-500us here on Promiscuous. Untested as such (an earlier A/B was confounded by a handshake bug
-            // since fixed), so retest before concluding. NATTUNNEL_NPCAP_NONFIRST=1 flips the order.
-            bool noneFirst = Environment.GetEnvironmentVariable("NATTUNNEL_NPCAP_NONFIRST") == "1";
-            var modeOrder = noneFirst
-                ? new[] { DeviceModes.None, DeviceModes.Promiscuous }
-                : new[] { DeviceModes.Promiscuous, DeviceModes.None };
-            foreach (var mode in modeOrder)
+            // (A syscall-cost difference between the two modes was suspected but never confirmed — the idle
+            //  400-500us figure that prompted it turned out to be 5-13us under real load on both peers.)
+            foreach (var mode in new[] { DeviceModes.Promiscuous, DeviceModes.None })
             {
                 try
                 {
@@ -165,14 +160,25 @@ internal sealed class NpcapCapture : IIcmpCapture
 
     public void Dispose()
     {
+        // _stopped first and the handler unhooked immediately: StopCapture() blocks until the capture thread
+        // leaves the callback, so anything slow in there stalls shutdown. See IcmpTransport.Dispose for the
+        // deadlock this participated in (it left an unkillable process holding port 51889).
         _stopped = true;
         var d = _device;
         _device = null;
-        if (d != null)
+        if (d == null) return;
+
+        try { d.OnPacketArrival -= OnPacketArrival; } catch { }
+
+        // Bound the wait. If the capture thread is wedged in the driver, never return control to a caller that
+        // is trying to exit — better to leak the handle for the remaining process lifetime than to hang.
+        var stopped = System.Threading.Tasks.Task.Run(() =>
         {
-            try { d.OnPacketArrival -= OnPacketArrival; } catch { }
             try { if (d.Started) d.StopCapture(); } catch { }
             try { d.Dispose(); } catch { }
-        }
+        });
+        if (!stopped.Wait(TimeSpan.FromSeconds(2)))
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Warning,
+                "[ICMP][npcap] StopCapture did not return within 2s — abandoning the handle to avoid a hung shutdown");
     }
 }

@@ -35,10 +35,7 @@ namespace NATTunnel.Icmp;
 /// </summary>
 internal sealed class IcmpTransport : IDisposable
 {
-    // Wire tags. CRITICAL: the data MAGIC must NOT be a prefix of the punch tags — REQTAG/ACKTAG are "ICH-REQ"/
-    // "ICH-ACK", so a data marker of "ICH" made every opener match the data-frame check (StartsWith(MAGIC)),
-    // flooding the receiver with bogus 11-byte "data" frames whose frame id was garbage from "-REQ"/"-ACK".
-    // Use a distinct data marker ("ICD") so openers and data frames are unambiguously separable on the wire.
+    // Data MAGIC must NOT be a prefix of the punch tags (REQTAG/ACKTAG), or StartsWith(MAGIC) matches openers too.
     private static readonly byte[] MAGIC = Encoding.ASCII.GetBytes("ICD");   // data-packet marker (distinct from tags)
     private static readonly byte[] REQTAG = Encoding.ASCII.GetBytes("ICH-REQ");
     private static readonly byte[] ACKTAG = Encoding.ASCII.GetBytes("ICH-ACK");
@@ -47,30 +44,22 @@ internal sealed class IcmpTransport : IDisposable
     private const byte ICMP_ECHO_REPLY = 0;   // reverse-ACK is a type-0 reply, matching icmp-channel.py
     private const ushort PING_ID = 0x4a01;    // fixed id the pinger uses post-punch (like a real ping's identifier)
     private const int DATA_HEADER = 3 + 4; // MAGIC(3) + uint32 frame id
-    // Hearing the peer this many times (any tagged packet) is enough to declare the hole open even without an
-    // explicit ACK exchange — robustness against the two sides' punch windows not overlapping cleanly.
+    // Hearing the peer this many times (any tagged packet) is enough to declare the hole open, even with no
+    // explicit ACK — the two sides' punch windows don't always overlap cleanly.
     private const int HEARD_TO_PUNCH = 8;
 
     // --- configuration (defaults are the validated values) ---
     private readonly IPEndPoint _peerEndpoint;
     private readonly IPAddress _peer;
-    // CLIENT/SERVER role. The INITIAL assignment is DETERMINISTIC — derived from the peer-id ordinal by the caller
-    // (MeshProtocolEngine compares the two GUIDs) so the two ends always start on opposite roles with zero
-    // coordination. Purely-inferred roles ("did I hear a request recently?") let BOTH sides evaluate the same way at
-    // the same moment → both became CLIENT → nobody drove the other's reply-vehicle → deadlock.
+    // CLIENT/SERVER role, assigned DETERMINISTICALLY by peer-id ordinal (caller compares GUIDs) so both ends start
+    // on opposite roles with zero coordination. An inferred role ("did I hear a request recently?") is unstable:
+    // both sides can evaluate it the same way at the same time and both become CLIENT, deadlocking.
     //
-    // BUT deterministic-and-complementary is not sufficient, because it can assign the roles BACKWARDS. Only ONE
-    // direction's echo REQUESTS actually cross a symmetric-NAT pair (capture: 10,897 of one side's requests arrived
-    // vs 97 of the other's), and which one is a property of the NAT pair, NOT of the peer-id ordering — so the coin
-    // flip is wrong half the time. When it is, the channel deadlocks in a way that looks exactly like a dead capture:
-    // the SERVER waits for requests that will never arrive (its data sits in _txQueue with no reply-vehicle) while
-    // the CLIENT sprays requests that never land. Observed 20:06 — SERVER got ONE type-8 in 30s, retransmitted its
-    // WG key 15 times unanswered, and both sides tore down.
-    //
-    // The role now only controls the keepalive-REQUEST RATE (how many reply-slots we hand the peer), NOT how data is
-    // sent — both roles drain data as matched type-0 replies, because that is the only shape this channel delivers.
-    // That makes a wrong role assignment merely suboptimal (fewer slots) instead of fatal, which is why the
-    // SERVER→CLIENT promotion that used to live here was removed rather than fixed.
+    // The initial assignment can still be backwards — only ONE direction's echo REQUESTS actually crosses a
+    // symmetric-NAT pair, and which one is a property of the NAT pair, not the peer-id ordering. That's fine: role
+    // only controls keepalive-REQUEST RATE (how many reply-slots we hand the peer), not how data is sent — both
+    // roles drain data as matched type-0 replies, the only shape this channel reliably delivers. A wrong role is
+    // merely suboptimal, not fatal.
     private readonly bool _isPinger;
     private bool _isClient => _isPinger;
     private readonly int _lockIds;          // number of reusable holes to lock onto for the data channel
@@ -141,14 +130,10 @@ internal sealed class IcmpTransport : IDisposable
         _lockSet = new ushort[_lockIds];
         for (int i = 0; i < _lockIds; i++) _lockSet[i] = (ushort)(0x100 + i);
 
-        // DIAGNOSTIC PROBE (env NT_ICMP_PROBE_LARGEREQ=1): after punch, send a LARGE (~200B) data-carrying echo
-        // REQUEST at ~3/sec and log distinctly whether the peer receives large REQUESTS (vs only replies). This
-        // isolates whether the punched hole forwards unsolicited large requests — if yes we can adopt icmptunnel's
-        // model (data on the request, ~3/sec, no reply-matching); if no, requests are unreliable for our symmetric
-        // case and we keep data-as-matched-reply. Off in normal operation.
-        // File-gated (NOT env-gated): the GUI runs ELEVATED, and a UAC-elevated process gets a fresh environment
-        // that does NOT inherit an env var set in an unelevated shell — so an env gate silently never fires. A file
-        // marker next to the binary is visible regardless of elevation.
+        // DIAGNOSTIC PROBE: after punch, send a LARGE (~200B) data-carrying echo REQUEST at ~3/sec and log whether
+        // the peer receives large REQUESTS (vs only replies). Off in normal operation.
+        // File-gated, not env-gated: the GUI runs elevated, and an elevated process doesn't inherit an env var set
+        // in an unelevated shell, so an env gate would silently never fire.
         try { _probeLargeReq = System.IO.File.Exists("nt-icmp-probe-largereq"); } catch { _probeLargeReq = false; }
     }
 
@@ -162,9 +147,8 @@ internal sealed class IcmpTransport : IDisposable
     /// </summary>
     public async Task<bool> StartAsync(CancellationToken ct = default)
     {
-        // Resolve the local source IP that routes to the peer (a UDP connect sends no packets; it just makes
-        // the OS pick the egress interface). Binding the raw send socket to this forces egress out the right
-        // NIC — WARP/Tailscale-aware, the fix that made the native punch work through tunnels.
+        // Resolve the local source IP that routes to the peer (UDP connect sends nothing; it just makes the OS
+        // pick the egress interface). Binding the raw send socket to this forces the right NIC — WARP/Tailscale-aware.
         try
         {
             using var probe = new Socket(_peer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
@@ -180,13 +164,10 @@ internal sealed class IcmpTransport : IDisposable
         {
             _sendSock = new Socket(_peer.AddressFamily, SocketType.Raw, proto);
             _sendSock.Bind(new IPEndPoint(_localSource, 0));
-            // Send buffer sizing — BUFFERBLOAT IS LATENCY. This was 1 MB, added back when the PUNCH sprayed ~1500
-            // packets/s and a small buffer starved the larger DATA packets (SendTo returned the byte count but the
-            // packet never hit the wire). That firehose is gone (steady state is ~60/s), and the 1 MB buffer became
-            // pure delay: we fill it faster than the NIC drains it, so every packet queues behind the backlog.
-            // MEASURED: raw request→reply RTT was a rock-steady ~900ms with a real network RTT of ~40ms — i.e.
-            // ~860ms of self-inflicted queueing. A small buffer can't hoard that backlog, so packets go out now.
-            // (If large-packet starvation ever returns, fix it by pacing the sender, NOT by growing the buffer.)
+            // Small send buffer on purpose — bufferbloat is latency. A 1MB buffer (sized for the old 1500/s punch
+            // firehose) fills faster than the NIC drains it at today's ~60/s steady state, adding pure queueing
+            // delay (measured ~860ms of self-inflicted RTT). If large-packet starvation ever returns, fix it by
+            // pacing the sender, not by growing the buffer.
             try { _sendSock.SendBufferSize = 64 * 1024; } catch { }
         }
         catch (SocketException)
@@ -220,10 +201,9 @@ internal sealed class IcmpTransport : IDisposable
         int idx = 0;
         double nextSend = 0;
 
-        // PUNCH — exactly icmp-channel.py: full-range 16-bit id sweep of echo REQUESTS + reverse-ACK the recently
-        // heard ids (type-0 reply, ACK-tagged), until the hole opens (a heard ACK flips _punched in OnInboundIcmp)
-        // or the timeout elapses. The full-range sweep is essential: a CGNAT rewrites the id anywhere in 0-65535,
-        // so a narrow window never collides. No lock-set openers — the data channel doesn't use a lock set.
+        // PUNCH: full-range 16-bit id sweep of echo REQUESTS + reverse-ACK the recently heard ids (type-0 reply,
+        // ACK-tagged), until the hole opens (a heard ACK flips _punched in OnInboundIcmp) or timeout. Full range is
+        // essential: a CGNAT rewrites the id anywhere in 0-65535, so a narrow window never collides.
         while (!_punched && !_stopped && sw.Elapsed < _punchTimeout)
         {
             SendTag(ICMP_ECHO_REQUEST, (ushort)(idx % 65536), (ushort)(idx & 0xFFFF), REQTAG);
@@ -249,27 +229,15 @@ internal sealed class IcmpTransport : IDisposable
 
         // Punch confirmed. Signal success and raise the event, then run the DATA CHANNEL.
         //
-        // THE PROVEN MODEL (from icmp-channel.py, which sustains bidirectional data through these CGNATs): DON'T
-        // stop the full-range sweep and DON'T switch to a fixed "lock set" — a CGNAT rewrites the ICMP id per
-        // flow to an ever-changing NAT-assigned id, so a fixed set is a hole the peer's NAT never forwards, and
-        // "data on heard ids" stops the spray so the holes die (both tried, both failed — proven by datacross).
-        // Instead: KEEP SWEEPING THE FULL 16-BIT ID RANGE, and CARRY caller data ON the sweep packets themselves.
-        // Each outbound packet is the next full-range id; if we have queued caller bytes we send a DATA frame,
-        // else a REQ opener. Many holes stay live; a fraction cross carrying bytes; the receiver reassembles what
-        // lands. Lossy spray, not a pipe — WireGuard's own retransmission tolerates the loss.
+        // Don't stay on the full-range sweep or switch to a fixed "lock set" post-punch — a fixed set is a hole
+        // the CGNAT never forwards (it rewrites the id per flow), and stopping the sweep kills the holes. Instead,
+        // post-punch uses a normal ping-session shape (see below): one fixed id, request/reply, data-as-reply.
         punchedTcs.TrySetResult(true);
         try { Punched?.Invoke(); } catch { }
 
-        // POST-PUNCH: replicate a NORMAL PING SESSION (icmptunnel model). The full-range sweep was ONLY needed to
-        // PUNCH (birthday-hunt the CGNAT-rewritten id); post-punch it looks like a port scan (MAC-ban trigger) and
-        // is unnecessary. Instead, one peer is the PINGER and one the RESPONDER:
-        //   • PINGER: sends echo REQUESTS on a FIXED id with an incrementing seq (exactly like `ping`), carrying
-        //     its data in the payload; a bare keepalive request when it has none. This is what keeps the flow warm.
-        //   • RESPONDER: never runs this request loop — it replies REACTIVELY to the pinger's requests in
-        //     OnInboundIcmp (echoing their id+seq), attaching its own queued data. So the responder's outbound is
-        //     pure type-0 replies matched to real requests → the NAT forwards them like normal ping replies.
-        // Net: steady-state = a single ping conversation (one id, sequential seq, request↔reply) — NAT-friendly,
-        // reliable, and indistinguishable from ping (no scan pattern, no ban).
+        // POST-PUNCH steady state replicates a normal ping session. The full-range sweep was only needed to punch
+        // (birthday-hunt the CGNAT-rewritten id); continuing it looks like a port scan (MAC-ban risk) and isn't
+        // needed once a hole is open. Data rides matched type-0 replies (see OnInboundIcmp); this loop is keepalive.
         double nextSend2 = 0;
         var sw2 = Stopwatch.StartNew();
         ushort pingSeq = 0;
@@ -294,35 +262,12 @@ internal sealed class IcmpTransport : IDisposable
                 continue;
             }
 
-            // ── CLIENT/SERVER MODEL (icmptunnel/hans/ptunnel — the design proven fast) ──────────────────────────
-            // Every working ICMP tunnel is client↔server: the CLIENT sends a dense stream of echo REQUESTS carrying
-            // its data; the SERVER never sends requests — it only REPLIES to the client's requests, piggybacking its
-            // own data on each reply. One request↔reply exchange = ONE RTT. That's why they're fast and we weren't.
+            // CLIENT/SERVER MODEL: client drives a dense request stream (its reply-vehicle); server replies
+            // reactively in OnInboundIcmp. Role is DETERMINISTIC by peer id, not inferred from traffic — an
+            // inferred role is unstable (both sides can independently flip to CLIENT at once and deadlock).
             //
-            // Our symmetric-NAT twist: only ONE direction's requests actually cross (whichever side won the punch —
-            // capture: 10,897 of one side's requests arrived vs 97 of the other's). So roles are DISCOVERED at
-            // runtime, not fixed: the side whose requests cross must be the CLIENT (its requests are the reply-
-            // vehicle), the side that RECEIVES those requests must be the SERVER. Each side decides from its OWN
-            // inbound-request rate — no coordination:
-            //   • I'm receiving the peer's requests at a high rate  → the peer's requests reach me → I'm the SERVER.
-            //     Do NOTHING in this loop; my data goes out purely via the reactive reply in OnInboundIcmp (one
-            //     data-reply per inbound request = one RTT, exactly icmptunnel's server).
-            //   • I'm NOT receiving the peer's requests            → mine are the ones that cross → I'm the CLIENT.
-            //     Drive a dense request stream carrying my queued data (data on the request; a bare keepalive-request
-            //     when idle to keep giving the server a reply-vehicle).
-            // This restores the request↔reply pairing that makes real ICMP tunnels one-RTT, and drops all the slot-
-            // harvesting / keepalive-reply machinery we built to fake it.
-            // ROLE = DETERMINISTIC + COMPLEMENTARY (by peer id), NOT inferred from traffic. An inferred role ("did I
-            // hear a request recently?") is UNSTABLE: both sides can evaluate it the same way at the same time. That
-            // is exactly what happened — both flipped to CLIENT, so neither drove the other's reply-vehicle, WG key
-            // resends looped forever and the tunnel deadlocked (it did NOT self-heal as I assumed). Deriving from the
-            // peer-id ordinal guarantees the two ends pick OPPOSITE roles, always, with zero coordination.
-            //
-            // BOTH sides still send requests — only the RATE differs. The client drives densely (it is the reply-
-            // vehicle generator); the server also emits a slow trickle so that if the client's requests are the ones
-            // that DON'T cross this pairing, the channel still has a live request stream in the other direction and
-            // can't go fully silent. Data always rides whatever we send: on our requests here, and on our replies to
-            // the peer's requests in OnInboundIcmp.
+            // Both sides still send requests, only the rate differs: the server also trickles slowly so the
+            // reverse direction never goes fully silent if it turns out to be the direction that actually crosses.
             if (!_loggedServerRole)
             {
                 _loggedServerRole = true;
@@ -330,50 +275,35 @@ internal sealed class IcmpTransport : IDisposable
                     $"[ICMP][role] {(_isClient ? "CLIENT (dense request driver)" : "SERVER (sparse requests; data rides replies)")}");
             }
 
-            // (A SERVER→CLIENT "backwards role rescue" was tried here and REMOVED. It fired correctly — 20:10:04,
-            //  "heard the peer for 9.4s but no inbound REQUEST" — and changed nothing, because promoting to CLIENT
-            //  moved that side OFF the reactive matched-reply path and ONTO the unsolicited-request path, which is
-            //  the one that doesn't deliver. The role was never the problem; the data SHAPE was. Both roles now
-            //  drain data the same way (matched replies), so there is nothing for a promotion to fix.)
+            // (A SERVER→CLIENT "backwards role rescue" was tried and removed — promoting to CLIENT moved that side
+            //  onto the unsolicited-request path, which doesn't deliver. Role was never the problem; data shape was.)
 
-            // DATA GOES OUT AS MATCHED REPLIES — NEVER AS UNSOLICITED REQUESTS.
-            //
-            // This loop used to drain the queue as type-8 REQUESTS on the fixed PING_ID. That is the ONE shape this
-            // channel provably does NOT deliver: an unsolicited inbound echo REQUEST has no outstanding entry in the
-            // peer's symmetric NAT, so it is dropped (documented above, and confirmed end-to-end at 20:09-20:10 —
-            // the side draining here sent its 203B WG key 15+ times and the peer received NONE of them, while the
-            // side draining via the reactive reply path got its 204B key across on the FIRST try and the peer
-            // declared the connection established). Same channel, same instant, opposite outcomes — the only
-            // difference was request-vs-matched-reply.
-            //
-            // So drain onto recently-heard (id,seq) slots as type-0 REPLIES via EmitFrameRedundant, which fans each
-            // frame across ~FRAME_FANOUT distinct live holes (a strict NAT forwards ~one reply per request, so
-            // distinct slots — not repeat copies onto one slot — are what buys reliability). Keepalive REQUESTS are
-            // still sent below; those are cheap 18B packets whose job is to keep the peer supplied with slots to
-            // reply onto, and they cross fine because they don't need to carry anything.
+            // DATA GOES OUT AS MATCHED REPLIES, NEVER AS UNSOLICITED REQUESTS: an unsolicited inbound echo REQUEST
+            // has no outstanding entry in the peer's symmetric NAT and is dropped (RFC 5508). Drain onto recently-
+            // heard (id,seq) slots as type-0 REPLIES via EmitFrameRedundant, fanning across ~FRAME_FANOUT distinct
+            // live holes (a strict NAT forwards ~one reply per request, so distinct slots buy reliability, not
+            // repeat copies on one slot). Keepalive REQUESTS still go out below to keep supplying the peer slots.
             Interlocked.Increment(ref _drainLoopIters);
             int sent = 0;
             for (; sent < DRAIN_PER_ITER && TryDequeueTxFrame(out var frame); sent++)
             {
-                // Prefer a REQUEST-derived slot (live NAT entry, forwardable per RFC 5508) but only while it's
-                // plausibly fresh. On a req=0 peer, _lastHeardReq is set once at punch time and never refreshes,
-                // so an unconditional preference would pin us to an hours-stale slot forever while
-                // _lastHeardAny stays current. Picks a slot; never refuses to send.
+                // Prefer a REQUEST-derived slot (live NAT entry, RFC 5508) while plausibly fresh. On a req=0 peer
+                // _lastHeardReq is set once at punch time and never refreshes, so an unconditional preference
+                // would pin us to an hours-stale slot while _lastHeardAny stays current.
                 bool reqIsFresher = _lastHeardReq >= 0 &&
                     (_lastHeardAny < 0 || _lastHeardReqUtc >= _lastHeardAnyUtc - STALE_REQ_SLOT);
                 long slot = reqIsFresher ? _lastHeardReq : (_lastHeardAny >= 0 ? _lastHeardAny : _lastHeardReq);
                 if (slot < 0)
                 {
-                    // Nothing heard from the peer yet — put the frame back and wait for the first packet.
-                    // Return it to the queue it CAME FROM: re-enqueueing unconditionally to _txQueue demotes
-                    // handshake packets out of _priorityTxQueue, losing both priority and HANDSHAKE_FANOUT.
+                    // Nothing heard from the peer yet. Requeue onto the queue it CAME FROM — enqueueing
+                    // unconditionally to _txQueue would demote handshake frames out of _priorityTxQueue.
                     bool wasHandshake = frame.Data.Length > 0 && frame.Data[0] >= 1 && frame.Data[0] <= 3;
                     (wasHandshake ? _priorityTxQueue : _txQueue).Enqueue(frame);
                     break;
                 }
-                // (Don't add a "hold the frame if the slot is stale" guard — tried, and it stalled the tunnel
-                //  outright: on a req=0 peer every slot is always stale, so it blocked every send. A stale slot
-                //  is low-probability delivery; refusing to send is zero.)
+                // No "hold the frame if the slot is stale" guard here: tried it, and it stalled the tunnel
+                // outright (on a req=0 peer every slot is always stale). A stale slot delivers low-probability;
+                // refusing to send delivers zero.
                 Interlocked.Increment(ref _txFramesSent);
                 // WG handshake packets (0x01/0x02/0x03) get a wider fanout: the priority queue fixes send ORDER,
                 // not delivery odds. They're tiny and rare, so the extra copies are nearly free.
@@ -381,71 +311,24 @@ internal sealed class IcmpTransport : IDisposable
                 int fanout = isHandshake ? HANDSHAKE_FANOUT : FRAME_FANOUT;
                 EmitFrameRedundant(frame, (ushort)(slot >> 16), (ushort)(slot & 0xFFFF), fanout);
             }
-            // PACING-VS-SLOT-SUPPLY probe: we hit the per-iteration cap AND still had more queued — the pacer (not
-            // the peer/NAT) stopped us this iteration. High drainFull + qDepth>0 => pacing-limited (raise
-            // DRAIN_PER_ITER / lower STEADY_INTERVAL). Low drainFull + qDepth>0 => the pacer has headroom but
-            // frames still back up => slot-supply-limited (delivery, not attempt rate, is the ceiling).
+            // Hit the per-iteration cap with more still queued => the pacer, not the peer/NAT, stopped us this
+            // iteration. High drainFull + qDepth>0 => pacing-limited; low drainFull + qDepth>0 => slot-supply-limited.
             if (sent >= DRAIN_PER_ITER && !_txQueue.IsEmpty)
                 Interlocked.Increment(ref _drainFullIters);
-            // ALWAYS send the keepalive REQUEST — never gate it on "we had nothing else to send".
+            // ALWAYS send the keepalive REQUEST, never gated on "we had nothing else to send" — it is the ONLY
+            // thing that gives the PEER live (id,seq) slots to put its data-replies on (its reactive drain in
+            // OnInboundIcmp fires only on inbound type-8). Gating on idle starves the channel exactly when it's
+            // busiest and symmetrically starves us back.
             //
-            // It used to be `if (sent == 0)`, which starved the channel exactly when it was busiest. Our keepalive
-            // requests are the ONLY thing that gives the PEER live (id,seq) slots to put ITS data-replies on (its
-            // reactive drain in OnInboundIcmp fires only on inbound type-8). So under load we stopped supplying
-            // slots at the very moment the peer had the most to send — and symmetrically it starved us. MEASURED
-            // (20:37-20:39): `req=` read 261/96 in the first window and then **0 for the entire run** on both sides,
-            // while data dribbled at type0=2 per 5s and WireGuard needed 15 handshake attempts over 84s to complete.
-            // These are 18-byte packets; sending one per iteration alongside the data is cheap and is what keeps the
-            // reverse direction alive.
-            //
-            // This also un-breaks the RTT probe, which lived inside the same dead branch — which is why [ICMP][rtt]
-            // has never once appeared in a log despite being the instrument for the latency question.
-            // KEEPALIVE REQUESTS MUST SWEEP THE ID SPACE — a fixed id never crosses.
-            //
-            // These were sent on a fixed PING_ID at 60/s and the peer received EXACTLY ZERO of them: `req=` reads
-            // 0 in every 5s window on both sides, across every run, and a Wireshark capture filtered to
-            // `icmp.type == 8` showed only 96 inbound requests out of 879,831 packets — all of them punch-phase
-            // ICH-AC packets, none from steady state. The punch works precisely BECAUSE it sweeps: a symmetric
-            // CGNAT rewrites our ICMP id, so only a sweep lands on an id the peer's NAT holds open. One fixed id is
-            // one lottery ticket, redrawn 60 times a second against the same losing number.
-            //
-            // This matters far more than it looks: our requests are the ONLY source of live reply-slots for the
-            // peer (its reactive drain fires on inbound type-8 only). No requests across ⇒ no live slots ⇒ both
-            // sides fall back to replying onto DEAD slots harvested from replies ⇒ ~20% delivery and 800ms ping.
-            //
-            // Sweep at the same steady rate (no extra packets, just a moving id) so this stays ping-shaped rather
-            // than scan-shaped — nothing like the 1500/s full-range punch that risks a MAC ban.
+            // MUST sweep the id space — a fixed id never crosses a symmetric CGNAT (it rewrites the id per flow,
+            // same reason the punch itself must sweep). Sweep at the same steady rate so this stays ping-shaped,
+            // not scan-shaped (unlike the 1500/s full-range punch, which risks a MAC ban).
             ushort kaId = (ushort)(_kaSweep++ & 0xFFFF);
-            ushort probeSeq = pingSeq;
-            if (_rttSw.Elapsed.TotalSeconds >= _nextRttProbe)
-            {
-                _nextRttProbe = _rttSw.Elapsed.TotalSeconds + 1.0;
-                long nowMs = _rttSw.ElapsedMilliseconds;
-                // Drop stamps nothing answered before recording the new one. Without this, an unmatched stamp from
-                // long ago can still be sitting under a ushort key that a later, wrapped seq reuses — see the
-                // class-level comment on _rttStamps for the multi-minute-"RTT" bug this caused.
-                if (_rttStamps.Count > 0)
-                {
-                    foreach (var kv in _rttStamps)
-                    {
-                        if (nowMs - kv.Value > RttStampMaxAgeMs)
-                            _rttStamps.TryRemove(kv.Key, out _);
-                    }
-                }
-                _rttStamps[probeSeq] = nowMs;
-            }
             SendTag(ICMP_ECHO_REQUEST, kaId, pingSeq++, REQTAG);
             // Pace at the dense rate whenever EITHER side has traffic to move; trickle only when genuinely idle.
-            //
-            // The SERVER used to trickle at 4/s unless its OWN queue was non-empty. But our request rate is the
-            // PEER's slot supply, so a trickling server capped the client at ~4 delivered frames/sec regardless of
-            // how much the client had queued — the server has no way to know the client is backed up. Keying the
-            // rate on recent DATA ACTIVITY IN EITHER DIRECTION (not just our own queue) means a busy peer gets a
-            // dense slot supply from us, and a quiet channel still costs only the idle trickle.
-            // An unfinished WG handshake counts as active. Handshake packets are sparse, so between attempts
-            // `active` goes false and the server drops to the 4/s trickle — but our request rate IS the peer's
-            // slot supply, so the channel thins out exactly when the handshake needs it (measured: inbound
-            // req/5s decayed 137 -> 24 -> 1 while init/resp climbed past 40). Hold dense until DATA flows.
+            // Keying on activity in either direction (not just our own queue) lets a trickling server still supply
+            // a busy client with a dense slot rate — the server can't otherwise know the client is backed up.
+            // An unfinished WG handshake counts as active, holding dense through the sparse gaps between retries.
             bool handshaking = !_priorityTxQueue.IsEmpty ||
                                (Interlocked.Read(ref _wgData) == 0 &&
                                 (DateTime.UtcNow - _handshakeSeenUtc) < HandshakeActiveWindow);
@@ -456,13 +339,11 @@ internal sealed class IcmpTransport : IDisposable
         }
     }
 
-    // The SERVER still emits a slow request trickle (~4/s) so the reverse direction never goes fully silent — if the
-    // client's requests turn out to be the ones this NAT pair drops, the server's trickle keeps a live request
-    // stream (and therefore a reply-vehicle) in the other direction. Far below the client's dense rate so it doesn't
-    // compete with the client's stream for NAT forwarding.
+    // Server still emits a slow request trickle so the reverse direction never goes fully silent if the client's
+    // requests turn out to be the ones this NAT pair drops. Far below the client's dense rate.
     private const double SERVER_TRICKLE_INTERVAL = 1.0 / 4.0;
-    // Last time we saw a WG handshake packet in either direction. Keeps the dense rate up across the ~5s gaps
-    // between WG's retries, which would otherwise let the server fall back to the trickle mid-handshake.
+    // Last time we saw a WG handshake packet in either direction. Keeps the dense rate up across the gaps between
+    // WG's retries, which would otherwise let the server fall back to the trickle mid-handshake.
     private DateTime _handshakeSeenUtc = DateTime.MinValue;
     private static readonly TimeSpan HandshakeActiveWindow = TimeSpan.FromSeconds(30);
     private DateTime _lastReqRxUtc = DateTime.MinValue;   // last time we heard a peer REQUEST (drives the promotion)
@@ -470,44 +351,20 @@ internal sealed class IcmpTransport : IDisposable
     private bool _loggedServerRole; // set once we've logged the role at startup
 
 
-    // Steady-state keepalive-request cadence: ~60/sec. This is the ONE rate PROVEN to complete the WG handshake and
-    // flow data (06:19 run: wg DATA=33 climbing). CRITICAL FINDING: HIGHER is NOT better — at 250/s the handshake
-    // NEVER completed (wg DATA=0, init/resp looped forever every ~2.5s = WG REKEY_TIMEOUT retransmit). The flood of
-    // keepalive-ACK replies crowds out / reorders WG's handshake completion packet so the session never confirms.
-    // 60/s has few enough keepalives that the handshake's critical packets land, while still supplying plenty of
-    // reply-slots. (The earlier 1888ms-at-10/s latency was a DIFFERENT bug — the stale-slot drain, now reverted —
-    // NOT a slot-supply problem, so don't "fix" it by raising the rate again.) Tune cautiously around 60/s.
+    // Steady-state keepalive-request cadence. DO NOT RAISE to chase throughput: at 128/s wire traffic hit ~140
+    // Mbit/s of raw ICMP to carry ~28 Mbit/s payload (FRAME_FANOUT multiplies every frame) and got the connection
+    // ISP-policed for hours afterward. Too-high rates also crowd out WG's handshake completion packet. Tune
+    // cautiously around 60/s.
     private const double STEADY_INTERVAL = 1.0 / 60.0;
     private DateTime _lastDataRxUtc = DateTime.MinValue;
     private DateTime _lastDataTxUtc = DateTime.MinValue;
 
-    // How long after the last data packet (either direction) we keep paying the dense keepalive rate. Several
-    // comments referenced an "ActiveWindow" that was never actually defined — the two timestamps above were written
-    // but never read, so the rate never adapted. Long enough to span a WG handshake round trip on a slow channel,
-    // short enough that a truly idle tunnel drops back to the trickle quickly.
+    // How long after the last data packet (either direction) we keep paying the dense keepalive rate. Long enough
+    // to span a WG handshake round trip on a slow channel, short enough that idle drops back to the trickle quickly.
     private static readonly TimeSpan ActiveWindow = TimeSpan.FromSeconds(3);
 
 
-    // TRANSPORT-LEVEL RTT probe. Settles whether the ~1s ping is OUR ICMP layer or ABOVE it (WG/proxy): the CLIENT
-    // stamps the send-time of one keepalive-request per second (by seq) and measures when the SERVER's reply for
-    // that exact seq comes back. That is the raw request→reply round trip with no WireGuard in the path. If this
-    // reads ~40ms while the mesh ping reads ~1000ms, the ICMP transport is fine and the latency is in WG/the proxy.
-    //
-    // Two fixed bugs to preserve: (1) _rttStamps is keyed by a ushort seq that wraps, and unmatched stamps used
-    // to linger forever, so a new probe could match an ancient stamp and report multi-minute "RTTs" — hence the
-    // expiry/rejection at RttStampMaxAgeMs; (2) the average was lifetime-cumulative, so one garbage sample
-    // poisoned it permanently — it is now reset per report, i.e. a rolling window.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<ushort, long> _rttStamps = new();
     private readonly Stopwatch _rttSw = Stopwatch.StartNew();
-    private double _nextRttProbe;
-    private long _rttSumMs, _rttCount;
-    private double _nextRttReport = 5.0;
-    // Cutoff for both stamp expiry and implausible-sample rejection. This is a per-second probe on a link whose
-    // worst observed (non-buggy) RTT is ~1-3s, so 10s is generous headroom while still being far below the gap
-    // needed for a ushort seq wrap (65536 seqs at ~1/s is ~18 hours) to ever land on a live entry.
-    private const long RttStampMaxAgeMs = 10_000;
-    // How long SendTo actually blocks (lock + kernel queue) — isolates self-inflicted send delay from wire/peer time.
-    private long _sendBlockedMs, _sendBlockedCount, _sendTotal;
     // Lock-wait vs syscall, split (see EmitIcmp). Reported as per-window averages in rx-stats so a degradation
     // can be attributed: lockWait spiking => _sendLock contention with the RX capture thread (fixable here);
     // syscall spiking => the kernel/NIC send path is slow (not contention); both flat => the send path is fine
@@ -517,18 +374,14 @@ internal sealed class IcmpTransport : IDisposable
 
     private long _txFrameCounter = -1;
 
-    // (DATA_SENDS was a redundancy factor whose comment claimed each SendData emitted "BOTH an echo request and a
-    //  matched reply". It never did — SendData emits exactly ONE packet — and nothing multiplied by this constant,
-    //  so every caller frame crossed the lossy channel as a SINGLE un-retried packet. Frame redundancy now comes
-    //  from EmitFrameRedundant/FRAME_FANOUT, which spreads copies across DISTINCT live slots. Constant removed so
-    //  the misleading claim can't be relied on again.)
+    // (DATA_SENDS, a removed redundancy constant, never actually did what its comment claimed. Frame redundancy
+    //  now comes from EmitFrameRedundant/FRAME_FANOUT, which spreads copies across DISTINCT live slots.)
 
-    // Max frames the send-loop fallback drains per iteration (onto the refreshing _lastHeardReq). Lets a queued
-    // backlog (WG handshake burst) clear in a couple of iterations instead of one-frame-per-pace (the ~50s cold
-    // start). BOUNDED on purpose — a full unbounded drain onto one stale slot is the greedy-drain regression.
-    // Tuned by measurement: 8 -> 64 took throughput 4.6 -> ~25 Mbit/s. Watch `drainFull` in rx-stats — pegged
-    // at ~301/301 with qDepth>0 means this cap is the limiter and there is room to raise it.
-    private const int DRAIN_PER_ITER = 64;
+    // Max frames the send-loop drains per iteration onto the refreshing _lastHeardReq. Bounded on purpose — a full
+    // unbounded drain onto one stale slot is the greedy-drain regression. This is a HARD frame-rate ceiling:
+    // DRAIN_PER_ITER / STEADY_INTERVAL. Raising it costs no extra wire traffic (we only emit what WG queued), so it
+    // widens the drain without touching the ICMP volume that got the connection ISP-policed.
+    private const int DRAIN_PER_ITER = 128;
 
     // Separate, SMALL cap for the reactive drain in OnInboundIcmp (see its call site) — that loop runs
     // synchronously on the Npcap capture thread once per inbound request, so a large value here stalls RX
@@ -541,12 +394,19 @@ internal sealed class IcmpTransport : IDisposable
     private sealed class TxFrame { public uint Frame; public byte[] Data; }
     private readonly System.Collections.Concurrent.ConcurrentQueue<TxFrame> _txQueue = new();
 
+    // BUFFERBLOAT BOUND. _txQueue was unbounded, so when WG offered frames faster than the pacer could deliver,
+    // the excess accumulated as standing queue depth — ping inflated under load and TCP inside the tunnel never
+    // saw a loss signal, so it kept growing its window into the buffer instead of settling at the real rate.
+    //
+    // Bufferbloat is SUSTAINED depth, not peak; a brief burst that drains again immediately costs little. Size
+    // for bursts, not backlog. Judge changes on ping-under-load staying flat AND qDepth returning near zero
+    // between bursts, not on throughput alone (throughput numbers below the bound are partly inflated by it).
+    private const int TX_QUEUE_MAX = 1024;
+
     // WG handshake packets (first byte 0x01 init / 0x02 response / 0x03 cookie) ride this separate FIFO, drained
-    // completely before _txQueue each iteration. Without this they queue behind whatever bulk data/keepalives are
-    // already backed up — plain FIFO, no priority — so a handshake init can sit behind hundreds of data frames
-    // and lose the retry race before its predecessor's reply even lands, producing the observed 20-30+ round
-    // handshake churn (wg: init=/resp= climbing for a long time before DATA starts). Handshake packets are tiny
-    // (<200B) and rare, so this costs nothing when idle and only matters exactly when it needs to.
+    // completely before _txQueue each iteration. Without it they queue behind bulk data/keepalives — a handshake
+    // init can sit behind hundreds of data frames and lose the retry race before its predecessor's reply lands.
+    // Tiny and rare, so this costs nothing when idle and only matters exactly when it needs to.
     private readonly System.Collections.Concurrent.ConcurrentQueue<TxFrame> _priorityTxQueue = new();
 
     /// <summary>
@@ -557,13 +417,8 @@ internal sealed class IcmpTransport : IDisposable
     /// </summary>
     public void Send(ReadOnlySpan<byte> data)
     {
-        // Counters distinguish "never called" from "called but dropped here" from "queued but not drained".
-        Interlocked.Increment(ref _sendCalls);
         if (!_punched || _stopped)
-        {
-            Interlocked.Increment(ref _sendDroppedNotReady);
             return;
-        }
         uint frame = (uint)Interlocked.Increment(ref _txFrameCounter);
         var body = data.ToArray();
         NoteSentBody(body); // remember it so we can drop the OS-reflected echo-reply copy that comes back to us
@@ -571,8 +426,21 @@ internal sealed class IcmpTransport : IDisposable
         // WG handshake init/response/cookie (first byte 1/2/3) jump the line — see _priorityTxQueue.
         bool isHandshake = body.Length > 0 && body[0] >= 1 && body[0] <= 3;
         if (isHandshake) _handshakeSeenUtc = DateTime.UtcNow;   // hold the dense rate while WG is negotiating
-        (isHandshake ? _priorityTxQueue : _txQueue).Enqueue(txFrame);
-        Interlocked.Increment(ref _sendEnqueued);
+        if (isHandshake)
+        {
+            // NEVER bounded: handshake frames are tiny and rare, and dropping one costs a full retry round.
+            _priorityTxQueue.Enqueue(txFrame);
+        }
+        else
+        {
+            // Drop the OLDEST, not this new one (see TX_QUEUE_MAX). Head-drop is what makes this work: the
+            // frames TCP is actually waiting on are the newest, so discarding stale head-of-line frames turns a
+            // latency problem into an immediate, honest loss signal. Tail-drop would instead punish exactly the
+            // frames that would have advanced the window, and keep the stale queue intact.
+            _txQueue.Enqueue(txFrame);
+            while (_txQueue.Count > TX_QUEUE_MAX && _txQueue.TryDequeue(out _))
+                Interlocked.Increment(ref _txQueueOverflowDrops);
+        }
     }
 
     /// <summary>byte[] overload — matches an Action&lt;byte[]&gt; delegate (e.g. the WireGuard proxy's send hook).</summary>
@@ -624,12 +492,9 @@ internal sealed class IcmpTransport : IDisposable
     private long _drainFullIters, _lastDrainFullIters;      // iterations where the for-loop hit DRAIN_PER_ITER with queue still non-empty
     private long _wirePkts, _lastWirePkts;                  // raw EmitIcmp calls (actual wire packets, post-fanout)
     private long _lastWgOutPackets;                         // previous PeerProxyListener.WgToProxyPackets (per-window delta)
-    // Send() accounting: calls in, frames actually queued, frames dropped by the !_punched/_stopped guard.
-    // sendCalls should track wgOut; a gap between sendCalls and sendEnq that isn't explained by sendDrop means
-    // the frame is being lost somewhere other than the guard.
-    private long _sendCalls, _lastSendCalls;
-    private long _sendEnqueued, _lastSendEnqueued;
-    private long _sendDroppedNotReady, _lastSendDroppedNotReady;
+    // Head-drops forced by TX_QUEUE_MAX. Nonzero under load is EXPECTED and healthy — it is the backpressure
+    // signal doing its job. A flat zero while ping inflates means the bound is too high to be biting.
+    private long _txQueueOverflowDrops, _lastTxQueueOverflowDrops;
 
     private void NoteHeardReq(ushort id, ushort seq)
     {
@@ -700,62 +565,16 @@ internal sealed class IcmpTransport : IDisposable
         // this keeps advancing while _lastReqRxUtc never does, the peer's requests aren't crossing → we must drive.
         if (_firstHeardUtc == DateTime.MinValue) _firstHeardUtc = DateTime.UtcNow;
 
-        // TRANSPORT RTT: a reply echoing a seq we stamped = one raw request→reply round trip, no WireGuard involved.
-        // Report the rolling average every 5s. If this is small (~tens of ms) while the mesh ping is ~1s, the ICMP
-        // transport is NOT the bottleneck and the latency lives in WireGuard / the loopback proxy above it.
-        if (type == ICMP_ECHO_REPLY && _rttStamps.TryRemove(seq, out long sentMs))
-        {
-            long rtt = _rttSw.ElapsedMilliseconds - sentMs;
-            // A match whose RTT still exceeds the stamp-expiry cutoff is a wrap/stale artifact, not a real
-            // measurement (see the class-level comment on _rttStamps) — discard it rather than let it poison the
-            // window average or print as a bogus last=.
-            if (rtt >= 0 && rtt <= RttStampMaxAgeMs)
-            {
-                Interlocked.Add(ref _rttSumMs, rtt);
-                long n = Interlocked.Increment(ref _rttCount);
-                double now = _rttSw.Elapsed.TotalSeconds;
-                if (now >= _nextRttReport)
-                {
-                    _nextRttReport = now + 5.0;
-                    // Window, not lifetime: read-and-reset the accumulators so avg= covers only the samples since
-                    // the last report line, not the life of the process. Previously these never reset, so a single
-                    // garbage sample (back when wrap collisions could still produce one) permanently skewed avg=
-                    // even long after the channel had recovered — e.g. avg=12268356ms next to a perfectly healthy
-                    // last=31ms in the same line.
-                    long windowSum = Interlocked.Exchange(ref _rttSumMs, 0);
-                    long windowCount = Interlocked.Exchange(ref _rttCount, 0);
-                    NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
-                        $"[ICMP][rtt] transport request→reply avg={windowSum / Math.Max(1, windowCount)}ms (n={windowCount}, last={rtt}ms) " +
-                        $"| sendTo blocked: {Interlocked.Read(ref _sendBlockedMs)}ms total over {Interlocked.Read(ref _sendBlockedCount)} slow sends of {Interlocked.Read(ref _sendTotal)}");
-                }
-            }
-        }
-        // Track the slot to put OUR data-replies on — but ONLY from inbound REQUESTS.
+        // Track the slot to put OUR data-replies on. A REQUEST's (id,seq) is a LIVE outstanding entry in our
+        // NAT's conntrack — replying to it is the shape RFC 5508 guarantees gets forwarded. A REPLY's (id,seq) is
+        // the opposite: that entry was already consumed, so answering it mostly gets dropped. So a REQUEST
+        // refreshes the primary slot; a REPLY refreshes only a separate fallback slot (used when this peer
+        // receives no requests at all — a poor slot beats no slot).
         //
-        // This used to refresh from ANY inbound packet, which fixed a starvation bug but silently created a worse
-        // one. A REQUEST's (id,seq) is a LIVE outstanding entry in our NAT's conntrack: replying to it is the one
-        // shape RFC 5508 guarantees gets forwarded. A REPLY's (id,seq) is the OPPOSITE — that entry was CONSUMED
-        // when the reply arrived, so answering it is answering something already matched, and most such packets are
-        // dropped. MEASURED (21:08): slots=512, slotAge=0ms, qDepth=0 — the ring looked perfectly healthy while
-        // DATA advanced only +2 per 5s, because every "slot" in it came from a reply and was already dead.
-        //
-        // So: a REQUEST refreshes the primary slot (the good, guaranteed-forwardable kind). A REPLY refreshes only a
-        // SEPARATE fallback slot, used when this peer receives no requests at all — which genuinely happens: in the
-        // 21:25 run the SERVER saw req=26/13/11 while the CLIENT saw req=0 for the whole run, so restricting slots
-        // to requests alone left that side with nothing to send onto and the tunnel stalled outright. A reply-slot
-        // is a poor slot, but a poor slot beats no slot.
-        // REGRESSION FIX (cold start got ~3x slower). Restricting this to type-8 starved the FANOUT RING.
-        //
-        // `_heardReqs` feeds RecentHeardReqs(), which EmitFrameRedundant uses to spread each frame across
-        // ~FRAME_FANOUT distinct holes. Filling it only from inbound REQUESTS means the side that receives
-        // almost none (observed: req=0 for entire runs on one peer) ends up with a ring of 0-1 entries, so every
-        // frame rides one hole instead of four. Steady-state throughput looks unchanged, but the WG handshake —
-        // whose few critical packets need redundancy most — takes far longer to complete. That is exactly the
-        // "same speed once up, 3x longer to start flowing" symptom.
-        //
-        // So: REQUESTS still set the primary slot (`_lastHeardReq`, the guaranteed-forwardable kind), but BOTH
-        // types feed the fanout ring. A reply-derived slot is a worse bet per-hole, yet four mediocre holes beat
-        // one good one for a packet that must not be lost.
+        // BOTH types still feed the fanout ring (`_heardReqs`, used by RecentHeardReqs/EmitFrameRedundant):
+        // restricting the ring to REQUESTS-only starves it on a peer that receives few requests, so every frame
+        // rides one hole instead of several — the WG handshake in particular needs that redundancy to complete
+        // quickly.
         if (type == ICMP_ECHO_REQUEST) NoteHeardReq(id, seq);
         else
         {
@@ -764,14 +583,8 @@ internal sealed class IcmpTransport : IDisposable
             NoteHeardSlot(id, seq);   // ring only — does NOT touch _lastHeardReq
         }
 
-        // COUNT FIRST, REPORT SECOND. `_reqSeen` used to be incremented ~40 lines BELOW the ReportDeliveryStats()
-        // call here, so every stats line reported the request count as of BEFORE the packet that triggered it. On a
-        // peer whose inbound is almost entirely 18B keepalives (no data frames), ReportDeliveryStats is driven ONLY
-        // from this rate-limited block — and since the rx-log gate (1s) and the stats gate (5s) are independent, the
-        // reported delta sampled at arbitrary moments and systematically missed the request stream.
-        // THAT is why one peer logged `[ICMP][rx] type=8` repeatedly while the same log line said `req=0`: the
-        // requests were arriving and being counted, but the DELTA was computed at the wrong instant. Two of my own
-        // counters disagreed and I trusted the wrong one for several rounds of debugging.
+        // Count _reqSeen before ReportDeliveryStats can run (below), not after — reporting before counting
+        // sampled the delta at the wrong instant and systematically under-reported the request rate.
         if (_punched && type == ICMP_ECHO_REQUEST)
         {
             _lastReqRxUtc = DateTime.UtcNow;
@@ -801,60 +614,38 @@ internal sealed class IcmpTransport : IDisposable
                 $"({(type == ICMP_ECHO_REQUEST ? "REQUEST" : "reply")}) — {(type == ICMP_ECHO_REQUEST && isProbe ? "LARGE REQUEST CROSSES ✓" : "not a peer large-request")}");
         }
 
-        // DATA-AS-MATCHED-REPLY (both roles, post-punch). The channel's ONE reliable delivery shape is an echo
-        // REPLY matched to a request the receiver's NAT recently sent out (RFC 5508) — proven by the 1.1.1.1 test
-        // (arbitrary large payloads cross as replies to your own requests) and the captures (unsolicited inbound
-        // REQUESTS are dropped; only matched replies land). So we answer the peer's keepalive REQUESTS, echoing
-        // their id+seq, carrying our queued data if any (else a keepalive reply). Both peers ping each other AND
-        // both answer the other's pings with data → data rides the reply shape in BOTH directions.
+        // DATA-AS-MATCHED-REPLY (both roles, post-punch). The channel's one reliable delivery shape is an echo
+        // REPLY matched to a request the receiver's NAT recently sent out (RFC 5508); unsolicited REQUESTS are
+        // dropped. So we answer the peer's REQUESTS, echoing their id+seq, carrying queued data if any.
         //
-        // Reply to any inbound REQUEST (ICMP type-8) — NOT just REQTAG-tagged ones. THIS WAS THE THROUGHPUT BUG:
-        // the old gate `ContainsTag(REQTAG)` only matched bare keepalive requests, but once data flows the peer's
-        // requests CARRY DATA (MAGIC, not REQTAG) or are otherwise untagged, so we REJECTED ~60/s of perfectly good
-        // live slots and answered almost none → our data couldn't get out → 2s ping. Proof it was a counting/gating
-        // lie, not a dead channel: `req=0` in the counter WHILE ping still succeeded (data was crossing on the few
-        // slots that leaked through) — user caught it ("they have to be arriving, look at the 2s ping"), and the
-        // capture showed 60/s type-8 requests arriving the whole time. Keying on the ICMP TYPE (a request is type-8)
-        // instead of our tag captures ALL of them. SAFE from the reply-to-reply amplification loop: that loop was
-        // about replying to type-0 REPLIES; a type-8 is a REQUEST (the peer's NAT holds it as a live outstanding
-        // slot), and replying to a request is exactly the intended request→reply flow, never a reply→reply cycle.
+        // Reply to any inbound REQUEST (type-8), NOT just REQTAG-tagged ones — once data flows, the peer's
+        // requests carry MAGIC instead of REQTAG, so gating on the tag rejected most live slots. Keying on ICMP
+        // TYPE captures all of them. Safe from a reply-to-reply amplification loop: type-8 is a REQUEST, so
+        // replying to it is the intended request→reply flow, never a reply→reply cycle.
         if (_punched && type == ICMP_ECHO_REQUEST)
         {
-            // SERVER SIDE of the client/server model (icmptunnel's server): the client's request just arrived, so
-            // piggyback our queued data on the REPLY — immediately, on the capture thread. One request in → data out
-            // in the same instant = ONE RTT, which is what makes real ICMP tunnels fast.
+            // SERVER SIDE of the client/server model: the client's request just arrived, so piggyback our queued
+            // data on the REPLY immediately, on the capture thread. One request in, data out in the same instant.
             //
-            // (_lastReqRxUtc / _reqSeen are updated at the TOP of this method — count-before-report, see there.)
-
-            // Drain up to RX_THREAD_DRAIN_CAP frames onto THIS request's (id,seq). The NAT forwards ~one reply per
-            // request, so extra copies here can be dropped — but a client sending a dense request stream gives us a
-            // fresh slot every few ms, so the queue drains fast across successive requests. Sending a small burst
-            // (rather than exactly one) lets a backlog (iperf, WG handshake) clear without waiting a request each.
+            // Drain up to RX_THREAD_DRAIN_CAP frames onto THIS request's (id,seq) — a small burst rather than
+            // exactly one lets a backlog (WG handshake, iperf) clear without waiting a request each.
             //
-            // DELIBERATELY NOT DRAIN_PER_ITER: this runs synchronously on the Npcap capture thread under
-            // _sendLock, once per inbound packet. A large cap here stalls RX processing and fights the main
-            // drain loop for the lock — which showed up as long delivery gaps and 30s watchdog teardowns. Keep
-            // small and independent of TX tuning.
-            // MUST use TryDequeueTxFrame (priority-first), not _txQueue alone: that excludes WG handshake
-            // packets from this reactive matched-reply path — the one delivery shape this channel reliably
-            // has — leaving them to fan out over already-consumed reply slots on a req=0 peer. Cost up to 54
-            // init/resp rounds before it landed by luck.
+            // MUST use TryDequeueTxFrame (priority-first), not _txQueue alone, or WG handshake frames get excluded
+            // from this reactive matched-reply path — the one delivery shape this channel reliably has.
             int replied = 0;
             for (; replied < RX_THREAD_DRAIN_CAP && TryDequeueTxFrame(out var frame); replied++)
                 SendData(ICMP_ECHO_REPLY, id, seq, frame.Frame, frame.Data);
             if (replied == 0)
                 SendTag(ICMP_ECHO_REPLY, id, seq, ACKTAG); // keepalive reply — keeps the client's flow alive
-            // (Tried a MIRROR-REQUEST here — on hearing the peer's request, fire our own request on that same id to
-            //  ride its hole. It did NOT work: the id we RECEIVE on is OUR NAT's inbound id, independent of the
-            //  PEER's inbound id, so it can't make our unsolicited request cross to a symmetric NAT. Reverted — this
-            //  is the fundamental symmetric-NAT wall, see [[project_icmp_symmetric_reply_model]].)
+            // (A MIRROR-REQUEST was tried here — fire our own request on the peer's just-heard id to ride its
+            //  hole. Doesn't work: the id we RECEIVE on is OUR NAT's inbound id, independent of the peer's, so it
+            //  can't make an unsolicited request cross a symmetric NAT. The fundamental symmetric-NAT wall.)
         }
 
-        // During the punch, decide the hole is open. An explicit ACK is the clean signal, but the two peers
-        // start their sweeps at DIFFERENT wall-clock times in the live mesh (each hits the Tier-2 branch on its
-        // own discovery poll), so the ACK-tag exchange can race and one side times out while the other punched
-        // (the observed split-brain). Hearing the peer AT ALL means our outbound reached them and their NAT is
-        // forwarding to us on an id we can read — so establish on either an explicit ACK OR sustained hearing.
+        // Decide the hole is open during the punch. An explicit ACK is the clean signal, but the two peers can
+        // start sweeping at different wall-clock times, so the ACK-tag exchange can race and one side time out
+        // while the other punched. Hearing the peer at all means our outbound reached them and their NAT is
+        // forwarding to us — establish on either an explicit ACK OR sustained hearing.
         if (!_punched)
         {
             bool ack = ContainsTag(payload, ACKTAG);
@@ -875,12 +666,10 @@ internal sealed class IcmpTransport : IDisposable
 
         // Data frame: MAGIC + uint32 frame id + caller bytes.
         //
-        // REFLECTION FILTER (critical): we carry caller data on type-8 echo REQUESTS. When our request reaches the
-        // peer, their OS auto-generates a type-0 echo REPLY that copies our payload VERBATIM back to us — so the
-        // sender sees its OWN data returning. We CANNOT simply reject all type-0, because on some NAT/stack pairs
-        // (RCVALL directionality asymmetry) a peer's REAL data only ever arrives here as type-0. So instead we
-        // reject by CONTENT: drop any inbound data frame whose exact bytes match a frame WE recently SENT (that's
-        // a reflection of our own outbound); anything else is genuine peer data, whatever its ICMP type.
+        // REFLECTION FILTER: our outbound requests reach the peer's OS, which auto-generates a type-0 reply
+        // copying our payload back verbatim. We can't reject all type-0 (some NAT/stack pairs only ever deliver
+        // real peer data as type-0), so instead reject by CONTENT: drop any inbound data frame whose bytes match
+        // one we recently sent; anything else is genuine peer data regardless of ICMP type.
         if (payload.Length >= DATA_HEADER && StartsWith(payload, MAGIC))
         {
             uint frame = (uint)((payload[3] << 24) | (payload[4] << 16) | (payload[5] << 8) | payload[6]);
@@ -900,27 +689,14 @@ internal sealed class IcmpTransport : IDisposable
                     // drop the repeat (bounded seen-set). Counted so we can tell "peer data never arrived" from
                     // "peer data arrived (repeatedly) and we're discarding the copies as duplicates".
                     Interlocked.Increment(ref _rxDropDedup);
-                    // Track the worst repeat-count per window: many distinct ids each repeating ~fanout times is
-                    // our own fan-out (normal); ONE id repeating dozens of times means the peer is retransmitting
-                    // because our replies aren't reaching it.
-                    int reps = _dupCounts.AddOrUpdate(frame, 1, static (_, n) => n + 1);
-                    if (reps > _dupWorstReps)
-                    {
-                        _dupWorstReps = reps;
-                        _dupWorstFrame = frame;
-                    }
                 }
                 else
                 {
-                    // MEASUREMENT: which ICMP type actually DELIVERED this unique data frame — type-8 request
-                    // (spray-and-pray to a live hole) vs type-0 reply (matched to the peer's request). Reported
-                    // per ~5s window (below) so we see the type SPLIT and whether type-0 tapers over time.
+                    // Which ICMP type delivered this unique data frame — type-8 spray vs type-0 matched reply.
                     if (type == ICMP_ECHO_REQUEST) Interlocked.Increment(ref _rxDataType8);
                     else Interlocked.Increment(ref _rxDataType0);
                     _lastDataRxUtc = DateTime.UtcNow; // real data arrived → keep the fast ping rate for ActiveWindow
-                    // WG handshake progress: first byte 0x01=init 0x02=response 0x03=cookie 0x04=TRANSPORT. If we only
-                    // ever see 01/02 repeating, the handshake never completes → no data → no ping. 0x04 = handshake
-                    // done, real traffic flowing. Count per type so the rx-stats line shows whether we reach 0x04.
+                    // WG handshake progress: 0x01=init 0x02=response 0x03=cookie 0x04=transport (handshake done).
                     if (copy.Length > 0)
                     {
                         byte w = copy[0];
@@ -936,18 +712,8 @@ internal sealed class IcmpTransport : IDisposable
         }
         else
         {
-            // Inbound packet does NOT carry a data frame (MAGIC didn't match, or it matched but too short to hold
-            // a real body, or the packet was shorter than DATA_HEADER to begin with) — keepalives, punch openers
-            // (REQTAG/ACKTAG), probe traffic, etc. Counted so rx-stats can show total inbound volume vs data
-            // volume — otherwise a stuck delivery session looks identical whether the peer is sending mostly
-            // keepalives or mostly data that's being dropped downstream.
-            //
-            // too-short is folded into non-magic rather than split out at the top of the method: StartsWith(MAGIC)
-            // already implies payload.Length >= 3, and the DATA_HEADER length check is part of THIS SAME outer
-            // condition, so a too-short packet and a wrong-prefix packet both fail this one `if` and land here —
-            // splitting them would require re-testing payload.Length a second time for no additional information
-            // (a too-short packet can never be a data frame either way). If payload.Length < DATA_HEADER we still
-            // attribute it to the dedicated _rxTooShort bucket below so the two categories don't overlap.
+            // Not a data frame (MAGIC didn't match or payload too short) — keepalives, punch openers, probe
+            // traffic. Counted so rx-stats can show inbound volume vs data volume.
             if (payload.Length < DATA_HEADER) Interlocked.Increment(ref _rxTooShort);
             else Interlocked.Increment(ref _rxNonMagic);
         }
@@ -965,12 +731,6 @@ internal sealed class IcmpTransport : IDisposable
     // (too-short / non-magic / reflection / dedup-dropped / delivered).
     private long _rxDropReflection;   // OnInboundIcmp: payload matched a frame WE recently sent (OS echo-reflection, not peer data)
     private long _rxDropDedup;        // OnInboundIcmp: MarkFrameSeen(frame) was false — a duplicate copy of an already-delivered frame
-    // Per-window repeat census for duplicates (see the dedup branch): frame id -> times seen this window, plus
-    // the worst offender. CLEARED each window in ReportDeliveryStats — unbounded growth here would both leak and
-    // turn "worst" into a lifetime figure that never decays.
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<uint, int> _dupCounts = new();
-    private volatile int _dupWorstReps;
-    private volatile uint _dupWorstFrame;
     private long _rxNonMagic;         // OnInboundIcmp: inbound packet did not start with MAGIC (keepalive/ACK/tag traffic, not a data frame)
     private long _rxTooShort;         // OnInboundIcmp: payload shorter than DATA_HEADER, so it can't even be checked for MAGIC
     private long _lastRxDropReflection, _lastRxDropDedup, _lastRxNonMagic, _lastRxTooShort; // rx-stats per-window baselines
@@ -985,22 +745,14 @@ internal sealed class IcmpTransport : IDisposable
         long d8 = t8 - _lastReport8, d0 = t0 - _lastReport0;
         _lastReport8 = t8; _lastReport0 = t0;
         long rq = Interlocked.Read(ref _reqSeen); long drq = rq - _lastReqSeen; _lastReqSeen = rq;
-        // req/5s = inbound REQTAG requests = HOW MANY DELIVERABLE SLOTS the peer gives us (throughput ceiling: we
-        // can deliver at most one frame per request). If this is LOW (e.g. ~10/5s) that IS the latency cause — the
-        // peer's requests aren't reaching us fast enough to carry our data back. wgData(0x04)>0 = handshake done.
-        // SLOT DIAGNOSTICS. `req=0` across every run means the peer's steady-state echo REQUESTS never reach us, so
-        // the reactive drain in OnInboundIcmp never fires and ALL our data must go out as replies onto slots we
-        // learned from inbound packets. These counters answer the question that decides the next fix: how many
-        // DISTINCT slots do we actually have to reply onto, and is the one we use going stale?
-        //   slots     = distinct (id,seq) in the ring right now (our real fan-out width)
-        //   slotAgeMs = how long ago _lastHeardReq was refreshed (large ⇒ we're replying onto a dead slot)
-        //   txSent    = frames we handed to EmitFrameRedundant in this window (what we TRIED to send)
+        // req/5s = inbound REQTAG requests = deliverable-slot supply from the peer (throughput ceiling: at most
+        // one frame per request). slots/slotAgeMs/txSent below answer: how many distinct slots do we have to
+        // reply onto, and is the one in use going stale?
         long tx = Interlocked.Read(ref _txFramesSent); long dtx = tx - _lastTxFramesSent; _lastTxFramesSent = tx;
         double slotAgeMs = _lastHeardReqUtc == DateTime.MinValue
             ? -1 : (DateTime.UtcNow - _lastHeardReqUtc).TotalMilliseconds;
-        // Age of the slot we'd ACTUALLY pick right now, and which kind it is. slotAge above tracks only
-        // _lastHeardReqUtc, which on a req=0 peer never refreshes and reads as hours-stale even while the slot
-        // in use is fresh — misleading, and it cost debugging time twice.
+        // Age of the slot we'd ACTUALLY pick right now, and which kind it is — slotAge above tracks only
+        // _lastHeardReqUtc, which on a req=0 peer never refreshes and misleadingly reads as hours-stale.
         bool useReqSlot = _lastHeardReq >= 0 &&
             (_lastHeardAny < 0 || _lastHeardReqUtc >= _lastHeardAnyUtc - STALE_REQ_SLOT);
         DateTime activeUtc = useReqSlot ? _lastHeardReqUtc : _lastHeardAnyUtc;
@@ -1026,9 +778,7 @@ internal sealed class IcmpTransport : IDisposable
         long dWgOut = wgOut - _lastWgOutPackets; _lastWgOutPackets = wgOut;
         double wgOutPerSec = dWgOut / 5.0;
 
-        long sCalls = Interlocked.Read(ref _sendCalls); long dSCalls = sCalls - _lastSendCalls; _lastSendCalls = sCalls;
-        long sEnq = Interlocked.Read(ref _sendEnqueued); long dSEnq = sEnq - _lastSendEnqueued; _lastSendEnqueued = sEnq;
-        long sDrop = Interlocked.Read(ref _sendDroppedNotReady); long dSDrop = sDrop - _lastSendDroppedNotReady; _lastSendDroppedNotReady = sDrop;
+        long qOvf = Interlocked.Read(ref _txQueueOverflowDrops); long dQOvf = qOvf - _lastTxQueueOverflowDrops; _lastTxQueueOverflowDrops = qOvf;
         double attemptedPerSec = dtx / 5.0, deliveredType0PerSec = d0 / 5.0, wirePktsPerSec = dWire / 5.0;
 
         // Receive-path drop breakdown: nonMagic dominating with refl/dup near zero => the peer's data isn't
@@ -1041,19 +791,11 @@ internal sealed class IcmpTransport : IDisposable
         NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
             $"[ICMP][rx-stats] last5s: type8={d8} type0={d0} req={drq}  total type0={t0}  " +
             $"wg: init={Interlocked.Read(ref _wgInit)} resp={Interlocked.Read(ref _wgResp)} DATA={Interlocked.Read(ref _wgData)}" +
-            $" | slots={_heardReqCount} slotAge={slotAgeMs:F0}ms activeSlot={(useReqSlot ? "req" : "any")}/{activeAgeMs:F0}ms txFrames={dtx} qDepth={_txQueue.Count}" +
+            $" | slots={_heardReqCount} slotAge={slotAgeMs:F0}ms activeSlot={(useReqSlot ? "req" : "any")}/{activeAgeMs:F0}ms txFrames={dtx} qDepth={_txQueue.Count} qOvfDrop={dQOvf}" +
             $" | drainFull={dFullIters}/{dLoopIters} attempted/s={attemptedPerSec:F0} deliveredType0/s={deliveredType0PerSec:F0} wirePkts/s={wirePktsPerSec:F0}" +
             $" | lockWait={lockWaitUs:F0}us syscall={syscallUs:F0}us per send" +
             $" | rxDrop refl={dRefl} dup={dDup} nonMagic={dNonMagic} short={dTooShort}" +
-            $" dupDistinct={_dupCounts.Count} dupWorst={_dupWorstReps}x(frame {_dupWorstFrame})" +
-            $" | wgOut/s={wgOutPerSec:F0} sendCalls={dSCalls} sendEnq={dSEnq} sendDrop={dSDrop} punched={_punched}");
-
-        // Reset the per-window duplicate census. dupDistinct ≈ dup/FRAME_FANOUT with a low dupWorst means our own
-        // fanout copies (expected, harmless); a SMALL dupDistinct with a LARGE dupWorst means the peer is
-        // retransmitting the same frame over and over because our replies aren't reaching it.
-        _dupCounts.Clear();
-        _dupWorstReps = 0;
-        _dupWorstFrame = 0;
+            $" | wgOut/s={wgOutPerSec:F0} punched={_punched}");
     }
 
     // Hashes of caller frame bodies we've recently SENT, to detect OS-reflected copies of our own outbound.
@@ -1138,23 +880,19 @@ internal sealed class IcmpTransport : IDisposable
     }
 
     // RELIABILITY CORE: emit ONE caller frame across MANY independent holes so it crosses even when most holes are
-    // bad. The channel-quality variance is the real enemy: a frame sent onto a single (id,seq) is a coin-flip
-    // (some punches land on holes that barely pass anything → WG handshake never completes → init/resp loop). Here
-    // we send the frame as a reply onto (a) the just-arrived request's (id,seq) — guaranteed-live — AND (b) each of
-    // the most-recent DISTINCT heard requests (a valid outstanding NAT mapping for a short window). The receiver
-    // de-dups by frame id, so duplicates are free; we only need ONE of the N copies to survive. This is the fix for
-    // the stuck-handshake variance — critical handshake packets now ride ~FANOUT holes at once. NOTE: this SAMPLES
-    // the heard-request ring (RecentHeardReqs, non-consuming) — it does NOT dequeue, so it can't drain the ring dry
-    // (that was the earlier regression). Bounded fanout keeps the on-wire cost sane.
+    // bad — a frame on a single (id,seq) is a coin-flip. Sends as a reply onto (a) the just-arrived request's
+    // (id,seq), guaranteed-live, AND (b) each of the most-recent distinct heard requests. Receiver de-dups by
+    // frame id, so duplicates are free. SAMPLES the heard-request ring (RecentHeardReqs, non-consuming) — does
+    // NOT dequeue, so it can't drain the ring dry (that was the earlier regression).
     //
-    // FANOUT SIZING: this is NOT "more copies" — it's the SAME ~4-copy budget the old code already sent (DATA_SENDS),
-    // just spread across DISTINCT holes instead of piling all onto ONE (id,seq) where the NAT forwarded ~one and
-    // wasted the rest. If a single hole delivers ~p, N independent holes deliver 1-(1-p)^N: at p≈0.5 that's 2→75%,
-    // 3→87%, 4→94% — the knee is ~4, past which it's just wasted packets.
+    // FRAME_FANOUT=1 (no redundancy): extra copies were found to cost more in wire volume (ISP rate-limit risk)
+    // than they bought in delivery — losses were correlated with volume, not independent per-copy, so fanout was
+    // partly causing the drops it existed to mask. Judge changes here by delivery (loss %, handshake speed),
+    // not raw Mbit/s throughput, which is insensitive to fanout.
     //
-    // Tried 2: halved wire copies as expected and changed throughput not at all, so fanout is not the
-    // throughput cap. Kept at 4.
-    private const int FRAME_FANOUT = 4;
+    // HANDSHAKE_FANOUT stays high regardless: those frames are rare and tiny, losing one costs a full retry
+    // round, so redundancy there is nearly free.
+    private const int FRAME_FANOUT = 1;
     // Wider fanout reserved for WG handshake packets (0x01/0x02/0x03) — see call site in the drain loop. These
     // are rare (a handful per connection) and small, so spending more slot attempts on them is nearly free in
     // aggregate wire volume, but meaningfully raises the odds that a full round of the handshake actually lands
@@ -1167,22 +905,11 @@ internal sealed class IcmpTransport : IDisposable
         SendData(ICMP_ECHO_REPLY, liveId, liveSeq, frame.Frame, frame.Data); // the guaranteed-live slot
         int live = (liveId << 16) | liveSeq;
         var recent = RecentHeardReqs(fanout);
-        int copies = 1;
         foreach (var hr in recent)
         {
             if (hr == live) continue; // already sent onto the live slot
             SendData(ICMP_ECHO_REPLY, (ushort)(hr >> 16), (ushort)(hr & 0xFFFF), frame.Frame, frame.Data);
-            copies++;
         }
-
-        // `fanout` is a CEILING: RecentHeardReqs returns only as many distinct slots as the ring holds, and the
-        // loop skips the live slot. Log what each handshake frame actually got.
-        bool isHandshake = frame.Data.Length > 0 && frame.Data[0] >= 1 && frame.Data[0] <= 3;
-        if (isHandshake)
-            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
-                $"[ICMP][hs] wgType={frame.Data[0]} fanoutAsked={fanout} copiesSent={copies} " +
-                $"ringSlots={_heardReqCount} reqSlot={(_lastHeardReq >= 0 ? "yes" : "no")} " +
-                $"anySlot={(_lastHeardAny >= 0 ? "yes" : "no")}");
     }
 
     /// <summary>Frames the ICMP header (type/code/id/seq/checksum) around a payload and sends it raw.</summary>
@@ -1226,13 +953,6 @@ internal sealed class IcmpTransport : IDisposable
             long tDone = _rttSw.ElapsedTicks;
             Interlocked.Add(ref _lockWaitTicks, tAcquired - tEnter);   // time spent waiting for the OTHER thread
             Interlocked.Add(ref _syscallTicks, tDone - tAcquired);     // time spent inside SendTo itself
-            long blockedMs = (tDone - tEnter) / TimeSpan.TicksPerMillisecond;
-            if (blockedMs > 0)
-            {
-                Interlocked.Add(ref _sendBlockedMs, blockedMs);
-                Interlocked.Increment(ref _sendBlockedCount);
-            }
-            Interlocked.Increment(ref _sendTotal);
         }
         catch (Exception ex)
         {
@@ -1245,11 +965,8 @@ internal sealed class IcmpTransport : IDisposable
 
     private void Pace(Stopwatch sw, ref double nextSend) => PaceTo(sw, ref nextSend, _sendInterval);
 
-    // Post-punch FAST send rate (packets/sec), used ONLY while data is actively flowing (see the adaptive pacing
-    // in the send loop). Much lower than the punch rate (1500) — we're no longer birthday-hunting, just keeping the
-    // peer's reply-match request ring fed while a WG handshake / traffic burst moves. At rest the loop uses
-    // IDLE_INTERVAL instead (a trickle), so this rate only applies for the ~seconds data is in flight. Accurate
-    // because PaceTo spin-waits the sub-ms remainder (Thread.Sleep alone can't hit this rate).
+    // Post-punch fast send rate, used only while data is actively flowing (see adaptive pacing in the send loop).
+    // Much lower than the punch rate — no longer birthday-hunting, just keeping the peer's reply-match ring fed.
     private const double POST_PUNCH_INTERVAL = 1.0 / 250.0;
 
     private void PaceTo(Stopwatch sw, ref double nextSend, double interval)
@@ -1257,13 +974,9 @@ internal sealed class IcmpTransport : IDisposable
         if (interval <= 0) return;
         nextSend += interval;
         double now = sw.Elapsed.TotalSeconds;
-        // Resync-on-drift: if a slow iteration (e.g. a blocked sendTo) pushed us more than one interval behind
-        // schedule, nextSend += interval alone would keep landing behind `now` forever — every future call would
-        // see remain<=0 and return immediately, disabling pacing entirely until the loop somehow outran real time
-        // (it never does under sustained load, since the same cause that created the debt keeps recurring). That
-        // free-running loop is what turned into unbounded CPU/_sendLock pressure over a long run (iteration counts
-        // observed at 398-537/5s vs the ~300 the 60Hz pace implies). Clamp the debt to one interval instead of
-        // letting it compound — resume normal pacing next call rather than racing to catch up.
+        // Resync-on-drift: if a slow iteration pushed us more than one interval behind schedule, `nextSend +=
+        // interval` alone would keep landing behind `now` forever, disabling pacing entirely (free-running loop,
+        // unbounded CPU/_sendLock pressure). Clamp the debt to one interval instead of letting it compound.
         if (now - nextSend > interval) nextSend = now;
         double remain = nextSend - now;
         if (remain <= 0) return;
@@ -1310,11 +1023,16 @@ internal sealed class IcmpTransport : IDisposable
 
     public void Dispose()
     {
+        // ORDER MATTERS — this used to deadlock the process into an unkillable zombie. NpcapCapture.Dispose calls
+        // StopCapture(), which blocks until the capture thread exits; that thread runs OnInboundIcmp, which does
+        // a synchronous SendTo under _sendLock. If the send loop still holds _sendLock, StopCapture never returns.
+        // So: signal stop, JOIN THE SEND LOOP FIRST (it releases _sendLock on exit), then tear down capture.
+        // Socket disposal is deferred until after the join so an in-flight send can't fault.
         _stopped = true;
+        try { _sendThread?.Join(1500); } catch { }
+        _sendThread = null;
         try { _capture?.Dispose(); } catch { }
         try { _sendSock?.Dispose(); } catch { }
         _sendSock = null;
-        try { _sendThread?.Join(1500); } catch { }
-        _sendThread = null;
     }
 }

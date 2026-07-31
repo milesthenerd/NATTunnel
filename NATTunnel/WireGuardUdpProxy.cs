@@ -225,10 +225,11 @@ internal class WireGuardUdpProxy : IDisposable
                             peerLastActivity[peerTunnelIp] = DateTime.UtcNow;
                         }
 
-                        // DIAGNOSTIC (WG handshake stall investigation): confirm the exact-match path is what's
-                        // actually delivering WG-proto bytes, and via which local proxyPort (must match what
-                        // WG-NT was configured to expect FROM for this peer, or it silently drops the packet).
-                        if (packet.Length > 0 && packet[0] >= 1 && packet[0] <= 4)
+                        // HANDSHAKE bytes only (1/2/3). Transport data (4) runs at thousands/sec under load and
+                        // drowned every other line in the log — and this is the expected path anyway, so it has
+                        // no diagnostic value there. The fallback/held paths below still log unconditionally
+                        // because those ARE the anomalies.
+                        if (packet.Length > 0 && packet[0] >= 1 && packet[0] <= 3)
                             Program.Log(LogLevel.Debug, $"[Proxy][fwd] EXACT src={sourceEndpoint} -> proxyPort={proxyPort} wgType={packet[0]}");
 
                         listener.ForwardInboundPacket(packet);
