@@ -185,6 +185,13 @@ internal class MediationMessage
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool IsRelay { get; set; }
     /// <summary>
+    /// When true in MeshConnectionBegin, tells a both-symmetric pair (both IcmpCapable) to attempt a direct
+    /// ICMP hole-punch and upgrade off the relay it was just assigned. Relay stays up during the attempt, so
+    /// failure only costs a timeout; success tears down the relay route. Additive — an older peer ignores it.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IcmpUpgrade { get; set; }
+    /// <summary>
     ///Introducer's mesh IP — set in relay MeshConnectionBegin so the receiving peer knows
     ///which WireGuard peer to add the relay route through
     /// </summary>

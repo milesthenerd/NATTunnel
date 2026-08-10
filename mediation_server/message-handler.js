@@ -991,6 +991,9 @@ class MessageHandler {
                         PeerMaxVersion: peerMaxVersion,
                         IdentityPublicKey: identityPublicKey,
                         EndpointV6String: socketInfo.endpointV6,  // New peer's observed IPv6 endpoint (or undefined)
+                        NATTypeV6,                         // v6 verdict — OtherPeers entries carry theirs, so the
+                                                           // introducer needs the joiner's to judge a pair family-aware
+                        IcmpCapable,                       // ICMP-tier capability, for the both-symmetric ICMP upgrade
                         OtherPeers: peersToIntroduce  // Peers to forward the introduction to (may be empty)
                     };
                     introducerPeer.socket.write(Buffer.from(JSON.stringify(introduceRequest)));
@@ -1008,7 +1011,8 @@ class MessageHandler {
                             peerMinVersion,
                             peerMaxVersion,
                             identityPublicKey,
-                            endpointV6: socketInfo.endpointV6
+                            endpointV6: socketInfo.endpointV6,
+                            icmpCapable: IcmpCapable   // carried so a retried introduction keeps the ICMP-tier verdict
                         },
                         peersToIntroduce,
                         introducerPeerID: introducer.peerID,
@@ -1199,6 +1203,8 @@ class MessageHandler {
                                 socket: sockInfo.socket,
                                 endpoint: m.endpoint,
                                 natType: m.natType,
+                                natTypeV6: m.natTypeV6,     // without these two the re-registered peer silently loses
+                                icmpCapable: m.icmpCapable, // its v6 verdict and ICMP-tier capability on this path
                                 meshIP: m.meshIP,
                                 peerMinVersion: m.peerMinVersion,
                                 peerMaxVersion: m.peerMaxVersion,
@@ -1235,6 +1241,8 @@ class MessageHandler {
                 PeerMaxVersion: pending.newPeerInfo.peerMaxVersion,
                 IdentityPublicKey: pending.newPeerInfo.identityPublicKey,
                 EndpointV6String: pending.newPeerInfo.endpointV6,
+                NATTypeV6: pending.newPeerInfo.natTypeV6,     // keep the retry path's message identical in shape to
+                IcmpCapable: pending.newPeerInfo.icmpCapable, // the primary one — a retry must not downgrade the pair
                 OtherPeers: remainingPeers
             };
 

@@ -335,7 +335,11 @@ internal sealed class IcmpTransport : IDisposable
             bool active = !_txQueue.IsEmpty ||
                           (DateTime.UtcNow - _lastDataRxUtc) < ActiveWindow ||
                           (DateTime.UtcNow - _lastDataTxUtc) < ActiveWindow;
-            PaceTo(sw2, ref nextSend2, (_isClient || active || handshaking) ? STEADY_INTERVAL : SERVER_TRICKLE_INTERVAL);
+            // Staggered-start guard. Every other term needs traffic to already exist, so a server-role peer
+            // that punches before its partner is ready trickles at 4/s and starves the partner's handshake —
+            // which then never generates the traffic that would lift the trickle. Hold dense after a punch.
+            bool freshlyPunched = (DateTime.UtcNow - _punchedAtUtc) < PostPunchDenseWindow;
+            PaceTo(sw2, ref nextSend2, (_isClient || active || handshaking || freshlyPunched) ? STEADY_INTERVAL : SERVER_TRICKLE_INTERVAL);
         }
     }
 
@@ -346,15 +350,18 @@ internal sealed class IcmpTransport : IDisposable
     // WG's retries, which would otherwise let the server fall back to the trickle mid-handshake.
     private DateTime _handshakeSeenUtc = DateTime.MinValue;
     private static readonly TimeSpan HandshakeActiveWindow = TimeSpan.FromSeconds(30);
+    // When the punch completed. Used only by the staggered-start guard at the pacing call. Longer than the
+    // 25s punchTimeout so it covers a partner that starts near the end of that window.
+    private DateTime _punchedAtUtc = DateTime.MaxValue;
+    private static readonly TimeSpan PostPunchDenseWindow = TimeSpan.FromSeconds(45);
     private DateTime _lastReqRxUtc = DateTime.MinValue;   // last time we heard a peer REQUEST (drives the promotion)
     private DateTime _firstHeardUtc = DateTime.MinValue;  // first time we heard the peer AT ALL (promotion baseline)
     private bool _loggedServerRole; // set once we've logged the role at startup
 
 
-    // Steady-state keepalive-request cadence. DO NOT RAISE to chase throughput: at 128/s wire traffic hit ~140
-    // Mbit/s of raw ICMP to carry ~28 Mbit/s payload (FRAME_FANOUT multiplies every frame) and got the connection
-    // ISP-policed for hours afterward. Too-high rates also crowd out WG's handshake completion packet. Tune
-    // cautiously around 60/s.
+    // Steady-state keepalive-request cadence. Do not raise to chase throughput: higher rates multiply wire
+    // volume (FRAME_FANOUT) enough to trip ISP rate-limiting, and crowd out WG's handshake completion packet.
+    // Tune cautiously around 60/s.
     private const double STEADY_INTERVAL = 1.0 / 60.0;
     private DateTime _lastDataRxUtc = DateTime.MinValue;
     private DateTime _lastDataTxUtc = DateTime.MinValue;
@@ -377,10 +384,9 @@ internal sealed class IcmpTransport : IDisposable
     // (DATA_SENDS, a removed redundancy constant, never actually did what its comment claimed. Frame redundancy
     //  now comes from EmitFrameRedundant/FRAME_FANOUT, which spreads copies across DISTINCT live slots.)
 
-    // Max frames the send-loop drains per iteration onto the refreshing _lastHeardReq. Bounded on purpose — a full
-    // unbounded drain onto one stale slot is the greedy-drain regression. This is a HARD frame-rate ceiling:
-    // DRAIN_PER_ITER / STEADY_INTERVAL. Raising it costs no extra wire traffic (we only emit what WG queued), so it
-    // widens the drain without touching the ICMP volume that got the connection ISP-policed.
+    // Max frames the send-loop drains per iteration. Bounded so an unbounded drain can't pile onto one stale
+    // slot. Acts as a hard frame-rate ceiling of DRAIN_PER_ITER / STEADY_INTERVAL; raising it costs no extra
+    // wire traffic since it only emits what WG already queued.
     private const int DRAIN_PER_ITER = 128;
 
     // Separate, SMALL cap for the reactive drain in OnInboundIcmp (see its call site) — that loop runs
@@ -394,13 +400,10 @@ internal sealed class IcmpTransport : IDisposable
     private sealed class TxFrame { public uint Frame; public byte[] Data; }
     private readonly System.Collections.Concurrent.ConcurrentQueue<TxFrame> _txQueue = new();
 
-    // BUFFERBLOAT BOUND. _txQueue was unbounded, so when WG offered frames faster than the pacer could deliver,
-    // the excess accumulated as standing queue depth — ping inflated under load and TCP inside the tunnel never
-    // saw a loss signal, so it kept growing its window into the buffer instead of settling at the real rate.
-    //
-    // Bufferbloat is SUSTAINED depth, not peak; a brief burst that drains again immediately costs little. Size
-    // for bursts, not backlog. Judge changes on ping-under-load staying flat AND qDepth returning near zero
-    // between bursts, not on throughput alone (throughput numbers below the bound are partly inflated by it).
+    // Bufferbloat bound. Unbounded, WG frames offered faster than the pacer can deliver would accumulate as
+    // standing queue depth — inflating ping and hiding the loss signal TCP needs to settle at the real rate.
+    // Size for bursts, not backlog: judge changes on ping-under-load staying flat and qDepth returning near
+    // zero between bursts, not on throughput alone.
     private const int TX_QUEUE_MAX = 1024;
 
     // WG handshake packets (first byte 0x01 init / 0x02 response / 0x03 cookie) ride this separate FIFO, drained
@@ -653,6 +656,7 @@ internal sealed class IcmpTransport : IDisposable
             if (ack || heard >= HEARD_TO_PUNCH)
             {
                 _punched = true;
+                _punchedAtUtc = DateTime.UtcNow;   // starts the post-punch dense window (see PostPunchDenseWindow)
             }
             // Hammer ACKs back on the just-heard id to complete the handshake within the (bursty) window,
             // whether or not this specific packet was an ACK — hearing the peer at all means try to close it.
@@ -885,10 +889,9 @@ internal sealed class IcmpTransport : IDisposable
     // frame id, so duplicates are free. SAMPLES the heard-request ring (RecentHeardReqs, non-consuming) — does
     // NOT dequeue, so it can't drain the ring dry (that was the earlier regression).
     //
-    // FRAME_FANOUT=1 (no redundancy): extra copies were found to cost more in wire volume (ISP rate-limit risk)
-    // than they bought in delivery — losses were correlated with volume, not independent per-copy, so fanout was
-    // partly causing the drops it existed to mask. Judge changes here by delivery (loss %, handshake speed),
-    // not raw Mbit/s throughput, which is insensitive to fanout.
+    // FRAME_FANOUT=1 (no redundancy): extra copies cost more in wire volume (ISP rate-limit risk) than they buy
+    // in delivery, since losses correlate with volume rather than being independent per-copy. Judge changes here
+    // by delivery (loss %, handshake speed), not raw Mbit/s throughput.
     //
     // HANDSHAKE_FANOUT stays high regardless: those frames are rare and tiny, losing one costs a full retry
     // round, so redundancy there is nearly free.

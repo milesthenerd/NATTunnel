@@ -10,15 +10,6 @@ internal static class MediationProtocol
 {
     /// <summary>
     /// The matchmaking (client↔mediation) wire-format version this client was built for.
-    /// v2 (2026-07-11): two-IP RFC 5780 NAT test — client probes the server's second advertised
-    /// IPv4 (ServerPublicIPv4List[1]) so the server can detect address-dependent NAT mapping and
-    /// deliver MappingBehavior on NATTypeResponse. Backward-compatible (the new probe/fields are
-    /// additive + self-gated on the server advertising a second IP), but bumped to anchor the first
-    /// substantive evolution of the mediation protocol since v1.
-    /// v3 (2026-07-20): ICMP-transport capability — client advertises IcmpCapable in MeshJoinRequest and the
-    /// server echoes it in peer lists, so a both-symmetric pair where BOTH peers can capture ICMP can attempt
-    /// the direct ICMP hole-punch tier instead of relaying. Additive + self-gated (absent ⇒ false ⇒ no ICMP
-    /// tier ⇒ existing relay behavior), so v2 clients/servers are unaffected.
     /// </summary>
     public const int ClientVersion = 3;
 
@@ -29,5 +20,5 @@ internal static class MediationProtocol
     /// Bumped when envelope byte semantics, fragment format, or mesh-control message shapes change.
     /// </summary>
     public const int PeerMinVersion = 1;
-    public const int PeerMaxVersion = 1;
+    public const int PeerMaxVersion = 2;
 }

@@ -462,6 +462,12 @@ internal class MeshProtocolEngine
     /// during the 15-min grace after RemoveDeadPeer clears peerInfoByMeshIP — otherwise the peer
     /// briefly appears as "no fingerprint yet" and can't be blocked in the window the user cares
     /// about most (right after they left).</summary>
+    /// <summary>
+    /// ICMP-tier capability per mesh IP. Separate from peerInfoByMeshIP to avoid reshaping that tuple; used by
+    /// the heartbeat repair path to know whether an already-relayed pair can be upgraded to ICMP.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, bool> icmpCapableByMeshIP = new();
+
     private readonly ConcurrentDictionary<string, (string peerID, string fingerprint, DateTime lastSeen)> recentlySeenPeers = new();
     private static readonly TimeSpan RecentlySeenWindow = TimeSpan.FromMinutes(15);
     private const int RecentlySeenCap = 50;
@@ -783,6 +789,86 @@ internal class MeshProtocolEngine
         }
         list.Add(cb);
     }
+    /// <summary>
+    /// After a both-symmetric pair has been RELAYED, offer both peers an ICMP upgrade: attempt a direct ICMP
+    /// punch and switch to it if it lands. Relay-first means a failed punch only costs a timeout, not the pair.
+    /// Shared by both relay implementations (HandleMeshIntroduceRequest and the inline mediation-loop copy) —
+    /// keep new relay paths calling this instead of inlining a third copy.
+    /// </summary>
+    private void OfferIcmpUpgrade(
+        string newPeerID, string newMeshIP, string newEndpoint, NATType newNatType,
+        int newMinVersion, int newMaxVersion, string newIdentityKey, bool newIcmpCapable,
+        string exPeerID, string exMeshIP, string exEndpoint, NATType exNatType,
+        int exMinVersion, int exMaxVersion, string exIdentityKey, bool exIcmpCapable,
+        string chosenRelay)
+    {
+        // Log the skip reason rather than returning silently — distinguishes "no offer sent" from "offer sent and lost".
+        // Remember both sides' capability so the heartbeat repair path (a rejoined pair, already in relayedPairs,
+        // skips the full introduce logic) can still offer the upgrade later.
+        if (!string.IsNullOrEmpty(newMeshIP)) icmpCapableByMeshIP[newMeshIP] = newIcmpCapable;
+        if (!string.IsNullOrEmpty(exMeshIP)) icmpCapableByMeshIP[exMeshIP] = exIcmpCapable;
+
+        if (!newIcmpCapable || !exIcmpCapable || string.IsNullOrEmpty(newMeshIP) || string.IsNullOrEmpty(exMeshIP))
+        {
+            context.Log(LogLevel.Debug, $"[Mesh][ICMP] No ICMP upgrade for relayed pair {newPeerID} <-> {exPeerID} — " +
+                $"newIcmpCapable={newIcmpCapable} exIcmpCapable={exIcmpCapable} " +
+                $"newMeshIP={(string.IsNullOrEmpty(newMeshIP) ? "(empty)" : newMeshIP)} exMeshIP={(string.IsNullOrEmpty(exMeshIP) ? "(empty)" : exMeshIP)}");
+            return;
+        }
+
+        context.Log(LogLevel.Debug, $"[Mesh][ICMP] Offering ICMP upgrade to relayed pair {newPeerID} <-> {exPeerID} (both ICMP-capable)");
+
+        // Each peer is told about the OTHER one. Sends to a mesh IP, so must defer when that peer's tunnel
+        // isn't up yet — an unrouted mesh IP send fails outright with WSAEINVAL.
+        SendOrDeferIcmpUpgrade(exMeshIP, new MediationMessage(MediationMessageType.MeshConnectionBegin)
+        {
+            PeerID = newPeerID,
+            EndpointString = newEndpoint,
+            NATType = newNatType,
+            PrivateAddressString = newMeshIP,
+            IcmpUpgrade = true,
+            IntroducerMeshIP = meshIP,
+            RelayMeshIP = chosenRelay,
+            PeerMinVersion = newMinVersion,
+            PeerMaxVersion = newMaxVersion,
+            IdentityPublicKey = newIdentityKey
+        });
+
+        SendOrDeferIcmpUpgrade(newMeshIP, new MediationMessage(MediationMessageType.MeshConnectionBegin)
+        {
+            PeerID = exPeerID,
+            EndpointString = exEndpoint,
+            NATType = exNatType,
+            PrivateAddressString = exMeshIP,
+            IcmpUpgrade = true,
+            IntroducerMeshIP = meshIP,
+            RelayMeshIP = chosenRelay,
+            PeerMinVersion = exMinVersion,
+            PeerMaxVersion = exMaxVersion,
+            IdentityPublicKey = exIdentityKey
+        });
+    }
+
+    private void SendOrDeferIcmpUpgrade(string targetMeshIP, MediationMessage offer)
+    {
+        if (completedTunnelMeshIPs.Contains(targetMeshIP))
+        {
+            try
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(offer.Serialize());
+                MeshSend(bytes, bytes.Length, new IPEndPoint(IPAddress.Parse(targetMeshIP), MeshControlPort));
+            }
+            catch (Exception ex)
+            {
+                context.Log(LogLevel.Error, $"[Mesh][ICMP] Failed to send ICMP-upgrade MeshConnectionBegin to {targetMeshIP}: {ex.Message}");
+            }
+        }
+        else
+        {
+            DeferIntroduction(targetMeshIP, offer);
+        }
+    }
+
     private HashSet<string> completedTunnelMeshIPs = new HashSet<string>();
     private HashSet<string> relayedPairs = new HashSet<string>();
     private Dictionary<string, DateTime> lastRepairAttempt = new Dictionary<string, DateTime>();
@@ -1906,6 +1992,8 @@ internal class MeshProtocolEngine
                                                     int exPeerMaxVersion = pe.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl2) ? pmaxEl2.GetInt32() : 1;
                                                     string exIdentityPublicKey = pe.TryGetProperty("identityPublicKey", out JsonElement idEl3) ? idEl3.GetString() : null;
                                                     string exEndpointV6 = pe.TryGetProperty("endpointV6", out JsonElement epV6El3) ? epV6El3.GetString() : null;
+                                                    bool exIcmpCapable2 = pe.TryGetProperty("icmpCapable", out JsonElement icmpEl3)
+                                                        && icmpEl3.ValueKind == JsonValueKind.True;
 
                                                     if (string.IsNullOrEmpty(exMeshIP)) continue;
 
@@ -2086,6 +2174,13 @@ internal class MeshProtocolEngine
 
                                                         relayedPairs.Add(pairKeyR);
                                                         lastRepairAttempt[pairKeyR] = DateTime.UtcNow;
+
+                                                        OfferIcmpUpgrade(
+                                                            parsedMsg.PeerID, parsedMsg.PrivateAddressString, parsedMsg.EndpointString, parsedMsg.NATType,
+                                                            parsedMsg.PeerMinVersion, parsedMsg.PeerMaxVersion, parsedMsg.IdentityPublicKey, parsedMsg.IcmpCapable == true,
+                                                            exPeerID, exMeshIP, exEndpoint, (NATType)exNatType,
+                                                            exPeerMinVersion, exPeerMaxVersion, exIdentityPublicKey, exIcmpCapable2,
+                                                            chosenRelay);
 
                                                         continue;
                                                     }
@@ -3111,6 +3206,26 @@ internal class MeshProtocolEngine
             context.Log(LogLevel.Debug, $"[Mesh] Skipping MeshConnectionBegin for {remotePeerID} — peer fingerprint is on local block list");
             return;
         }
+        // ICMP upgrade: the introducer already relayed this both-symmetric pair; try a direct ICMP punch and
+        // switch to it if it lands. Must return here, not fall through to the UDP punch path (can't work
+        // both-symmetric). Failure is free — the relay keeps carrying traffic either way.
+        if (cbMsg.IcmpUpgrade)
+        {
+            if (string.IsNullOrEmpty(remoteEndpoint))
+            {
+                context.Log(LogLevel.Debug, $"[Mesh][ICMP] Ignoring ICMP-upgrade for {remotePeerID} — no endpoint");
+                return;
+            }
+            if (!localIcmpCapable)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh][ICMP] Ignoring ICMP-upgrade for {remotePeerID} — no local capture backend; staying on relay");
+                return;
+            }
+            context.Log(LogLevel.Debug, $"[Mesh][ICMP] Introducer offered ICMP upgrade for relayed peer {remotePeerID} — attempting direct punch");
+            TryStartIcmpTunnel(remotePeerID, remoteMeshIP, remoteEndpoint, cbMsg.IdentityPublicKey, upgradeFromRelay: true);
+            return;
+        }
+
         // Relay mode only needs mesh IP + introducer IP, not endpoint
         if (!cbMsg.IsRelay && string.IsNullOrEmpty(remoteEndpoint))
         {
@@ -3323,7 +3438,9 @@ internal class MeshProtocolEngine
                             context.Log(LogLevel.Debug, $"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {capturedMeshIP}");
                             foreach (var deferredMsg in deferred)
                             {
-                                string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                // IcmpUpgrade goes to the peer, like a relay message — it carries
+                                // IntroducerMeshIP only for provenance, so exclude it from the reroute test.
+                                string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay && !deferredMsg.IcmpUpgrade
                                     ? deferredMsg.IntroducerMeshIP : capturedMeshIP;
                                 try
                                 {
@@ -3587,7 +3704,7 @@ internal class MeshProtocolEngine
                     {
                         context.Log(LogLevel.Debug, $"[Mesh] Defer budget spent for {targetPeerID} and every KNOWN shared family is both-symmetric " +
                             $"(ours v4={ourV4}/v6={ourV6}, theirs v4={peerV4}/v6={peerV6}) — taking the both-symmetric path, not a doomed UDP punch");
-                        if (bothIcmpCapable)
+                        if (bothIcmpCapable && NoIntroducerPossible())
                         {
                             TryStartIcmpTunnel(targetPeerID, peerMeshIP, peerEndpoint, peerIdentityPublicKey);
                             continue;
@@ -3607,7 +3724,7 @@ internal class MeshProtocolEngine
                     // (both sides spray + listen), so no extra coordination is needed — the other peer reaches
                     // this same branch on its own poll and attempts concurrently. On success an ICMP-backed
                     // tunnel registers; on failure/timeout the pair still relays via the normal introducer flow.
-                    if (bothIcmpCapable)
+                    if (bothIcmpCapable && NoIntroducerPossible())
                     {
                         TryStartIcmpTunnel(targetPeerID, peerMeshIP, peerEndpoint, peerIdentityPublicKey);
                         // Don't send the bootstrap ConnectionRequest (that path only does UDP punches, which
@@ -3662,23 +3779,56 @@ internal class MeshProtocolEngine
     /// On failure/timeout the pair simply isn't connected via ICMP — the relay path (introducer flow) still
     /// applies, so ICMP is purely additive and never strands a pair that would otherwise relay.
     /// </summary>
-    private void TryStartIcmpTunnel(string remotePeerID, string remoteMeshIP, string remoteEndpointStr, string peerIdentityPublicKey = null)
+    /// <summary>
+    /// Whether the mesh has NO introducer, i.e. direct peer-to-peer connection is the sanctioned path.
+    /// The server is authoritative: IntroducerPeerID=null means no introducer is POSSIBLE (all-symmetric mesh),
+    /// not merely "none yet" — do not re-derive this from peer NAT types.
+    /// Gates the DIRECT ICMP path: with an introducer present, a both-symmetric pair relays and gets offered
+    /// an ICMP upgrade instead, so discovery must not bypass the elected introducer.
+    /// </summary>
+    private bool NoIntroducerPossible()
     {
-        // Block list applies to EVERY transport. The callers reach this branch with `continue`, skipping the
-        // IsBlocked check further down the discovery loop that guards the UDP path — so without this a blocked
-        // fingerprint could still connect over the ICMP tier. Enforced here rather than at the call sites so a
-        // future caller cannot reintroduce the bypass.
+        if (!string.IsNullOrEmpty(joinResponse?.IntroducerPeerID)) return false;
+
+        // joinResponse never refreshes, so a peer that joined an empty mesh keeps IntroducerPeerID=null even
+        // after one is elected. Fall back to our own peer list. Unknown doesn't count — a late verdict must not
+        // block the legitimate all-symmetric case.
+        lock (meshLock)
+        {
+            foreach (var kv in peerInfoByMeshIP)
+            {
+                if (kv.Key == meshIP) continue;
+                var t = kv.Value.natType;
+                if (t != NATType.Unknown && t != NATType.Symmetric) return false;
+            }
+        }
+        return true;
+    }
+
+    /// <param name="upgradeFromRelay">
+    /// True when the introducer offered this as an upgrade for a pair that is ALREADY relayed. On success the
+    /// relay route is torn down and the relay released, switching the pair to the direct tunnel. On failure
+    /// nothing is touched and the relay keeps carrying traffic.
+    /// </param>
+    private void TryStartIcmpTunnel(string remotePeerID, string remoteMeshIP, string remoteEndpointStr, string peerIdentityPublicKey = null, bool upgradeFromRelay = false)
+    {
+        // Block list applies to every transport. Callers reach here via `continue`, bypassing the discovery
+        // loop's IsBlocked check that guards UDP — enforce it here so no caller can reintroduce that bypass.
         if (!string.IsNullOrEmpty(peerIdentityPublicKey) && IsBlocked(peerIdentityPublicKey))
         {
             context.Log(LogLevel.Debug, $"[Mesh][ICMP] Refusing ICMP punch to {remotePeerID} — peer fingerprint is on local block list");
             return;
         }
 
-        // Guard: one in-flight attempt per peer, and skip if already connected.
+        // One in-flight attempt per peer. The already-connected check is skipped for an upgrade, since an
+        // upgrade candidate is by definition already relayed and in activePeerTunnels.
         lock (meshLock)
         {
-            if (activePeerTunnels.ContainsKey(remotePeerID)) return;
-            if (!string.IsNullOrEmpty(remoteMeshIP) && activePeerTunnels.ContainsKey(remoteMeshIP)) return;
+            if (!upgradeFromRelay)
+            {
+                if (activePeerTunnels.ContainsKey(remotePeerID)) return;
+                if (!string.IsNullOrEmpty(remoteMeshIP) && activePeerTunnels.ContainsKey(remoteMeshIP)) return;
+            }
             if (!pendingIcmpAttempts.Add(remotePeerID)) return; // already attempting
         }
 
@@ -3690,9 +3840,9 @@ internal class MeshProtocolEngine
 
         context.Log(LogLevel.Debug, $"[Mesh][ICMP] Attempting direct ICMP hole-punch to {remotePeerID} at {remoteEp} (both-symmetric, both ICMP-capable)");
 
-        // The post-punch transport is now SYMMETRIC: both peers ping AND both answer the other's pings with data
-        // as matched replies (see IcmpTransport). This flag no longer drives behavior — it only gives the two
-        // peers OPPOSITE, stable rx-diagnostic labels ("P"/"R") so their logs are distinguishable side-by-side.
+        // Deterministic, opposite roles for the two peers (higher peer ID wins "P"). Drives IcmpTransport._isClient,
+        // which controls each side's keepalive pacing (STEADY_INTERVAL vs SERVER_TRICKLE_INTERVAL) — see the
+        // staggered-start guard at IcmpTransport's pacing call.
         bool rxLabelP = string.CompareOrdinal(peerID.ToString(), remotePeerID) > 0;
 
         System.Threading.Tasks.Task.Run(async () =>
@@ -3764,6 +3914,39 @@ internal class MeshProtocolEngine
                     // The version hello is re-sent on the mesh ping loop anyway.
                 }
             );
+
+            // Punch landed: drop the relay and let the direct tunnel take over. Remove the relay route before
+            // releasing the relay so WireGuard stops steering through the gateway first.
+            if (upgradeFromRelay && !string.IsNullOrEmpty(remoteMeshIP))
+            {
+                try
+                {
+                    host.RemoveRelayRouteForPeer(IPAddress.Parse(remoteMeshIP));
+                    relayedRemotes.TryRemove(remoteMeshIP, out string priorGateway);
+                    lastRelayHealthReport.TryRemove(remoteMeshIP, out _);
+
+                    // Tell the gateway it can stop forwarding for this pair.
+                    if (!string.IsNullOrEmpty(priorGateway) && priorGateway != meshIP)
+                    {
+                        var release = new MediationMessage(MediationMessageType.MeshRelayAssignment)
+                        {
+                            PeerA = meshIP,
+                            PeerB = remoteMeshIP,
+                            RelayMeshIP = priorGateway,
+                            Release = true
+                        };
+                        byte[] rb = Encoding.UTF8.GetBytes(release.Serialize());
+                        MeshSend(rb, rb.Length, new IPEndPoint(IPAddress.Parse(priorGateway), MeshControlPort));
+                    }
+                    context.Log(LogLevel.Info, $"[Mesh][ICMP] Upgraded {remotePeerID} from relay{(string.IsNullOrEmpty(priorGateway) ? "" : $" via {priorGateway}")} to a direct ICMP tunnel");
+                }
+                catch (Exception ex)
+                {
+                    // Non-fatal: the direct tunnel still registers below. A leftover relay route is a
+                    // suboptimal path, not a broken one.
+                    context.Log(LogLevel.Warning, $"[Mesh][ICMP] Upgrade cleanup for {remotePeerID} failed: {ex.Message}");
+                }
+            }
 
             // Wire into the host (Noise/proxy setup) + register into the tunnel maps — same as the UDP path.
             host?.ConfigureNewTunnel(icmpTunnel, remotePeerID, remoteMeshIP);
@@ -4412,7 +4595,9 @@ internal class MeshProtocolEngine
             ownMeshIP: meshIP,
             onConnectionComplete: () =>
             {
-                context.Log(LogLevel.Info, $"[Mesh] Tunnel {capturedConnectionID} WireGuard connection established");
+                // "peer configured", NOT "handshake complete" — fires on key exchange + peer-add, before
+                // WireGuard negotiates anything. Data flowing is reported separately.
+                context.Log(LogLevel.Info, $"[Mesh] Tunnel {capturedConnectionID} WireGuard peer configured — awaiting handshake");
                 System.Threading.Interlocked.Decrement(ref pendingTunnelCount);
                 System.Threading.Interlocked.Increment(ref metricTunnelsEstablished);
                 lock (meshLock)
@@ -4427,7 +4612,9 @@ internal class MeshProtocolEngine
                             context.Log(LogLevel.Debug, $"[Mesh] Flushing {deferred.Count} deferred MeshConnectionBegin message(s) for {completedMeshIP}");
                             foreach (var deferredMsg in deferred)
                             {
-                                string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay
+                                // IcmpUpgrade goes to the PEER, not back via the introducer — see the matching
+                                // flush site for why the !IsRelay test alone misroutes it.
+                                string targetIP = !string.IsNullOrEmpty(deferredMsg.IntroducerMeshIP) && !deferredMsg.IsRelay && !deferredMsg.IcmpUpgrade
                                     ? deferredMsg.IntroducerMeshIP : completedMeshIP;
                                 try
                                 {
@@ -4676,7 +4863,10 @@ internal class MeshProtocolEngine
             return true;
         }
         isIntroducer = true;
-        context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID} (v4Ok={v4Ok}, v6Ok={v6Ok})");
+        // Log IcmpCapable as the raw nullable: "null" (field never arrived) is a different case from the peer
+        // genuinely reporting false.
+        context.Log(LogLevel.Debug, $"[Mesh] Selected as introducer for new peer {msg.PeerID} (v4Ok={v4Ok}, v6Ok={v6Ok}, " +
+            $"IcmpCapable={(msg.IcmpCapable.HasValue ? msg.IcmpCapable.Value.ToString() : "null")})");
 
         // Cache the new peer's info. Clear completedTunnelMeshIPs only if the tunnel is
         // demonstrably stale — a peer whose rejoin was triggered by isolation from a *different*
@@ -4713,6 +4903,8 @@ internal class MeshProtocolEngine
                 int existingPeerMaxVersion = peerElement.TryGetProperty("peerMaxVersion", out JsonElement pmaxEl) ? pmaxEl.GetInt32() : 1;
                 string existingPeerIdentityPublicKey = peerElement.TryGetProperty("identityPublicKey", out JsonElement idElP) ? idElP.GetString() : null;
                 string existingPeerEndpointV6 = peerElement.TryGetProperty("endpointV6", out JsonElement epV6ElP) ? epV6ElP.GetString() : null;
+                bool existingPeerIcmpCapable = peerElement.TryGetProperty("icmpCapable", out JsonElement icmpElP)
+                    && icmpElP.ValueKind == JsonValueKind.True;
 
                 if (string.IsNullOrEmpty(existingPeerMeshIP))
                 {
@@ -4876,15 +5068,26 @@ internal class MeshProtocolEngine
                         PeerMaxVersion = msg.PeerMaxVersion,
                         IdentityPublicKey = msg.IdentityPublicKey
                     };
-                    try
+                    // Defer if the tunnel isn't up: this targets a mesh IP, only routable through the WireGuard
+                    // interface, so sending before that peer's tunnel exists fails with WSAEINVAL and the relay
+                    // assignment is lost with no retry — the pair then waits forever and never heartbeat-acks.
+                    if (completedTunnelMeshIPs.Contains(existingPeerMeshIP))
                     {
-                        byte[] relayExBytes = Encoding.UTF8.GetBytes(relayToExisting.Serialize());
-                        MeshSend(relayExBytes, relayExBytes.Length,
-                            new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
+                        try
+                        {
+                            byte[] relayExBytes = Encoding.UTF8.GetBytes(relayToExisting.Serialize());
+                            MeshSend(relayExBytes, relayExBytes.Length,
+                                new IPEndPoint(IPAddress.Parse(existingPeerMeshIP), MeshControlPort));
+                        }
+                        catch (Exception ex)
+                        {
+                            context.Log(LogLevel.Error, $"[Mesh] Failed to send relay MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                        }
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        context.Log(LogLevel.Error, $"[Mesh] Failed to send relay MeshConnectionBegin to {existingPeerMeshIP}: {ex.Message}");
+                        context.Log(LogLevel.Debug, $"[Mesh] Deferred relay MeshConnectionBegin to {existingPeerMeshIP} — tunnel not yet established");
+                        DeferIntroduction(existingPeerMeshIP, relayToExisting);
                     }
 
                     if (!string.IsNullOrEmpty(msg.PrivateAddressString))
@@ -4926,6 +5129,13 @@ internal class MeshProtocolEngine
 
                     relayedPairs.Add(pairKey);
                     lastRepairAttempt[pairKey] = DateTime.UtcNow;
+
+                    OfferIcmpUpgrade(
+                        msg.PeerID, msg.PrivateAddressString, msg.EndpointString, msg.NATType,
+                        msg.PeerMinVersion, msg.PeerMaxVersion, msg.IdentityPublicKey, msg.IcmpCapable == true,
+                        existingPeerID, existingPeerMeshIP, existingPeerEndpoint, (NATType)existingPeerNatType,
+                        existingPeerMinVersion, existingPeerMaxVersion, existingPeerIdentityPublicKey, existingPeerIcmpCapable,
+                        chosenRelay);
 
                     introduced++;
                     continue;
@@ -6411,6 +6621,17 @@ internal class MeshProtocolEngine
                             }
                             catch (Exception ex) { context.Log(LogLevel.Error, $"[Mesh] Failed to send relay repair to {ipB}: {ex.Message}"); }
                         }
+
+                        // Re-offer the ICMP upgrade: a rejoined pair is already in relayedPairs and lands here
+                        // rather than in the introduce path, so it needs its own upgrade offer too.
+                        OfferIcmpUpgrade(
+                            relayInfoA.peerID ?? "", ipA, relayInfoA.endpoint, relayInfoA.natType,
+                            relayInfoA.peerMinVersion, relayInfoA.peerMaxVersion, relayInfoA.identityPublicKey,
+                            icmpCapableByMeshIP.TryGetValue(ipA, out var capA) && capA,
+                            relayInfoB.peerID ?? "", ipB, relayInfoB.endpoint, relayInfoB.natType,
+                            relayInfoB.peerMinVersion, relayInfoB.peerMaxVersion, relayInfoB.identityPublicKey,
+                            icmpCapableByMeshIP.TryGetValue(ipB, out var capB) && capB,
+                            assignedRelay);
 
                         lastRepairAttempt[pairKey] = DateTime.UtcNow;
                         continue;

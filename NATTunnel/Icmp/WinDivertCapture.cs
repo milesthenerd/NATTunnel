@@ -7,17 +7,16 @@ using System.Threading;
 namespace NATTunnel.Icmp;
 
 /// <summary>
-/// Windows ICMP capture via the WinDivert WFP driver — the non-admin-at-runtime (driver-installed-once) answer
-/// to "the OS eats inbound type-8 echo requests before a raw socket sees them".
+/// Windows ICMP capture via the WinDivert WFP driver — a driver-installed-once alternative to a raw socket,
+/// which the OS never delivers inbound type-8 echo requests to.
 ///
 /// Opens a NETWORK-layer WinDivert handle with the filter <c>inbound and icmp and ip.SrcAddr == PEER</c> in
-/// DEFAULT (divert) mode — matching packets are REMOVED from the stack, so the OS never auto-replies to the
-/// peer's punch requests (cleaner than SIO_RCVALL, which only copies). We parse the ICMP fields and hand them
-/// to the transport. WinDivert requires Administrator to LOAD the driver (once); the daemon runs privileged
-/// already, and an embedded integrator installs the driver via their own installer.
+/// SNIFF mode — matching packets are copied and left in the stack, then parsed and handed to the transport.
+/// WinDivert requires Administrator to load the driver (once); the daemon runs privileged already, and an
+/// embedded integrator installs the driver via their own installer.
 ///
-/// Availability: <see cref="IsAvailable"/> is false if the WinDivert.dll/driver is missing or the open fails
-/// (no admin, driver not signed/loadable) — the engine then falls through to the next connection tier.
+/// <see cref="IsAvailable"/> is false if the driver is missing or the open fails — the engine then falls
+/// through to the next connection tier.
 /// </summary>
 internal sealed class WinDivertCapture : IIcmpCapture
 {
@@ -49,28 +48,60 @@ internal sealed class WinDivertCapture : IIcmpCapture
         // re-inject) near zero. WinDivert filter language uses ip.SrcAddr and the icmp pseudo-protocol.
         string filter = $"inbound and icmp and ip.SrcAddr == {peer}";
 
+        // MUST use SNIFF (copy-and-leave), not divert — with both peers on divert, the channel goes one-way.
+        // MUST NOT add WINDIVERT_FLAG_RECV_ONLY alongside SNIFF — that combination delivers nothing at all.
+        //
+        // UNPRIVILEGED: opening with flags:0 asks the driver to load, which needs Administrator. A non-elevated
+        // process must instead attach to an ALREADY-INSTALLED persistent service with NO_INSTALL — see
+        // WinDivertServiceInstaller (run once, elevated, via tools/IcmpServiceInstaller). Try the plain open
+        // first when elevated; otherwise go straight to NO_INSTALL, and fall back to it either way so an
+        // elevated process on a machine that already has the service still works.
+        bool elevated = WinDivertServiceInstaller.IsElevated();
         try
         {
-            _handle = WinDivertNative.WinDivertOpen(
-                filter,
-                WinDivertNative.WINDIVERT_LAYER_NETWORK,
-                priority: 0,
-                flags: 0); // default = divert (drop-and-divert): removes the packet so the OS won't auto-reply
+            const ulong sniff = WinDivertNative.WINDIVERT_FLAG_SNIFF;
+            if (elevated)
+                _handle = WinDivertNative.WinDivertOpen(
+                    filter, WinDivertNative.WINDIVERT_LAYER_NETWORK, priority: 0, flags: sniff);
+
+            if (!elevated || _handle == WinDivertNative.INVALID_HANDLE || _handle == IntPtr.Zero)
+            {
+                _handle = WinDivertNative.WinDivertOpen(
+                    filter, WinDivertNative.WINDIVERT_LAYER_NETWORK, priority: 0,
+                    flags: sniff | WinDivertNative.WINDIVERT_FLAG_NO_INSTALL);
+                if (_handle != WinDivertNative.INVALID_HANDLE && _handle != IntPtr.Zero)
+                    NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                        $"[ICMP][windivert] opened via NO_INSTALL against the existing service (elevated={elevated})");
+            }
         }
         catch (DllNotFoundException)
         {
-            _available = false; // WinDivert.dll not present next to the exe
+            // Distinct from a driver-load failure — this means the native files aren't deployed.
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                $"[ICMP][windivert] WinDivert.dll not found next to {AppContext.BaseDirectory} — " +
+                "WinDivert.dll and WinDivert64.sys must sit beside the running executable.");
+            _available = false;
             return;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, $"[ICMP][windivert] open threw: {ex.GetType().Name}: {ex.Message}");
             _available = false;
             return;
         }
 
         if (_handle == WinDivertNative.INVALID_HANDLE || _handle == IntPtr.Zero)
         {
-            // Open failed — most commonly ERROR_ACCESS_DENIED (not admin) or driver not loadable.
+            // Distinguish "not elevated + service not installed" from a generic open failure — they need
+            // different fixes.
+            int err = System.Runtime.InteropServices.Marshal.GetLastWin32Error();
+            if (!elevated && !WinDivertServiceInstaller.IsInstalled())
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                    "[ICMP][windivert] unavailable: process is not elevated and the WinDivert service is not installed. " +
+                    "Run nattunnel-icmp-service.exe install once (elevated) to enable the unprivileged ICMP path.");
+            else
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                    $"[ICMP][windivert] WinDivertOpen failed (elevated={elevated}, serviceInstalled={WinDivertServiceInstaller.IsInstalled()}, lastError={err})");
             _available = false;
             return;
         }
@@ -98,7 +129,7 @@ internal sealed class WinDivertCapture : IIcmpCapture
             // Parse the IPv4 header to locate the ICMP header. Our filter guarantees this is inbound ICMP
             // from the peer, but we re-derive the offsets defensively.
             int ihl = (packet[0] & 0x0F) * 4;
-            if (recvLen < ihl + 8) { Reinject(packet, recvLen, ref addr); continue; }
+            if (recvLen < ihl + 8) continue; // too short to hold an ICMP header; in SNIFF mode just ignore it
 
             int icmpOff = ihl;
             byte type = packet[icmpOff];
@@ -107,20 +138,12 @@ internal sealed class WinDivertCapture : IIcmpCapture
             int payloadOff = icmpOff + 8;
             int payloadLen = (int)recvLen - payloadOff;
 
-            // Deliver to the transport. We do NOT re-inject: this is our peer's punch/data traffic, and
-            // diverting it (not re-injecting) is exactly what stops the OS ICMP handler from auto-replying to
-            // the peer's echo requests. If a future need arises to be transparent to other apps, gate on a
-            // tag check here and re-inject non-ours.
+            // Deliver to the transport. Nothing to re-inject in SNIFF mode — the original packet was never
+            // removed from the stack, so the OS still processes it (and still auto-replies, which is what keeps
+            // our own NAT mapping open; see the flags at the open site).
             try { _onIcmp(type, id, seq, new ReadOnlySpan<byte>(packet, payloadOff, payloadLen)); }
             catch { /* a bad handler must not kill the capture loop */ }
         }
-    }
-
-    /// <summary>Put a packet we captured but don't want back into the stack (inbound direction).</summary>
-    private void Reinject(byte[] packet, uint len, ref WinDivertNative.WinDivertAddress addr)
-    {
-        try { WinDivertNative.WinDivertSend(_handle, packet, len, out _, ref addr); }
-        catch { }
     }
 
     public void Dispose()

@@ -124,26 +124,38 @@ internal class WireGuardUdpProxy : IDisposable
                 peerListeners[proxyPort].UpdateTunnelSocket(socketToUse);
             }
 
-            // Replay whatever arrived from this peer before registration, now that its listener exists.
-            List<byte[]> replay = null;
-            lock (pendingLock)
+            // Held packets are NOT replayed here — registration only sets up routing; WireGuard doesn't know
+            // this peer's key until AddOrUpdatePeer finishes. Callers must call ReplayPendingFor after that.
+        }
+    }
+
+    /// <summary>
+    /// Replay handshake packets that arrived from <paramref name="peerEndpoint"/> before it was registered.
+    /// Call only after the WireGuard driver has been configured with this peer — see RegisterPeer.
+    /// </summary>
+    public void ReplayPendingFor(IPEndPoint peerEndpoint, int proxyPort)
+    {
+        List<byte[]> replay = null;
+        lock (pendingLock)
+        {
+            if (pendingPreRegistration.TryGetValue(peerEndpoint, out var q))
             {
-                if (pendingPreRegistration.TryGetValue(peerEndpoint, out var q))
-                {
-                    replay = q;
-                    pendingPreRegistration.Remove(peerEndpoint);
-                }
-            }
-            if (replay != null && replay.Count > 0)
-            {
-                var target = peerListeners[proxyPort];
-                Program.Log(LogLevel.Debug,
-                    $"[Proxy] Replaying {replay.Count} pre-registration WireGuard packet(s) from {peerEndpoint} " +
-                    $"through proxyPort={proxyPort}");
-                foreach (var held in replay)
-                    target.ForwardInboundPacket(held);
+                replay = q;
+                pendingPreRegistration.Remove(peerEndpoint);
             }
         }
+        if (replay == null || replay.Count == 0) return;
+
+        PeerProxyListener target;
+        lock (proxyLock)
+        {
+            if (!peerListeners.TryGetValue(proxyPort, out target)) return;
+        }
+        Program.Log(LogLevel.Debug,
+            $"[Proxy] Replaying {replay.Count} pre-registration WireGuard packet(s) from {peerEndpoint} " +
+            $"through proxyPort={proxyPort}");
+        foreach (var held in replay)
+            target.ForwardInboundPacket(held);
     }
 
     /// <summary>
@@ -479,6 +491,13 @@ internal class PeerProxyListener : IDisposable
                     targetEndpoint = peerEndpoint;
                 }
 
+                // Mirror of the inbound [Proxy][fwd] log, for outbound visibility. Handshake bytes (1/2/3) only —
+                // transport data would drown the log.
+                if (result.Buffer.Length > 0 && result.Buffer[0] >= 1 && result.Buffer[0] <= 3)
+                    Program.Log(LogLevel.Debug,
+                        $"[Proxy][out] proxyPort={proxyPort} -> {(icmpSend != null ? "ICMP" : targetEndpoint?.ToString() ?? "null")} " +
+                        $"wgType={result.Buffer[0]} len={result.Buffer.Length}");
+
                 if (targetEndpoint != null)
                 {
                     try
@@ -510,6 +529,12 @@ internal class PeerProxyListener : IDisposable
                     {
                         Program.Log(LogLevel.Error, $"[PeerProxy:{proxyPort}] Error sending packet: {ex.Message}");
                     }
+                }
+                else
+                {
+                    // WG produced a packet and we had nowhere to send it.
+                    Program.Log(LogLevel.Warning,
+                        $"[Proxy][out] proxyPort={proxyPort} DROPPED wgType={(result.Buffer.Length > 0 ? result.Buffer[0] : 0)} — peerEndpoint is null");
                 }
             }
         }

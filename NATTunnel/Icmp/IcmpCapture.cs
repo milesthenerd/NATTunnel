@@ -54,8 +54,14 @@ internal static class IcmpCapture
             catch { return false; }
         }
 
-        // Windows: elevated (WinDivert/RCVALL will work) OR Npcap present (unprivileged path).
-        return WinDivertServiceInstaller.IsElevated() || NpcapCapture.IsNpcapPresent();
+        // Windows, in order of what actually grants capture:
+        //  - elevated            → WinDivert loads on demand
+        //  - Npcap installed     → unprivileged sniff path
+        //  - WinDivert SERVICE   → unprivileged too: a one-time elevated install leaves the driver registered,
+        //                          and we attach with NO_INSTALL
+        return WinDivertServiceInstaller.IsElevated()
+            || NpcapCapture.IsNpcapPresent()
+            || WinDivertServiceInstaller.IsInstalled();
     }
 
     /// <summary>
@@ -67,21 +73,36 @@ internal static class IcmpCapture
     {
         private IIcmpCapture _active;
 
+        /// <summary>Test switch: force WinDivert before Npcap, to exercise it on a machine where Npcap would
+        /// otherwise always win.</summary>
+        private const bool PreferWinDivertForTesting = false;
+
         public bool IsAvailable => _active?.IsAvailable ?? false;
 
         public void Start(System.Net.IPAddress peer, System.Net.IPAddress localSource, IcmpReceiveHandler onIcmp)
         {
-            // 1) Npcap — the MOST ROBUST inbound path when installed. It captures at the NDIS filter layer (same
-            //    as Wireshark/scapy), so it reliably delivers the peer's REAL inbound ICMP. Preferred over RCVALL
-            //    because SIO_RCVALL has a box-specific directionality quirk: on some multi-adapter/polluted Win
-            //    stacks RCVALL delivers only EGRESS (our own outbound looped back as type-0), never the peer's
-            //    inbound — so the punch's data channel silently receives nothing real. Npcap has no such quirk.
+#pragma warning disable CS0162
+            if (PreferWinDivertForTesting)
+            {
+                var wdFirst = new WinDivertCapture();
+                wdFirst.Start(peer, localSource, onIcmp);
+                if (wdFirst.IsAvailable)
+                {
+                    _active = wdFirst;
+                    NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] active capture = WinDivertCapture (PreferWinDivertForTesting is ON — not the shipping order)");
+                    return;
+                }
+                wdFirst.Dispose();
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] WinDivert did not come up (PreferWinDivertForTesting) — falling through to the normal chain");
+            }
+#pragma warning restore CS0162
+
+            // 1) Npcap — most robust when installed: captures at the NDIS filter layer, so it reliably delivers
+            //    the peer's real inbound ICMP (unlike RCVALL, which is egress-only on some multi-adapter stacks).
             bool npcapPresent = NpcapCapture.IsNpcapPresent();
             if (npcapPresent)
             {
-                // Retry briefly: right after boot/process start the Npcap service or the device's IPv4 address may
-                // not be ready yet, so the first open can fail or pick the wrong NIC. A couple of short retries
-                // makes the capture path deterministic instead of racing into the broken RCVALL fallback.
+                // Retry briefly: right after boot the Npcap service or the device's IPv4 may not be ready yet.
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
                     var np = new NpcapCapture();
@@ -90,16 +111,26 @@ internal static class IcmpCapture
                     np.Dispose();
                     if (attempt < 2) System.Threading.Thread.Sleep(300);
                 }
-                // Npcap installed but wouldn't start after retries. Fall through to RCVALL but WARN loudly: on
-                // boxes where RCVALL captures egress-only, this silently half-breaks the tunnel (receives our own
-                // outbound, never the peer). Ensure the Npcap service is running / restart usually fixes it.
+                // Npcap installed but wouldn't start — fall through to RCVALL, but warn: RCVALL can be
+                // egress-only on some stacks, which silently half-breaks the tunnel.
                 NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] Npcap is INSTALLED but failed to start capture " +
                     "after retries — falling back to SIO_RCVALL. If the tunnel connects one-way only, the Npcap service " +
                     "likely isn't running (start it / restart) — RCVALL is egress-only on some stacks.");
             }
 
-            // 2) Raw socket + SIO_RCVALL — no-install fallback (needs admin, which the daemon/GUI have). Works on
-            //    clean single-NIC boxes; may capture egress-only on quirky stacks (install Npcap there).
+            // 2) WinDivert — bundled driver, no user install, deterministic (unlike RCVALL's egress-only quirk),
+            //    and the only unprivileged option when the service is installed but Npcap isn't. Skipped when
+            //    neither elevated nor service-installed, since the open would just fail.
+            if (WinDivertServiceInstaller.IsElevated() || WinDivertServiceInstaller.IsInstalled())
+            {
+                var wd2 = new WinDivertCapture();
+                wd2.Start(peer, localSource, onIcmp);
+                if (wd2.IsAvailable) { _active = wd2; NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, "[ICMP] active capture = WinDivertCapture"); return; }
+                wd2.Dispose();
+            }
+
+            // 3) Raw socket + SIO_RCVALL — no-install fallback (needs admin). Works on clean single-NIC boxes;
+            //    may capture egress-only on quirky stacks (install Npcap there).
             var raw = new RawSocketCapture();
             raw.Start(peer, localSource, onIcmp);
             if (raw.IsAvailable)
@@ -110,12 +141,6 @@ internal static class IcmpCapture
                 return;
             }
             raw.Dispose();
-
-            // 3) WinDivert — bundled WFP driver, works when elevated. Last resort.
-            var wd = new WinDivertCapture();
-            wd.Start(peer, localSource, onIcmp);
-            if (wd.IsAvailable) { _active = wd; NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, "[ICMP] active capture = WinDivertCapture"); return; }
-            wd.Dispose();
 
             _active = null; // nothing came up
             NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, "[ICMP] NO capture backend available");

@@ -13,8 +13,13 @@ namespace NATTunnel.Icmp;
 /// WHY THIS EXISTS: WinDivert's default on-demand load needs Administrator EVERY time it must start the driver,
 /// and it self-deregisters when the last handle closes — so a plain unprivileged app on a machine where nothing
 /// installed the driver cannot use ICMP capture. Registering WinDivert as a standing service ONCE (elevated, at
-/// install time) with a permissive device ACL fixes that: afterward, the unprivileged host process opens handles
-/// via <c>WinDivertOpen(..., WINDIVERT_FLAG_NO_INSTALL)</c> against the already-running service.
+/// install time) keeps the driver loaded: afterward the host opens handles via
+/// <c>WinDivertOpen(..., WINDIVERT_FLAG_NO_INSTALL)</c> against the already-running service.
+///
+/// INCOMPLETE — does not yet enable unprivileged use. Keeping the driver loaded is only half the problem: the
+/// caller also needs permission to OPEN the device, and `\\.\WinDivert` is admin-only by default — a
+/// non-elevated open fails with ERROR_ACCESS_DENIED even with the service installed and running. Making the
+/// unprivileged path work requires explicitly setting a permissive device DACL here after the service starts.
 ///
 /// This is the enabler for the EMBEDDED opt-in ICMP path. Daemon mode doesn't need it (the daemon self-elevates
 /// for WireGuard, so it can load WinDivert on demand). An embedded integrator runs this once from their installer

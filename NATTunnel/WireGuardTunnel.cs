@@ -531,6 +531,9 @@ namespace NATTunnel
                 Program.Log(LogLevel.Debug, $"Skipped WireGuard config update: tunnelStarted={tunnelStarted}");
             }
 
+            // Only now that the driver knows this peer's key can WireGuard accept its handshake.
+            udpProxy?.ReplayPendingFor(endpoint, peer.ProxyPort);
+
             return peer;
         }
 
@@ -621,6 +624,9 @@ namespace NATTunnel
             {
                 Program.Log(LogLevel.Debug, $"Skipped WireGuard config update: tunnelStarted={tunnelStarted}");
             }
+
+            // Only now that the driver knows this peer's key can WireGuard accept its handshake.
+            udpProxy?.ReplayPendingFor(endpoint, peer.ProxyPort);
 
             return peer;
         }
