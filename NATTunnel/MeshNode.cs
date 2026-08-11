@@ -221,6 +221,66 @@ public class MeshNode : IDisposable
         MeshProtocolEngine.ComputeFingerprint(publicKey);
 
     /// <summary>
+    /// Whether this machine can use the ICMP transport tier, which lets two symmetric-NAT peers connect
+    /// directly instead of relaying. Windows needs either an elevated process, Npcap, or the one-time setup
+    /// described on <see cref="TryInstallIcmpSupport"/>; Linux needs CAP_NET_RAW.
+    ///
+    /// False is not an error — those pairs fall back to relaying, which is slower but works.
+    /// </summary>
+    public static bool IsIcmpTransportAvailable() => Icmp.IcmpCapture.AnyCaptureAvailable();
+
+    /// <summary>
+    /// Path to the bundled Windows helper that enables the ICMP tier for NON-ELEVATED apps, or null if it isn't
+    /// present. The NuGet package copies it to <c>nattunnel-icmp/</c> next to your executable.
+    ///
+    /// Running it requires elevation and will trigger a UAC prompt: it installs a kernel-driver service and a
+    /// small boot service, and grants the local Users group access to WinDivert's capture device. That last part
+    /// means ANY local user can capture and inject network packets while it is installed. Surface this as an
+    /// explicit, optional user choice — never install it silently. `uninstall` reverses it.
+    ///
+    /// Not needed if your app already runs elevated, or if the machine has Npcap.
+    /// </summary>
+    public static string GetIcmpSupportInstallerPath()
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        string path = System.IO.Path.Combine(AppContext.BaseDirectory, "nattunnel-icmp", "nattunnel-icmp-service.exe");
+        return System.IO.File.Exists(path) ? path : null;
+    }
+
+    /// <summary>
+    /// Launch the bundled ICMP-support installer with elevation, showing the user a UAC prompt. Returns false
+    /// if the helper isn't bundled, the user declined the prompt, or the install failed.
+    ///
+    /// Read <see cref="GetIcmpSupportInstallerPath"/> before calling — this widens the machine's attack surface
+    /// and should only ever run when the user has explicitly asked for it.
+    /// </summary>
+    /// <param name="uninstall">Remove the services instead of installing them.</param>
+    public static bool TryInstallIcmpSupport(bool uninstall = false)
+    {
+        string exe = GetIcmpSupportInstallerPath();
+        if (exe == null) return false;
+        try
+        {
+            // UseShellExecute + runas is what raises the UAC prompt; the helper's manifest also requests admin.
+            var psi = new System.Diagnostics.ProcessStartInfo(exe, uninstall ? "uninstall" : "install")
+            {
+                UseShellExecute = true,
+                Verb = "runas",
+                CreateNoWindow = true
+            };
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc == null) return false;
+            proc.WaitForExit();
+            return proc.ExitCode == 0;
+        }
+        catch
+        {
+            // Most commonly the user cancelling the UAC prompt (Win32Exception 1223).
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Construct a mesh node from a <see cref="MeshConfig"/>. Validates the config eagerly;
     /// throws <see cref="ArgumentException"/> if a required field is missing or malformed.
     /// </summary>

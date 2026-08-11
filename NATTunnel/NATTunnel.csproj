@@ -21,14 +21,23 @@
 
   <!-- WinDivert (LGPLv3, unmodified official v2.2.2 binaries) — the ICMP-transport capture driver on Windows.
        Loaded at runtime via P/Invoke (dynamic link keeps us LGPLv3-compliant; do NOT static-link or modify).
-       Pack="false": embedded consumers who don't enable the ICMP transport don't need it; the daemon bundles
-       it via dist/ packaging. See THIRD-PARTY-NOTICES.md for attribution + source pointer. -->
+       See THIRD-PARTY-NOTICES.md for attribution + source pointer. -->
   <ItemGroup>
-    <Content Include="..\lib\win-x64\WinDivert.dll" Pack="false">
+    <!-- Two jobs for the same two files:
+         * CopyToOutputDirectory — our own build output (daemon/GUI load them from beside the exe)
+         * PackagePath under contentFiles — the NuGet copy, which lands in an embedded consumer's bin/
+           next to the bundled installer, which resolves the driver by path at load time.
+         Declared once with both, because MSBuild dedupes Content by Include path and a second entry is
+         silently dropped. -->
+    <Content Include="..\lib\win-x64\WinDivert.dll"
+             Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\WinDivert.dll"
+             PackageCopyToOutput="true">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>WinDivert.dll</Link>
     </Content>
-    <Content Include="..\lib\win-x64\WinDivert64.sys" Pack="false">
+    <Content Include="..\lib\win-x64\WinDivert64.sys"
+             Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\WinDivert64.sys"
+             PackageCopyToOutput="true">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <Link>WinDivert64.sys</Link>
     </Content>
@@ -37,14 +46,16 @@
   <PropertyGroup>
     <OutputType>Library</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- Windows-only call sites are gated at runtime by OperatingSystem.IsWindows(). -->
-    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <!-- Windows-only call sites are gated at runtime by OperatingSystem.IsWindows().
+         NU5100: WinDivert.dll ships under contentFiles as a native payload, not a managed reference — being
+         outside lib/ is intentional. -->
+    <NoWarn>$(NoWarn);CA1416;NU5100</NoWarn>
   </PropertyGroup>
 
   <!-- NuGet packaging metadata. Run `dotnet pack -c Release` to produce a .nupkg.        -->
   <PropertyGroup>
     <PackageId>NATTunnel</PackageId>
-    <Version>0.10.0-test1</Version>
+    <Version>0.10.0-test2</Version>
     <Authors>NATTunnel contributors</Authors>
     <Description>Embeddable peer-to-peer mesh networking library with NAT hole-punching, Noise XX end-to-end encryption, and userspace relay forwarding. Designed for games and other apps that need direct UDP peer connectivity without each peer running a server.</Description>
     <PackageTags>mesh;networking;nat-traversal;hole-punching;p2p;udp;noise;game-networking</PackageTags>
@@ -60,6 +71,23 @@
   <ItemGroup>
     <None Include="..\LICENCE" Pack="true" PackagePath="\" />
     <None Include="..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- Unprivileged ICMP support for embedded consumers.
+       Unlike a `tools/` folder (which NuGet never copies to the consumer's bin/), contentFiles with
+       PackageCopyToOutput lands these NEXT TO THE CONSUMING APP, so the host can find and launch the installer
+       itself instead of downloading one. Running it still requires elevation and is the integrator's choice —
+       it installs a kernel-driver service and opens packet capture to all local users. -->
+  <!-- Uses the PUBLISH output: that's the single-file, self-contained, trimmed build (~11 MB). The plain build
+       output is framework-dependent and scatters DLLs, which would land in the consumer's bin/.
+       Build it with: dotnet publish tools/IcmpServiceInstaller -c Release   (before `dotnet pack`) -->
+  <ItemGroup Condition="Exists('..\tools\IcmpServiceInstaller\bin\Release\net9.0\win-x64\publish\nattunnel-icmp-service.exe')">
+    <Content Include="..\tools\IcmpServiceInstaller\bin\Release\net9.0\win-x64\publish\nattunnel-icmp-service.exe"
+             Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\"
+             PackageCopyToOutput="true" CopyToOutputDirectory="PreserveNewest"
+             Link="nattunnel-icmp\nattunnel-icmp-service.exe" />
+    <!-- WinDivert.dll/.sys are packed by the Content items further up — they carry both the build-output copy
+         and the contentFiles PackagePath, since MSBuild would drop a duplicate Include here. -->
   </ItemGroup>
 
 </Project>

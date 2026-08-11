@@ -589,7 +589,8 @@ internal class MeshProtocolEngine
     private MappingBehavior? detectedMappingBehavior;
     /// <summary>Whether this client can use the ICMP transport tier (has an available capture backend).
     /// Computed once (probing sockets/Npcap is not free) and advertised in every MeshJoinRequest so the
-    /// engine can gate the tier on BOTH peers being capable. See <see cref="Icmp.IcmpCapture.AnyCaptureAvailable"/>.</summary>
+    /// engine can gate the tier on BOTH peers being capable. See <see cref="Icmp.IcmpCapture.AnyCaptureAvailable"/>.
+    ///</summary>
     private readonly bool localIcmpCapable = Icmp.IcmpCapture.AnyCaptureAvailable();
     private FilteringBehavior? detectedFilteringBehavior;
 

@@ -54,14 +54,26 @@ internal static class IcmpCapture
             catch { return false; }
         }
 
-        // Windows, in order of what actually grants capture:
+        bool elevated = WinDivertServiceInstaller.IsElevated();
+
+        // Repair path for machines whose WinDivert service predates the keeper: the DACL is lost on every driver
+        // load, and without the keeper nothing re-applies it. Skipped when the keeper is installed, since it
+        // already handles this at boot.
+        if (elevated
+            && WinDivertServiceInstaller.IsInstalled()
+            && !WinDivertServiceInstaller.IsKeeperInstalled()
+            && !WinDivertServiceInstaller.IsDeviceUserAccessible())
+        {
+            WinDivertServiceInstaller.ApplyPermissiveDeviceDacl();
+        }
+
+        // In order of what actually grants capture:
         //  - elevated            → WinDivert loads on demand
         //  - Npcap installed     → unprivileged sniff path
-        //  - WinDivert SERVICE   → unprivileged too: a one-time elevated install leaves the driver registered,
-        //                          and we attach with NO_INSTALL
-        return WinDivertServiceInstaller.IsElevated()
+        //  - WinDivert SERVICE   → unprivileged too, IF the device DACL is currently open to Users
+        return elevated
             || NpcapCapture.IsNpcapPresent()
-            || WinDivertServiceInstaller.IsInstalled();
+            || (WinDivertServiceInstaller.IsInstalled() && WinDivertServiceInstaller.IsDeviceUserAccessible());
     }
 
     /// <summary>

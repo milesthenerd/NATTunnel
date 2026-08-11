@@ -9,8 +9,20 @@
     <Nullable>enable</Nullable>
     <AssemblyName>nattunnel-icmp-service</AssemblyName>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>false</SelfContained>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
+
+    <!-- Ships inside a NuGet package next to a consumer's app, so it must not depend on a matching .NET runtime
+         being installed, and it should be ONE file rather than scattering DLLs into their output directory.
+         WinDivert.dll/.sys stay loose beside it deliberately — WinDivert resolves the driver by path at load
+         time, so they cannot be embedded. -->
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <!-- Trimmed: this ships inside a NuGet package, so size matters. The tool only touches SCM P/Invoke,
+         ServiceBase and Console — no reflection-driven paths for the trimmer to miss. -->
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>partial</TrimMode>
   </PropertyGroup>
 
   <!-- Manifest: request admin so double-clicking / installer-invoke triggers UAC (installing a kernel-driver
@@ -22,6 +34,11 @@
   <ItemGroup>
     <!-- Reuse the library's installer logic (source-linked; it's public but self-contained). -->
     <Compile Include="..\..\NATTunnel\Icmp\WinDivertServiceInstaller.cs" Link="WinDivertServiceInstaller.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- ServiceBase, for the boot keeper that re-applies the device DACL after every driver load. -->
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="9.0.0" />
   </ItemGroup>
 
   <!-- The driver must sit next to this exe so ResolveDriverPath finds it. -->
