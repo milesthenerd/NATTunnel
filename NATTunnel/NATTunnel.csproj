@@ -9,9 +9,7 @@
     <PackageReference Include="SharpPcap" Version="6.3.1" />
   </ItemGroup>
 
-  <!-- Always copied to this library's output. Consumers targeting Linux/macOS strip it post-publish.
-       Pack="false" keeps it out of the NuGet — embedded consumers don't need it, and the daemon
-       distribution bundles it via the dist/ packaging scripts separately. -->
+  <!-- Always copied to this library's output.-->
   <ItemGroup>
     <Content Include="..\lib\win-x64\wireguard.dll" Pack="false">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -19,16 +17,10 @@
     </Content>
   </ItemGroup>
 
-  <!-- WinDivert (LGPLv3, unmodified official v2.2.2 binaries) — the ICMP-transport capture driver on Windows.
+  <!-- WinDivert (LGPLv3, unmodified official v2.2.2 binaries): the ICMP-transport capture driver on Windows.
        Loaded at runtime via P/Invoke (dynamic link keeps us LGPLv3-compliant; do NOT static-link or modify).
        See THIRD-PARTY-NOTICES.md for attribution + source pointer. -->
   <ItemGroup>
-    <!-- Two jobs for the same two files:
-         * CopyToOutputDirectory — our own build output (daemon/GUI load them from beside the exe)
-         * PackagePath under contentFiles — the NuGet copy, which lands in an embedded consumer's bin/
-           next to the bundled installer, which resolves the driver by path at load time.
-         Declared once with both, because MSBuild dedupes Content by Include path and a second entry is
-         silently dropped. -->
     <Content Include="..\lib\win-x64\WinDivert.dll"
              Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\WinDivert.dll"
              PackageCopyToOutput="true">
@@ -47,7 +39,7 @@
     <OutputType>Library</OutputType>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <!-- Windows-only call sites are gated at runtime by OperatingSystem.IsWindows().
-         NU5100: WinDivert.dll ships under contentFiles as a native payload, not a managed reference — being
+         NU5100: WinDivert.dll ships under contentFiles as a native payload, not a managed reference; being
          outside lib/ is intentional. -->
     <NoWarn>$(NoWarn);CA1416;NU5100</NoWarn>
   </PropertyGroup>
@@ -55,7 +47,7 @@
   <!-- NuGet packaging metadata. Run `dotnet pack -c Release` to produce a .nupkg.        -->
   <PropertyGroup>
     <PackageId>NATTunnel</PackageId>
-    <Version>0.10.0-test2</Version>
+    <Version>0.10.0-test18</Version>
     <Authors>NATTunnel contributors</Authors>
     <Description>Embeddable peer-to-peer mesh networking library with NAT hole-punching, Noise XX end-to-end encryption, and userspace relay forwarding. Designed for games and other apps that need direct UDP peer connectivity without each peer running a server.</Description>
     <PackageTags>mesh;networking;nat-traversal;hole-punching;p2p;udp;noise;game-networking</PackageTags>
@@ -76,7 +68,7 @@
   <!-- Unprivileged ICMP support for embedded consumers.
        Unlike a `tools/` folder (which NuGet never copies to the consumer's bin/), contentFiles with
        PackageCopyToOutput lands these NEXT TO THE CONSUMING APP, so the host can find and launch the installer
-       itself instead of downloading one. Running it still requires elevation and is the integrator's choice —
+       itself instead of downloading one. Running it still requires elevation and is the integrator's choice:
        it installs a kernel-driver service and opens packet capture to all local users. -->
   <!-- Uses the PUBLISH output: that's the single-file, self-contained, trimmed build (~11 MB). The plain build
        output is framework-dependent and scatters DLLs, which would land in the consumer's bin/.
@@ -86,7 +78,7 @@
              Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\"
              PackageCopyToOutput="true" CopyToOutputDirectory="PreserveNewest"
              Link="nattunnel-icmp\nattunnel-icmp-service.exe" />
-    <!-- WinDivert.dll/.sys are packed by the Content items further up — they carry both the build-output copy
+    <!-- WinDivert.dll/.sys are packed by the Content items further up; they carry both the build-output copy
          and the contentFiles PackagePath, since MSBuild would drop a duplicate Include here. -->
   </ItemGroup>
 

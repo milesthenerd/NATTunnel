@@ -39,7 +39,7 @@ internal class WireGuardUdpProxy : IDisposable
 
     // Inbound WireGuard packets that arrived BEFORE their peer was registered (see ForwardToWireGuard).
     // Keyed by source endpoint; replayed through the correct per-peer listener by RegisterPeer. Without this
-    // they were forwarded from the shared socket's source port, which WG-NT rejects — the peer's handshake
+    // they were forwarded from the shared socket's source port, which WG-NT rejects: the peer's handshake
     // INITs were effectively discarded until registration happened to complete.
     private readonly Dictionary<IPEndPoint, List<byte[]>> pendingPreRegistration = new();
     private readonly object pendingLock = new object();
@@ -63,7 +63,7 @@ internal class WireGuardUdpProxy : IDisposable
         catch (SocketException ex)
         {
             throw new InvalidOperationException(
-                $"Cannot bind WireGuard proxy port 51821/UDP — another instance may already be running. ({ex.Message})", ex);
+                $"Cannot bind WireGuard proxy port 51821/UDP, another instance may already be running. ({ex.Message})", ex);
         }
         wireguardListener.Client.ReceiveBufferSize = 128000;
         // Same poisoning risk as the per-peer listeners: this socket also sends to 51820, so a
@@ -124,14 +124,14 @@ internal class WireGuardUdpProxy : IDisposable
                 peerListeners[proxyPort].UpdateTunnelSocket(socketToUse);
             }
 
-            // Held packets are NOT replayed here — registration only sets up routing; WireGuard doesn't know
+            // Held packets are NOT replayed here: registration only sets up routing; WireGuard doesn't know
             // this peer's key until AddOrUpdatePeer finishes. Callers must call ReplayPendingFor after that.
         }
     }
 
     /// <summary>
     /// Replay handshake packets that arrived from <paramref name="peerEndpoint"/> before it was registered.
-    /// Call only after the WireGuard driver has been configured with this peer — see RegisterPeer.
+    /// Call only after the WireGuard driver has been configured with this peer; see RegisterPeer.
     /// </summary>
     public void ReplayPendingFor(IPEndPoint peerEndpoint, int proxyPort)
     {
@@ -171,7 +171,7 @@ internal class WireGuardUdpProxy : IDisposable
                 tunnelIpToPeerEndpoint.Remove(tunnelIp);
                 peerLastActivity.Remove(tunnelIp);
 
-                // Drop any held pre-registration packets for this endpoint — the tunnel is going away, so
+                // Drop any held pre-registration packets for this endpoint: the tunnel is going away, so
                 // replaying them later would inject a dead handshake attempt, and keeping them leaks memory
                 // for a peer that may never come back on this endpoint.
                 lock (pendingLock) { pendingPreRegistration.Remove(endpoint); }
@@ -238,7 +238,7 @@ internal class WireGuardUdpProxy : IDisposable
                         }
 
                         // HANDSHAKE bytes only (1/2/3). Transport data (4) runs at thousands/sec under load and
-                        // drowned every other line in the log — and this is the expected path anyway, so it has
+                        // drowned every other line in the log, and this is the expected path anyway, so it has
                         // no diagnostic value there. The fallback/held paths below still log unconditionally
                         // because those ARE the anomalies.
                         if (packet.Length > 0 && packet[0] >= 1 && packet[0] <= 3)
@@ -258,7 +258,7 @@ internal class WireGuardUdpProxy : IDisposable
                 // NAT may change source port, so try matching by IP address only.
                 // Forward the packet via the matched listener but do NOT update the
                 // registered endpoint. Updating causes flip-flopping when multiple peers
-                // share the same public IP (same NAT) — even if one peer's entry was
+                // share the same public IP (same NAT); even if one peer's entry was
                 // removed, the surviving entry gets overwritten back and forth by packets
                 // from both peers. The outbound path still uses the original registered
                 // endpoint which remains valid (NAT mappings are bidirectional).
@@ -310,7 +310,7 @@ internal class WireGuardUdpProxy : IDisposable
                     if (q.Count >= MaxPendingPerEndpoint) q.RemoveAt(0);
                     q.Add(packet);
                     Program.Log(LogLevel.Debug,
-                        $"[Proxy][fwd] HELD src={sourceEndpoint} wgType={packet[0]} — no peer registered yet " +
+                        $"[Proxy][fwd] HELD src={sourceEndpoint} wgType={packet[0]}, no peer registered yet " +
                         $"(queued {q.Count}/{MaxPendingPerEndpoint}); will replay on registration");
                 }
                 return;
@@ -391,13 +391,13 @@ internal class PeerProxyListener : IDisposable
     private readonly object endpointLock = new object();
     // When set, this peer is ICMP-backed: outbound WireGuard packets are sent through the ICMP transport
     // (icmpSend) instead of the UDP tunnelSocket. Null = the normal UDP path. This is what makes ICMP a
-    // true WireGuard ENCAPSULATOR in daemon mode — WG runs over ICMP exactly as it runs over UDP.
+    // true WireGuard ENCAPSULATOR in daemon mode: WG runs over ICMP exactly as it runs over UDP.
     private readonly Action<byte[]> icmpSend;
 
     /// <summary>
     /// Lifetime count of datagrams WireGuard-NT has handed to a peer proxy listener (i.e. WG's OUTBOUND
     /// direction, before encapsulation). Diagnostic only. Static so IcmpTransport can fold it into its
-    /// per-window stats line without plumbing a reference through — there is at most one proxy per process
+    /// per-window stats line without plumbing a reference through; there is at most one proxy per process
     /// and this is a debug counter, so precision across multiple listeners doesn't matter.
     /// </summary>
     internal static long WgToProxyPackets;
@@ -475,11 +475,11 @@ internal class PeerProxyListener : IDisposable
                 catch (SocketException ex)
                 {
                     Program.Log(LogLevel.Warning,
-                        $"[PeerProxy:{proxyPort}] Receive error ({ex.SocketErrorCode}) — continuing: {ex.Message}");
+                        $"[PeerProxy:{proxyPort}] Receive error ({ex.SocketErrorCode}), continuing: {ex.Message}");
                     continue;
                 }
 
-                // Ticks once per datagram WG-NT hands us. Reported as wgOut/s: compare against attempted/s —
+                // Ticks once per datagram WG-NT hands us. Reported as wgOut/s: compare against attempted/s;
                 // wgOut>0 with attempted=0 means we're losing frames before IcmpTransport.Send; both at 0 while
                 // inbound continues means WG itself went quiet.
                 Interlocked.Increment(ref WgToProxyPackets);
@@ -491,7 +491,7 @@ internal class PeerProxyListener : IDisposable
                     targetEndpoint = peerEndpoint;
                 }
 
-                // Mirror of the inbound [Proxy][fwd] log, for outbound visibility. Handshake bytes (1/2/3) only —
+                // Mirror of the inbound [Proxy][fwd] log, for outbound visibility. Handshake bytes (1/2/3) only;
                 // transport data would drown the log.
                 if (result.Buffer.Length > 0 && result.Buffer[0] >= 1 && result.Buffer[0] <= 3)
                     Program.Log(LogLevel.Debug,
@@ -504,7 +504,7 @@ internal class PeerProxyListener : IDisposable
                     {
                         // ICMP-backed peer: encapsulate the WireGuard packet in the ICMP channel instead of a
                         // UDP send. The peer's tunnel forwards received ICMP payloads back into WireGuard, so
-                        // WG runs fully over ICMP. (targetEndpoint is unused here — the ICMP transport already
+                        // WG runs fully over ICMP. (targetEndpoint is unused here; the ICMP transport already
                         // knows its peer.)
                         if (icmpSend != null)
                         {
@@ -534,7 +534,7 @@ internal class PeerProxyListener : IDisposable
                 {
                     // WG produced a packet and we had nowhere to send it.
                     Program.Log(LogLevel.Warning,
-                        $"[Proxy][out] proxyPort={proxyPort} DROPPED wgType={(result.Buffer.Length > 0 ? result.Buffer[0] : 0)} — peerEndpoint is null");
+                        $"[Proxy][out] proxyPort={proxyPort} DROPPED wgType={(result.Buffer.Length > 0 ? result.Buffer[0] : 0)}, peerEndpoint is null");
                 }
             }
         }

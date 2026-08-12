@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,7 +10,7 @@ using System.Threading.Tasks;
 namespace NATTunnel.Icmp;
 
 /// <summary>
-/// A bidirectional ICMP hole-punch transport between two full-range-symmetric NAT peers — the direct-connect
+/// A bidirectional ICMP hole-punch transport between two full-range-symmetric NAT peers: the direct-connect
 /// path for the case UDP provably cannot punch. Lifts the validated core of experiments/IcmpBandwidth into a
 /// clean, instance-based transport the mesh engine can drive as an alternative to a UDP socket.
 ///
@@ -45,7 +46,7 @@ internal sealed class IcmpTransport : IDisposable
     private const ushort PING_ID = 0x4a01;    // fixed id the pinger uses post-punch (like a real ping's identifier)
     private const int DATA_HEADER = 3 + 4; // MAGIC(3) + uint32 frame id
     // Hearing the peer this many times (any tagged packet) is enough to declare the hole open, even with no
-    // explicit ACK — the two sides' punch windows don't always overlap cleanly.
+    // explicit ACK; the two sides' punch windows don't always overlap cleanly.
     private const int HEARD_TO_PUNCH = 8;
 
     // --- configuration (defaults are the validated values) ---
@@ -55,9 +56,9 @@ internal sealed class IcmpTransport : IDisposable
     // on opposite roles with zero coordination. An inferred role ("did I hear a request recently?") is unstable:
     // both sides can evaluate it the same way at the same time and both become CLIENT, deadlocking.
     //
-    // The initial assignment can still be backwards — only ONE direction's echo REQUESTS actually crosses a
+    // The initial assignment can still be backwards; only ONE direction's echo REQUESTS actually crosses a
     // symmetric-NAT pair, and which one is a property of the NAT pair, not the peer-id ordering. That's fine: role
-    // only controls keepalive-REQUEST RATE (how many reply-slots we hand the peer), not how data is sent — both
+    // only controls keepalive-REQUEST RATE (how many reply-slots we hand the peer), not how data is sent; both
     // roles drain data as matched type-0 replies, the only shape this channel reliably delivers. A wrong role is
     // merely suboptimal, not fatal.
     private readonly bool _isPinger;
@@ -73,6 +74,9 @@ internal sealed class IcmpTransport : IDisposable
     private readonly object _idLock = new();
     private readonly System.Collections.Generic.List<ushort> _heardIds = new();
     private Socket _sendSock;
+    // Set when the raw send socket is unusable (unprivileged Windows) and the active capture is WinDivert, which
+    // can inject. Lets an unprivileged host transmit; null means raw-socket sends or no send path at all.
+    private WinDivertCapture _injector;
     private IPAddress _localSource = IPAddress.Any;
     private IPEndPoint _sendTo;
     private Thread _sendThread;
@@ -88,7 +92,7 @@ internal sealed class IcmpTransport : IDisposable
 
     /// <summary>
     /// Fires for each inbound caller datagram reassembled from the channel. The byte[] is a fresh copy the
-    /// handler owns. Raised on the capture thread — keep the handler fast; marshal real work off it.
+    /// handler owns. Raised on the capture thread; keep the handler fast; marshal real work off it.
     /// </summary>
     public event Action<byte[]> PacketReceived;
 
@@ -96,7 +100,7 @@ internal sealed class IcmpTransport : IDisposable
 
     /// <summary>
     /// After <see cref="StartAsync"/> returns, distinguishes WHY it may have failed:
-    ///   • false  → the capture backend couldn't come up (no driver / no privilege) — the ICMP tier is not
+    ///   • false  → the capture backend couldn't come up (no driver / no privilege): the ICMP tier is not
     ///              usable on this machine at all; the engine should not retry ICMP for other peers either.
     ///   • true   → capture was fine; a false StartAsync means the PUNCH itself timed out for this pair.
     /// Lets the engine tell "ICMP unavailable here" from "this specific pair didn't punch".
@@ -148,7 +152,7 @@ internal sealed class IcmpTransport : IDisposable
     public async Task<bool> StartAsync(CancellationToken ct = default)
     {
         // Resolve the local source IP that routes to the peer (UDP connect sends nothing; it just makes the OS
-        // pick the egress interface). Binding the raw send socket to this forces the right NIC — WARP/Tailscale-aware.
+        // pick the egress interface). Binding the raw send socket to this forces the right NIC (WARP/Tailscale-aware).
         try
         {
             using var probe = new Socket(_peer.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
@@ -157,22 +161,41 @@ internal sealed class IcmpTransport : IDisposable
         }
         catch { _localSource = _peer.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any; }
 
-        // Send socket: raw ICMP bound to the resolved source. Sending is unprivileged on modern Windows and
-        // needs only CAP_NET_RAW on Linux (which the daemon already has, or setcap grants).
+        // Send path: raw ICMP socket when we're allowed one, WinDivert injection otherwise.
+        //
+        // RAW SOCKETS NEED ADMINISTRATOR ON WINDOWS (CAP_NET_RAW on Linux). The constructor and Bind SUCCEED
+        // unprivileged: Windows defers the check to send time, where SendTo fails with WSAEACCES (10013).
+        //
+        // Worse, the restriction is PER ICMP TYPE: unprivileged Windows still allows raw echo REQUESTS (type 8)
+        // and refuses only echo REPLIES (type 0). The punch rides type-8 and the data path rides type-0, so such
+        // a host punches, declares the tunnel connected, and then drops every data frame. A send probe cannot be
+        // trusted to catch this (a type-8 probe passes on exactly the hosts that can't carry data), so we do not
+        // probe: on unprivileged Windows we go straight to injection, which has no per-type restriction.
         var proto = _peer.AddressFamily == AddressFamily.InterNetworkV6 ? ProtocolType.IcmpV6 : ProtocolType.Icmp;
-        try
+        bool useInjection = OperatingSystem.IsWindows() && !WinDivertServiceInstaller.IsElevated();
+        if (!useInjection)
         {
-            _sendSock = new Socket(_peer.AddressFamily, SocketType.Raw, proto);
-            _sendSock.Bind(new IPEndPoint(_localSource, 0));
-            // Small send buffer on purpose — bufferbloat is latency. A 1MB buffer (sized for the old 1500/s punch
-            // firehose) fills faster than the NIC drains it at today's ~60/s steady state, adding pure queueing
-            // delay (measured ~860ms of self-inflicted RTT). If large-packet starvation ever returns, fix it by
-            // pacing the sender, not by growing the buffer.
-            try { _sendSock.SendBufferSize = 64 * 1024; } catch { }
+            try
+            {
+                _sendSock = new Socket(_peer.AddressFamily, SocketType.Raw, proto);
+                _sendSock.Bind(new IPEndPoint(_localSource, 0));
+                // Small send buffer on purpose: bufferbloat is latency. A 1MB buffer (sized for the old 1500/s punch
+                // firehose) fills faster than the NIC drains it at today's ~60/s steady state, adding pure queueing
+                // delay (measured ~860ms of self-inflicted RTT). If large-packet starvation ever returns, fix it by
+                // pacing the sender, not by growing the buffer.
+                try { _sendSock.SendBufferSize = 64 * 1024; } catch { }
+            }
+            catch (SocketException ex)
+            {
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                    $"[ICMP] raw send socket unavailable ({ex.SocketErrorCode}): ICMP transport unusable");
+                return false; // can't send raw ICMP and not on the injection path => transport unusable
+            }
         }
-        catch (SocketException)
+        else
         {
-            return false; // can't send raw ICMP → transport unusable
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                "[ICMP] unprivileged Windows: using WinDivert injection for ALL sends (raw type-0 would be refused)");
         }
         _sendTo = new IPEndPoint(_peer, 0);
 
@@ -180,6 +203,20 @@ internal sealed class IcmpTransport : IDisposable
         NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, $"[ICMP] capture backend = {_capture.GetType().Name}, localSource = {_localSource}, peer = {_peer}");
         _capture.Start(_peer, _localSource, OnInboundIcmp);
         CaptureAvailable = _capture.IsAvailable;
+
+        // No raw socket: the only remaining way to transmit is injecting through an active WinDivert handle.
+        if (_sendSock == null)
+        {
+            _injector = _capture.ActiveWinDivert();
+            if (_injector == null)
+            {
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Warning,
+                    "[ICMP] no way to send: raw ICMP needs elevation and the active capture backend cannot inject. " +
+                    "Falling back to relay.");
+                return false;
+            }
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, "[ICMP] sending via WinDivert injection (no raw socket)");
+        }
         if (!CaptureAvailable)
             return false; // can't receive inbound type-8 (e.g. Windows non-admin without the driver) → fall through
 
@@ -229,7 +266,7 @@ internal sealed class IcmpTransport : IDisposable
 
         // Punch confirmed. Signal success and raise the event, then run the DATA CHANNEL.
         //
-        // Don't stay on the full-range sweep or switch to a fixed "lock set" post-punch — a fixed set is a hole
+        // Don't stay on the full-range sweep or switch to a fixed "lock set" post-punch: a fixed set is a hole
         // the CGNAT never forwards (it rewrites the id per flow), and stopping the sweep kills the holes. Instead,
         // post-punch uses a normal ping-session shape (see below): one fixed id, request/reply, data-as-reply.
         punchedTcs.TrySetResult(true);
@@ -246,7 +283,7 @@ internal sealed class IcmpTransport : IDisposable
             // BOTH peers ping (symmetric). A keepalive echo REQUEST on the fixed ping id (like a real `ping`: one
             // identifier, incrementing seq) does two jobs: it keeps OUR NAT's outbound-request table populated so
             // the peer's matched data-replies are forwarded inbound to us (RFC 5508), and it gives the PEER inbound
-            // requests to answer with THEIR data. Our own data is NOT sent here as requests — unsolicited inbound
+            // requests to answer with THEIR data. Our own data is NOT sent here as requests; unsolicited inbound
             // requests are dropped by the peer's NAT (proven by the captures); data drains reactively as REPLIES in
             // OnInboundIcmp (+ the fallback below). So this loop is pure keepalive; all data rides the reply shape.
             if (_probeLargeReq)
@@ -263,7 +300,7 @@ internal sealed class IcmpTransport : IDisposable
             }
 
             // CLIENT/SERVER MODEL: client drives a dense request stream (its reply-vehicle); server replies
-            // reactively in OnInboundIcmp. Role is DETERMINISTIC by peer id, not inferred from traffic — an
+            // reactively in OnInboundIcmp. Role is DETERMINISTIC by peer id, not inferred from traffic; an
             // inferred role is unstable (both sides can independently flip to CLIENT at once and deadlock).
             //
             // Both sides still send requests, only the rate differs: the server also trickles slowly so the
@@ -275,7 +312,7 @@ internal sealed class IcmpTransport : IDisposable
                     $"[ICMP][role] {(_isClient ? "CLIENT (dense request driver)" : "SERVER (sparse requests; data rides replies)")}");
             }
 
-            // (A SERVER→CLIENT "backwards role rescue" was tried and removed — promoting to CLIENT moved that side
+            // (A SERVER→CLIENT "backwards role rescue" was tried and removed: promoting to CLIENT moved that side
             //  onto the unsolicited-request path, which doesn't deliver. Role was never the problem; data shape was.)
 
             // DATA GOES OUT AS MATCHED REPLIES, NEVER AS UNSOLICITED REQUESTS: an unsolicited inbound echo REQUEST
@@ -295,9 +332,9 @@ internal sealed class IcmpTransport : IDisposable
                 long slot = reqIsFresher ? _lastHeardReq : (_lastHeardAny >= 0 ? _lastHeardAny : _lastHeardReq);
                 if (slot < 0)
                 {
-                    // Nothing heard from the peer yet. Requeue onto the queue it CAME FROM — enqueueing
+                    // Nothing heard from the peer yet. Requeue onto the queue it CAME FROM; enqueueing
                     // unconditionally to _txQueue would demote handshake frames out of _priorityTxQueue.
-                    bool wasHandshake = frame.Data.Length > 0 && frame.Data[0] >= 1 && frame.Data[0] <= 3;
+                    bool wasHandshake = IsSessionSetupFrame(frame.Data);
                     (wasHandshake ? _priorityTxQueue : _txQueue).Enqueue(frame);
                     break;
                 }
@@ -305,9 +342,9 @@ internal sealed class IcmpTransport : IDisposable
                 // outright (on a req=0 peer every slot is always stale). A stale slot delivers low-probability;
                 // refusing to send delivers zero.
                 Interlocked.Increment(ref _txFramesSent);
-                // WG handshake packets (0x01/0x02/0x03) get a wider fanout: the priority queue fixes send ORDER,
-                // not delivery odds. They're tiny and rare, so the extra copies are nearly free.
-                bool isHandshake = frame.Data.Length > 0 && frame.Data[0] >= 1 && frame.Data[0] <= 3;
+                // Session-setup packets get a wider fanout: the priority queue fixes send ORDER, not delivery
+                // odds. They're tiny and rare, so the extra copies are nearly free.
+                bool isHandshake = IsSessionSetupFrame(frame.Data);
                 int fanout = isHandshake ? HANDSHAKE_FANOUT : FRAME_FANOUT;
                 EmitFrameRedundant(frame, (ushort)(slot >> 16), (ushort)(slot & 0xFFFF), fanout);
             }
@@ -315,20 +352,22 @@ internal sealed class IcmpTransport : IDisposable
             // iteration. High drainFull + qDepth>0 => pacing-limited; low drainFull + qDepth>0 => slot-supply-limited.
             if (sent >= DRAIN_PER_ITER && !_txQueue.IsEmpty)
                 Interlocked.Increment(ref _drainFullIters);
-            // ALWAYS send the keepalive REQUEST, never gated on "we had nothing else to send" — it is the ONLY
+            // ALWAYS send the keepalive REQUEST, never gated on "we had nothing else to send": it is the ONLY
             // thing that gives the PEER live (id,seq) slots to put its data-replies on (its reactive drain in
             // OnInboundIcmp fires only on inbound type-8). Gating on idle starves the channel exactly when it's
             // busiest and symmetrically starves us back.
             //
-            // MUST sweep the id space — a fixed id never crosses a symmetric CGNAT (it rewrites the id per flow,
+            // MUST sweep the id space: a fixed id never crosses a symmetric CGNAT (it rewrites the id per flow,
             // same reason the punch itself must sweep). Sweep at the same steady rate so this stays ping-shaped,
             // not scan-shaped (unlike the 1500/s full-range punch, which risks a MAC ban).
             ushort kaId = (ushort)(_kaSweep++ & 0xFFFF);
             SendTag(ICMP_ECHO_REQUEST, kaId, pingSeq++, REQTAG);
             // Pace at the dense rate whenever EITHER side has traffic to move; trickle only when genuinely idle.
             // Keying on activity in either direction (not just our own queue) lets a trickling server still supply
-            // a busy client with a dense slot rate — the server can't otherwise know the client is backed up.
-            // An unfinished WG handshake counts as active, holding dense through the sparse gaps between retries.
+            // a busy client with a dense slot rate; the server can't otherwise know the client is backed up.
+            // An unfinished handshake counts as active, holding dense through the sparse gaps between retries.
+            // The _wgData term is daemon-specific (it stays 0 in embedded mode, where there is no WireGuard), so
+            // the window since the last setup frame is what carries embedded.
             bool handshaking = !_priorityTxQueue.IsEmpty ||
                                (Interlocked.Read(ref _wgData) == 0 &&
                                 (DateTime.UtcNow - _handshakeSeenUtc) < HandshakeActiveWindow);
@@ -336,7 +375,7 @@ internal sealed class IcmpTransport : IDisposable
                           (DateTime.UtcNow - _lastDataRxUtc) < ActiveWindow ||
                           (DateTime.UtcNow - _lastDataTxUtc) < ActiveWindow;
             // Staggered-start guard. Every other term needs traffic to already exist, so a server-role peer
-            // that punches before its partner is ready trickles at 4/s and starves the partner's handshake —
+            // that punches before its partner is ready trickles at 4/s and starves the partner's handshake,
             // which then never generates the traffic that would lift the trickle. Hold dense after a punch.
             bool freshlyPunched = (DateTime.UtcNow - _punchedAtUtc) < PostPunchDenseWindow;
             PaceTo(sw2, ref nextSend2, (_isClient || active || handshaking || freshlyPunched) ? STEADY_INTERVAL : SERVER_TRICKLE_INTERVAL);
@@ -389,7 +428,7 @@ internal sealed class IcmpTransport : IDisposable
     // wire traffic since it only emits what WG already queued.
     private const int DRAIN_PER_ITER = 128;
 
-    // Separate, SMALL cap for the reactive drain in OnInboundIcmp (see its call site) — that loop runs
+    // Separate, SMALL cap for the reactive drain in OnInboundIcmp (see its call site); that loop runs
     // synchronously on the Npcap capture thread once per inbound request, so a large value here stalls RX
     // processing and fights the main drain loop for _sendLock. Kept independent of DRAIN_PER_ITER on purpose:
     // the two loops have opposite cost profiles (this one blocks the packet-capture thread; DRAIN_PER_ITER
@@ -401,16 +440,32 @@ internal sealed class IcmpTransport : IDisposable
     private readonly System.Collections.Concurrent.ConcurrentQueue<TxFrame> _txQueue = new();
 
     // Bufferbloat bound. Unbounded, WG frames offered faster than the pacer can deliver would accumulate as
-    // standing queue depth — inflating ping and hiding the loss signal TCP needs to settle at the real rate.
+    // standing queue depth, inflating ping and hiding the loss signal TCP needs to settle at the real rate.
     // Size for bursts, not backlog: judge changes on ping-under-load staying flat and qDepth returning near
     // zero between bursts, not on throughput alone.
     private const int TX_QUEUE_MAX = 1024;
 
     // WG handshake packets (first byte 0x01 init / 0x02 response / 0x03 cookie) ride this separate FIFO, drained
-    // completely before _txQueue each iteration. Without it they queue behind bulk data/keepalives — a handshake
+    // completely before _txQueue each iteration. Without it they queue behind bulk data/keepalives; a handshake
     // init can sit behind hundreds of data frames and lose the retry race before its predecessor's reply lands.
     // Tiny and rare, so this costs nothing when idle and only matters exactly when it needs to.
     private readonly System.Collections.Concurrent.ConcurrentQueue<TxFrame> _priorityTxQueue = new();
+
+    /// <summary>
+    /// True for a frame that is establishing the session rather than carrying payload, and so needs the
+    /// priority queue, the wide fanout, and the dense keepalive rate.
+    ///
+    /// Covers BOTH hosts: daemon-mode WireGuard (0x01 init / 0x02 response / 0x03 cookie) and embedded-mode
+    /// Noise (0x10 handshake, 0x11 cipher hello). Missing the embedded bytes meant a 2-byte CipherHello went out
+    /// with fanout 1 onto a single slot while the peer's request rate decayed, so it never crossed and the
+    /// session never started; daemon mode was unaffected only because WG's bytes happened to be covered.
+    /// </summary>
+    private static bool IsSessionSetupFrame(ReadOnlySpan<byte> data)
+    {
+        if (data.Length == 0) return false;
+        byte b = data[0];
+        return (b >= 1 && b <= 3) || b == 0x10 || b == 0x11;
+    }
 
     /// <summary>
     /// Queues a caller datagram for transmission over the punched channel, best-effort. No-op until
@@ -421,14 +476,19 @@ internal sealed class IcmpTransport : IDisposable
     public void Send(ReadOnlySpan<byte> data)
     {
         if (!_punched || _stopped)
+        {
+            // Silent drop here looks identical to "the caller never sent", which is expensive to diagnose.
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                $"[ICMP] Send({data.Length}B) DROPPED: punched={_punched}, stopped={_stopped}");
             return;
+        }
         uint frame = (uint)Interlocked.Increment(ref _txFrameCounter);
         var body = data.ToArray();
-        NoteSentBody(body); // remember it so we can drop the OS-reflected echo-reply copy that comes back to us
+        NoteSentBody(frame, body); // remember it so we can drop the OS-reflected echo-reply copy that comes back to us
         var txFrame = new TxFrame { Frame = frame, Data = body };
-        // WG handshake init/response/cookie (first byte 1/2/3) jump the line — see _priorityTxQueue.
-        bool isHandshake = body.Length > 0 && body[0] >= 1 && body[0] <= 3;
-        if (isHandshake) _handshakeSeenUtc = DateTime.UtcNow;   // hold the dense rate while WG is negotiating
+        // Session-setup frames jump the line; see _priorityTxQueue and IsSessionSetupFrame.
+        bool isHandshake = IsSessionSetupFrame(body);
+        if (isHandshake) _handshakeSeenUtc = DateTime.UtcNow;   // hold the dense rate while negotiating
         if (isHandshake)
         {
             // NEVER bounded: handshake frames are tiny and rare, and dropping one costs a full retry round.
@@ -446,11 +506,11 @@ internal sealed class IcmpTransport : IDisposable
         }
     }
 
-    /// <summary>byte[] overload — matches an Action&lt;byte[]&gt; delegate (e.g. the WireGuard proxy's send hook).</summary>
+    /// <summary>byte[] overload: matches an Action&lt;byte[]&gt; delegate (e.g. the WireGuard proxy's send hook).</summary>
     public void Send(byte[] data) => Send(new ReadOnlySpan<byte>(data));
 
     /// <summary>Dequeues the next frame to send, preferring _priorityTxQueue (WG handshake packets) completely
-    /// before touching _txQueue (bulk data/keepalives) — see _priorityTxQueue for why.</summary>
+    /// before touching _txQueue (bulk data/keepalives); see _priorityTxQueue for why.</summary>
     private bool TryDequeueTxFrame(out TxFrame frame)
         => _priorityTxQueue.TryDequeue(out frame) || _txQueue.TryDequeue(out frame);
 
@@ -460,18 +520,18 @@ internal sealed class IcmpTransport : IDisposable
     private double _nextRxLog;
 
     // The (id, seq) of the most recent ECHO REQUEST we heard from the peer. Sending our data as a type-0 REPLY
-    // carrying THIS exact (id, seq) makes it a matched reply to a request the peer just sent — which the peer's
+    // carrying THIS exact (id, seq) makes it a matched reply to a request the peer just sent, which the peer's
     // NAT has a live conntrack entry for and WILL forward inbound. An unmatched reply (arbitrary id/seq) is
     // dropped by strict NATs (RFC 5508: they forward the reply that matches the outstanding request). This is
     // THE fix for the direction where only type-0 crosses but our data used arbitrary seqs and got dropped.
     // Ring of RECENTLY-HEARD peer echo-request (id, seq) pairs. A strict NAT forwards ~ONE reply per request
-    // (RFC 5508), so each of our data replies must match a DISTINCT outstanding request — reusing one request's
+    // (RFC 5508), so each of our data replies must match a DISTINCT outstanding request; reusing one request's
     // (id, seq) for many replies gets all but one dropped. We consume a fresh heard-request per reply copy.
     private readonly System.Collections.Concurrent.ConcurrentQueue<int> _heardReqs = new();
     private int _heardReqCount;
     private const int HEARD_REQ_MAX = 512;
     // MUST be long, packed with an UNSIGNED shift: holds (id << 16) | seq with -1 as the "nothing heard yet"
-    // sentinel, so as an int any id >= 0x8000 sets the sign bit and a valid slot reads as the sentinel — the
+    // sentinel, so as an int any id >= 0x8000 sets the sign bit and a valid slot reads as the sentinel; the
     // drain loop's `if (slot < 0)` then re-queues every frame and emits nothing. Ids sweep, so that presented
     // as a cyclic self-healing stall and looked exactly like NAT behaviour.
     private long _lastHeardReq = -1; // fallback when the ring runs dry
@@ -479,11 +539,11 @@ internal sealed class IcmpTransport : IDisposable
     private DateTime _lastHeardReqUtc = DateTime.MinValue; // when _lastHeardReq was last refreshed (staleness probe)
     // How far behind _lastHeardAny's freshness _lastHeardReq is allowed to lag before we defer to the fresher
     // reply-derived slot. Generous on purpose (unlike the reverted ~2s refuse-to-send guard, this never blocks a
-    // send — it only picks which slot — so there's no stall risk in setting it loosely).
+    // send; it only picks which slot; so there's no stall risk in setting it loosely).
     private static readonly TimeSpan STALE_REQ_SLOT = TimeSpan.FromSeconds(5);
     private long _txFramesSent, _lastTxFramesSent;         // frames handed to EmitFrameRedundant (attempted sends)
     private uint _kaSweep;                                 // sweeping id for keepalive requests (a fixed id never crosses)
-    // Same sign-bit trap as _lastHeardReq — long, not int. On a peer receiving no type-8 requests this is the
+    // Same sign-bit trap as _lastHeardReq: long, not int. On a peer receiving no type-8 requests this is the
     // ONLY usable slot source. (Not volatile: invalid on long, and a torn read costs at most one frame.)
     private long _lastHeardAny = -1;                       // fallback slot from an inbound REPLY (used when req=0)
     private DateTime _lastHeardAnyUtc = DateTime.MinValue;  // when _lastHeardAny was last refreshed (freshness compare vs _lastHeardReqUtc)
@@ -494,14 +554,16 @@ internal sealed class IcmpTransport : IDisposable
     private long _drainLoopIters, _lastDrainLoopIters;      // while(!_stopped) iterations of the send loop
     private long _drainFullIters, _lastDrainFullIters;      // iterations where the for-loop hit DRAIN_PER_ITER with queue still non-empty
     private long _wirePkts, _lastWirePkts;                  // raw EmitIcmp calls (actual wire packets, post-fanout)
+    private long _txFailures;                               // total EmitIcmp send failures (rate-limits the log)
+    private long _rxIcmpError, _lastRxIcmpError;            // inbound ICMP error types (3/11): path rejecting us
     private long _lastWgOutPackets;                         // previous PeerProxyListener.WgToProxyPackets (per-window delta)
-    // Head-drops forced by TX_QUEUE_MAX. Nonzero under load is EXPECTED and healthy — it is the backpressure
+    // Head-drops forced by TX_QUEUE_MAX. Nonzero under load is EXPECTED and healthy; it is the backpressure
     // signal doing its job. A flat zero while ping inflates means the bound is too high to be biting.
     private long _txQueueOverflowDrops, _lastTxQueueOverflowDrops;
 
     private void NoteHeardReq(ushort id, ushort seq)
     {
-        // ((uint)id << 16) — unsigned shift, then widened to long, so ids >= 0x8000 stay POSITIVE. See the
+        // ((uint)id << 16): unsigned shift, then widened to long, so ids >= 0x8000 stay POSITIVE. See the
         // sign-bit note on _lastHeardReq.
         long v = ((uint)id << 16) | seq;
         _lastHeardReq = v;
@@ -512,7 +574,7 @@ internal sealed class IcmpTransport : IDisposable
     /// <summary>
     /// Adds an (id, seq) to the FANOUT RING only, without promoting it to the primary reply slot.
     /// Used for inbound REPLIES: their (id,seq) is a poorer bet than a request's (the NAT entry that admitted
-    /// the reply is already consumed), so it must not become `_lastHeardReq` — but it is still worth having in
+    /// the reply is already consumed), so it must not become `_lastHeardReq`; but it is still worth having in
     /// the ring, because EmitFrameRedundant needs SEVERAL distinct holes and a peer that receives few requests
     /// would otherwise have an almost-empty ring and send every frame down a single hole.
     /// </summary>
@@ -535,10 +597,10 @@ internal sealed class IcmpTransport : IDisposable
 
     /// <summary>
     /// RELIABILITY: snapshot up to `max` of the MOST-RECENT DISTINCT heard requests WITHOUT consuming them. A frame
-    /// sent as a reply onto EACH of these rides that many independent NAT holes at once — if any one hole is live,
+    /// sent as a reply onto EACH of these rides that many independent NAT holes at once; if any one hole is live,
     /// the frame crosses. This is the fix for channel-quality VARIANCE: a single (id,seq) is a coin-flip (some
     /// punched holes barely pass anything → WG handshake can't complete), but bursting one frame across N recent
-    /// requests makes delivery near-certain. Unlike TakeHeardReq this does NOT dequeue — a recently-heard request
+    /// requests makes delivery near-certain. Unlike TakeHeardReq this does NOT dequeue; a recently-heard request
     /// is a valid outstanding NAT mapping for a short window and can back several of our replies; draining the ring
     /// (the earlier bug) left dead slots. We read newest-first from the ring's tail via a bounded copy.
     /// </summary>
@@ -559,9 +621,19 @@ internal sealed class IcmpTransport : IDisposable
     // ---- inbound handling (on the capture thread) ----
     private void OnInboundIcmp(byte type, ushort id, ushort seq, ReadOnlySpan<byte> payload)
     {
+        // ONLY echo types carry a usable (id,seq) slot. Error types (3 destination-unreachable, 11 time-exceeded)
+        // carry id=0/seq=0 plus a quoted copy of the offending packet, so feeding them to the slot tracking below
+        // poisons the ring with (0,0) and the drain then aims data at a slot that cannot exist. Seen live: a burst
+        // of type-3 from the path pinned the fanout to slot=(0,0) and stalled the handshake.
+        if (type != ICMP_ECHO_REQUEST && type != ICMP_ECHO_REPLY)
+        {
+            Interlocked.Increment(ref _rxIcmpError);
+            return;
+        }
+
         // Note the id we heard the peer on (for reverse-ack during the punch + the data channel's heard set).
         // NoteHeardReq(id,seq) below records (id,seq) into _lastHeardReq; our keepalive requests + data replies both
-        // ride that id — the hole proven to persist the whole session (see the send loop).
+        // ride that id, the hole proven to persist the whole session (see the send loop).
         NoteHeardId(id);
 
         // Baseline for the backwards-role promotion: the first moment we heard the peer at all. If we're SERVER and
@@ -569,24 +641,24 @@ internal sealed class IcmpTransport : IDisposable
         if (_firstHeardUtc == DateTime.MinValue) _firstHeardUtc = DateTime.UtcNow;
 
         // Track the slot to put OUR data-replies on. A REQUEST's (id,seq) is a LIVE outstanding entry in our
-        // NAT's conntrack — replying to it is the shape RFC 5508 guarantees gets forwarded. A REPLY's (id,seq) is
+        // NAT's conntrack: replying to it is the shape RFC 5508 guarantees gets forwarded. A REPLY's (id,seq) is
         // the opposite: that entry was already consumed, so answering it mostly gets dropped. So a REQUEST
         // refreshes the primary slot; a REPLY refreshes only a separate fallback slot (used when this peer
-        // receives no requests at all — a poor slot beats no slot).
+        // receives no requests at all, a poor slot beats no slot).
         //
         // BOTH types still feed the fanout ring (`_heardReqs`, used by RecentHeardReqs/EmitFrameRedundant):
         // restricting the ring to REQUESTS-only starves it on a peer that receives few requests, so every frame
-        // rides one hole instead of several — the WG handshake in particular needs that redundancy to complete
+        // rides one hole instead of several; the WG handshake in particular needs that redundancy to complete
         // quickly.
         if (type == ICMP_ECHO_REQUEST) NoteHeardReq(id, seq);
         else
         {
-            _lastHeardAny = ((uint)id << 16) | seq;   // unsigned shift — see the sign-bit note on _lastHeardReq
+            _lastHeardAny = ((uint)id << 16) | seq;   // unsigned shift; see the sign-bit note on _lastHeardReq
             _lastHeardAnyUtc = DateTime.UtcNow;
-            NoteHeardSlot(id, seq);   // ring only — does NOT touch _lastHeardReq
+            NoteHeardSlot(id, seq);   // ring only; does NOT touch _lastHeardReq
         }
 
-        // Count _reqSeen before ReportDeliveryStats can run (below), not after — reporting before counting
+        // Count _reqSeen before ReportDeliveryStats can run (below), not after; reporting before counting
         // sampled the delta at the wrong instant and systematically under-reported the request rate.
         if (_punched && type == ICMP_ECHO_REQUEST)
         {
@@ -614,14 +686,14 @@ internal sealed class IcmpTransport : IDisposable
             bool isProbe = ContainsTag(payload, PROBETAG);
             NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
                 $"[ICMP][probe] rx LARGE type={type} len={payload.Length} probe={isProbe} " +
-                $"({(type == ICMP_ECHO_REQUEST ? "REQUEST" : "reply")}) — {(type == ICMP_ECHO_REQUEST && isProbe ? "LARGE REQUEST CROSSES ✓" : "not a peer large-request")}");
+                $"({(type == ICMP_ECHO_REQUEST ? "REQUEST" : "reply")}): {(type == ICMP_ECHO_REQUEST && isProbe ? "LARGE REQUEST CROSSES ✓" : "not a peer large-request")}");
         }
 
         // DATA-AS-MATCHED-REPLY (both roles, post-punch). The channel's one reliable delivery shape is an echo
         // REPLY matched to a request the receiver's NAT recently sent out (RFC 5508); unsolicited REQUESTS are
         // dropped. So we answer the peer's REQUESTS, echoing their id+seq, carrying queued data if any.
         //
-        // Reply to any inbound REQUEST (type-8), NOT just REQTAG-tagged ones — once data flows, the peer's
+        // Reply to any inbound REQUEST (type-8), NOT just REQTAG-tagged ones; once data flows, the peer's
         // requests carry MAGIC instead of REQTAG, so gating on the tag rejected most live slots. Keying on ICMP
         // TYPE captures all of them. Safe from a reply-to-reply amplification loop: type-8 is a REQUEST, so
         // replying to it is the intended request→reply flow, never a reply→reply cycle.
@@ -630,17 +702,17 @@ internal sealed class IcmpTransport : IDisposable
             // SERVER SIDE of the client/server model: the client's request just arrived, so piggyback our queued
             // data on the REPLY immediately, on the capture thread. One request in, data out in the same instant.
             //
-            // Drain up to RX_THREAD_DRAIN_CAP frames onto THIS request's (id,seq) — a small burst rather than
+            // Drain up to RX_THREAD_DRAIN_CAP frames onto THIS request's (id,seq): a small burst rather than
             // exactly one lets a backlog (WG handshake, iperf) clear without waiting a request each.
             //
             // MUST use TryDequeueTxFrame (priority-first), not _txQueue alone, or WG handshake frames get excluded
-            // from this reactive matched-reply path — the one delivery shape this channel reliably has.
+            // from this reactive matched-reply path; the one delivery shape this channel reliably has.
             int replied = 0;
             for (; replied < RX_THREAD_DRAIN_CAP && TryDequeueTxFrame(out var frame); replied++)
                 SendData(ICMP_ECHO_REPLY, id, seq, frame.Frame, frame.Data);
             if (replied == 0)
-                SendTag(ICMP_ECHO_REPLY, id, seq, ACKTAG); // keepalive reply — keeps the client's flow alive
-            // (A MIRROR-REQUEST was tried here — fire our own request on the peer's just-heard id to ride its
+                SendTag(ICMP_ECHO_REPLY, id, seq, ACKTAG); // keepalive reply: keeps the client's flow alive
+            // (A MIRROR-REQUEST was tried here: fire our own request on the peer's just-heard id to ride its
             //  hole. Doesn't work: the id we RECEIVE on is OUR NAT's inbound id, independent of the peer's, so it
             //  can't make an unsolicited request cross a symmetric NAT. The fundamental symmetric-NAT wall.)
         }
@@ -648,7 +720,7 @@ internal sealed class IcmpTransport : IDisposable
         // Decide the hole is open during the punch. An explicit ACK is the clean signal, but the two peers can
         // start sweeping at different wall-clock times, so the ACK-tag exchange can race and one side time out
         // while the other punched. Hearing the peer at all means our outbound reached them and their NAT is
-        // forwarding to us — establish on either an explicit ACK OR sustained hearing.
+        // forwarding to us; establish on either an explicit ACK OR sustained hearing.
         if (!_punched)
         {
             bool ack = ContainsTag(payload, ACKTAG);
@@ -659,8 +731,8 @@ internal sealed class IcmpTransport : IDisposable
                 _punchedAtUtc = DateTime.UtcNow;   // starts the post-punch dense window (see PostPunchDenseWindow)
             }
             // Hammer ACKs back on the just-heard id to complete the handshake within the (bursty) window,
-            // whether or not this specific packet was an ACK — hearing the peer at all means try to close it.
-            // BOTH type-0 (reply) and type-8 (request) — some NATs only forward one type (matches icmp-channel.py).
+            // whether or not this specific packet was an ACK; hearing the peer at all means try to close it.
+            // BOTH type-0 (reply) and type-8 (request): some NATs only forward one type (matches icmp-channel.py).
             for (int i = 0; i < 12; i++)
             {
                 SendTag(ICMP_ECHO_REPLY, id, seq, ACKTAG);
@@ -672,8 +744,13 @@ internal sealed class IcmpTransport : IDisposable
         //
         // REFLECTION FILTER: our outbound requests reach the peer's OS, which auto-generates a type-0 reply
         // copying our payload back verbatim. We can't reject all type-0 (some NAT/stack pairs only ever deliver
-        // real peer data as type-0), so instead reject by CONTENT: drop any inbound data frame whose bytes match
-        // one we recently sent; anything else is genuine peer data regardless of ICMP type.
+        // real peer data as type-0), so instead reject by (FRAME ID + CONTENT): drop any inbound data frame
+        // matching one we recently sent; anything else is genuine peer data regardless of ICMP type.
+        //
+        // The frame id MUST be part of the key. Matching on content alone breaks whenever both peers emit
+        // byte-identical control frames (both embedded CipherHellos are the same 2 bytes): each side then reads
+        // the other's frame as its own reflection and drops it, which deadlocks the handshake while the logs
+        // show magic=True arriving. Frame ids are per-sender, so a true reflection carries the id WE assigned.
         if (payload.Length >= DATA_HEADER && StartsWith(payload, MAGIC))
         {
             uint frame = (uint)((payload[3] << 24) | (payload[4] << 16) | (payload[5] << 8) | payload[6]);
@@ -681,7 +758,7 @@ internal sealed class IcmpTransport : IDisposable
             if (bodyLen > 0)
             {
                 var copy = payload.Slice(DATA_HEADER, bodyLen).ToArray();
-                if (IsOwnSentFrame(copy))
+                if (IsOwnSentFrame(frame, copy))
                 {
                     // Reflection of our own outbound (OS echo-reply). Ignore.
                     Interlocked.Increment(ref _rxDropReflection);
@@ -689,14 +766,14 @@ internal sealed class IcmpTransport : IDisposable
                 else if (!MarkFrameSeen(frame))
                 {
                     // De-dup by frame id: each frame is sprayed across the churning id space + reorders, so it
-                    // arrives many times. A false here means this exact frame id was already delivered once —
+                    // arrives many times. A false here means this exact frame id was already delivered once;
                     // drop the repeat (bounded seen-set). Counted so we can tell "peer data never arrived" from
                     // "peer data arrived (repeatedly) and we're discarding the copies as duplicates".
                     Interlocked.Increment(ref _rxDropDedup);
                 }
                 else
                 {
-                    // Which ICMP type delivered this unique data frame — type-8 spray vs type-0 matched reply.
+                    // Which ICMP type delivered this unique data frame: type-8 spray vs type-0 matched reply.
                     if (type == ICMP_ECHO_REQUEST) Interlocked.Increment(ref _rxDataType8);
                     else Interlocked.Increment(ref _rxDataType0);
                     _lastDataRxUtc = DateTime.UtcNow; // real data arrived → keep the fast ping rate for ActiveWindow
@@ -716,7 +793,7 @@ internal sealed class IcmpTransport : IDisposable
         }
         else
         {
-            // Not a data frame (MAGIC didn't match or payload too short) — keepalives, punch openers, probe
+            // Not a data frame (MAGIC didn't match or payload too short): keepalives, punch openers, probe
             // traffic. Counted so rx-stats can show inbound volume vs data volume.
             if (payload.Length < DATA_HEADER) Interlocked.Increment(ref _rxTooShort);
             else Interlocked.Increment(ref _rxNonMagic);
@@ -734,7 +811,7 @@ internal sealed class IcmpTransport : IDisposable
     // "it arrived and we discarded it". These make every inbound packet fall into exactly one bucket
     // (too-short / non-magic / reflection / dedup-dropped / delivered).
     private long _rxDropReflection;   // OnInboundIcmp: payload matched a frame WE recently sent (OS echo-reflection, not peer data)
-    private long _rxDropDedup;        // OnInboundIcmp: MarkFrameSeen(frame) was false — a duplicate copy of an already-delivered frame
+    private long _rxDropDedup;        // OnInboundIcmp: MarkFrameSeen(frame) was false, a duplicate copy of an already-delivered frame
     private long _rxNonMagic;         // OnInboundIcmp: inbound packet did not start with MAGIC (keepalive/ACK/tag traffic, not a data frame)
     private long _rxTooShort;         // OnInboundIcmp: payload shorter than DATA_HEADER, so it can't even be checked for MAGIC
     private long _lastRxDropReflection, _lastRxDropDedup, _lastRxNonMagic, _lastRxTooShort; // rx-stats per-window baselines
@@ -755,7 +832,7 @@ internal sealed class IcmpTransport : IDisposable
         long tx = Interlocked.Read(ref _txFramesSent); long dtx = tx - _lastTxFramesSent; _lastTxFramesSent = tx;
         double slotAgeMs = _lastHeardReqUtc == DateTime.MinValue
             ? -1 : (DateTime.UtcNow - _lastHeardReqUtc).TotalMilliseconds;
-        // Age of the slot we'd ACTUALLY pick right now, and which kind it is — slotAge above tracks only
+        // Age of the slot we'd ACTUALLY pick right now, and which kind it is: slotAge above tracks only
         // _lastHeardReqUtc, which on a req=0 peer never refreshes and misleadingly reads as hours-stale.
         bool useReqSlot = _lastHeardReq >= 0 &&
             (_lastHeardAny < 0 || _lastHeardReqUtc >= _lastHeardAnyUtc - STALE_REQ_SLOT);
@@ -791,6 +868,7 @@ internal sealed class IcmpTransport : IDisposable
         long dup = Interlocked.Read(ref _rxDropDedup); long dDup = dup - _lastRxDropDedup; _lastRxDropDedup = dup;
         long nonMagic = Interlocked.Read(ref _rxNonMagic); long dNonMagic = nonMagic - _lastRxNonMagic; _lastRxNonMagic = nonMagic;
         long tooShort = Interlocked.Read(ref _rxTooShort); long dTooShort = tooShort - _lastRxTooShort; _lastRxTooShort = tooShort;
+        long icmpErr = Interlocked.Read(ref _rxIcmpError); long dIcmpErr = icmpErr - _lastRxIcmpError; _lastRxIcmpError = icmpErr;
 
         NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
             $"[ICMP][rx-stats] last5s: type8={d8} type0={d0} req={drq}  total type0={t0}  " +
@@ -798,7 +876,7 @@ internal sealed class IcmpTransport : IDisposable
             $" | slots={_heardReqCount} slotAge={slotAgeMs:F0}ms activeSlot={(useReqSlot ? "req" : "any")}/{activeAgeMs:F0}ms txFrames={dtx} qDepth={_txQueue.Count} qOvfDrop={dQOvf}" +
             $" | drainFull={dFullIters}/{dLoopIters} attempted/s={attemptedPerSec:F0} deliveredType0/s={deliveredType0PerSec:F0} wirePkts/s={wirePktsPerSec:F0}" +
             $" | lockWait={lockWaitUs:F0}us syscall={syscallUs:F0}us per send" +
-            $" | rxDrop refl={dRefl} dup={dDup} nonMagic={dNonMagic} short={dTooShort}" +
+            $" | rxDrop refl={dRefl} dup={dDup} nonMagic={dNonMagic} short={dTooShort} icmpErr={dIcmpErr}" +
             $" | wgOut/s={wgOutPerSec:F0} punched={_punched}");
     }
 
@@ -810,13 +888,17 @@ internal sealed class IcmpTransport : IDisposable
 
     private static int BodyHash(byte[] body)
     {
-        // FNV-1a over the body — stable, allocation-free, good enough to distinguish our frames from the peer's.
+        // FNV-1a over the body: stable, allocation-free, good enough to distinguish our frames from the peer's.
         unchecked { int h = (int)2166136261; foreach (var b in body) { h = (h ^ b) * 16777619; } return h; }
     }
 
-    private void NoteSentBody(byte[] body)
+    // Keyed on (frame id, body), NOT the body alone. Two peers running the same protocol send byte-identical
+    // control frames: both CipherHellos are the same 2 bytes, so a body-only key made each peer classify the
+    // other's CipherHello as its own reflection and drop it, deadlocking the handshake with magic=True frames
+    // arriving and refl= climbing. The frame id is per-sender, so it separates our echo from the peer's traffic.
+    private void NoteSentBody(uint frame, byte[] body)
     {
-        int h = BodyHash(body);
+        int h = BodyHash(body) ^ (int)frame;
         lock (_sentLock)
         {
             if (_sentBodyHashes.Add(h))
@@ -827,9 +909,9 @@ internal sealed class IcmpTransport : IDisposable
         }
     }
 
-    private bool IsOwnSentFrame(byte[] body)
+    private bool IsOwnSentFrame(uint frame, byte[] body)
     {
-        int h = BodyHash(body);
+        int h = BodyHash(body) ^ (int)frame;
         lock (_sentLock) { return _sentBodyHashes.Contains(h); }
     }
 
@@ -871,7 +953,7 @@ internal sealed class IcmpTransport : IDisposable
 
     /// <summary>Send a caller data frame of the given ICMP type/id/seq: payload = MAGIC(3)+uint32 frame+bytes.
     /// The role model chooses the type: the PINGER sends type-8 REQUESTS (fixed id, incrementing seq); the
-    /// RESPONDER sends type-0 REPLIES echoing the pinger's request id+seq. One packet, one type — a clean ping.</summary>
+    /// RESPONDER sends type-0 REPLIES echoing the pinger's request id+seq. One packet, one type: a clean ping.</summary>
     private void SendData(byte type, ushort id, ushort seq, uint frame, ReadOnlySpan<byte> data)
     {
         var payload = new byte[DATA_HEADER + data.Length];
@@ -884,9 +966,9 @@ internal sealed class IcmpTransport : IDisposable
     }
 
     // RELIABILITY CORE: emit ONE caller frame across MANY independent holes so it crosses even when most holes are
-    // bad — a frame on a single (id,seq) is a coin-flip. Sends as a reply onto (a) the just-arrived request's
+    // bad; a frame on a single (id,seq) is a coin-flip. Sends as a reply onto (a) the just-arrived request's
     // (id,seq), guaranteed-live, AND (b) each of the most-recent distinct heard requests. Receiver de-dups by
-    // frame id, so duplicates are free. SAMPLES the heard-request ring (RecentHeardReqs, non-consuming) — does
+    // frame id, so duplicates are free. SAMPLES the heard-request ring (RecentHeardReqs, non-consuming); does
     // NOT dequeue, so it can't drain the ring dry (that was the earlier regression).
     //
     // FRAME_FANOUT=1 (no redundancy): extra copies cost more in wire volume (ISP rate-limit risk) than they buy
@@ -896,17 +978,17 @@ internal sealed class IcmpTransport : IDisposable
     // HANDSHAKE_FANOUT stays high regardless: those frames are rare and tiny, losing one costs a full retry
     // round, so redundancy there is nearly free.
     private const int FRAME_FANOUT = 1;
-    // Wider fanout reserved for WG handshake packets (0x01/0x02/0x03) — see call site in the drain loop. These
+    // Wider fanout reserved for WG handshake packets (0x01/0x02/0x03); see call site in the drain loop. These
     // are rare (a handful per connection) and small, so spending more slot attempts on them is nearly free in
     // aggregate wire volume, but meaningfully raises the odds that a full round of the handshake actually lands
     // instead of WG-NT timing out and restarting from init.
     private const int HANDSHAKE_FANOUT = 10;
-    // (A stall-triggered "panic mode" — dense pacing + wider fanout — lived here. It never helped; the stall
+    // (A stall-triggered "panic mode" (dense pacing + wider fanout) lived here. It never helped; the stall
     //  it targeted was the slot sign-bit bug (see _lastHeardReq). Removed.)
     private void EmitFrameRedundant(TxFrame frame, ushort liveId, ushort liveSeq, int fanout = FRAME_FANOUT)
     {
         SendData(ICMP_ECHO_REPLY, liveId, liveSeq, frame.Frame, frame.Data); // the guaranteed-live slot
-        int live = (liveId << 16) | liveSeq;
+        int live = (int)(((uint)liveId << 16) | liveSeq); // unsigned shift; see the sign-bit note on _lastHeardReq
         var recent = RecentHeardReqs(fanout);
         foreach (var hr in recent)
         {
@@ -919,6 +1001,20 @@ internal sealed class IcmpTransport : IDisposable
     private void EmitIcmp(byte type, ushort id, ushort seq, ReadOnlySpan<byte> payload)
     {
         var sock = _sendSock;
+
+        // No raw socket (unprivileged Windows) but WinDivert is capturing: inject through its handle instead.
+        // WinDivert builds/injects at the network layer, so it can transmit where a raw socket is refused.
+        if (sock == null && _injector != null)
+        {
+            Interlocked.Increment(ref _wirePkts);
+            // Log EVERY injection failure, not just large ones. A size gate here once hid a total send failure
+            // for small frames (the WSAEACCES bug): the tunnel punched, heard the peer, and delivered nothing.
+            if (!_injector.SendIcmp(_localSource, _peer, type, id, seq, payload))
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                    $"[ICMP][tx] WinDivert inject type={type} id={id} seq={seq} {payload.Length + 8}B FAILED err={Marshal.GetLastWin32Error()}");
+            return;
+        }
+
         if (sock == null) return;
         Interlocked.Increment(ref _wirePkts); // every EmitIcmp call = one real wire packet (post-fanout, incl. keepalives)
 
@@ -959,17 +1055,20 @@ internal sealed class IcmpTransport : IDisposable
         }
         catch (Exception ex)
         {
-            // transient send failures are absorbed by the lossy-spray model; but surface failures on
-            // data-sized packets (>60B) — those are the caller frames we can't afford to silently lose.
-            if (total > 60)
-                NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, $"[ICMP][tx] EmitIcmp {total}B FAILED: {ex.GetType().Name}: {ex.Message}");
+            // Never size-gate this. A >60B gate hid the WSAEACCES that killed every type-0 data frame while the
+            // type-8 punch tags kept crossing, which made a totally dead data path look like a working tunnel.
+            // Rate-limited instead of dropped: a systemic failure repeats thousands of times a second.
+            long n = Interlocked.Increment(ref _txFailures);
+            if (n <= 5 || n % 500 == 0)
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                    $"[ICMP][tx] EmitIcmp type={type} id={id} seq={seq} {total}B FAILED (#{n}): {ex.GetType().Name}: {ex.Message}");
         }
     }
 
     private void Pace(Stopwatch sw, ref double nextSend) => PaceTo(sw, ref nextSend, _sendInterval);
 
     // Post-punch fast send rate, used only while data is actively flowing (see adaptive pacing in the send loop).
-    // Much lower than the punch rate — no longer birthday-hunting, just keeping the peer's reply-match ring fed.
+    // Much lower than the punch rate; no longer birthday-hunting, just keeping the peer's reply-match ring fed.
     private const double POST_PUNCH_INTERVAL = 1.0 / 250.0;
 
     private void PaceTo(Stopwatch sw, ref double nextSend, double interval)
@@ -989,7 +1088,7 @@ internal sealed class IcmpTransport : IDisposable
 
     // Like PaceTo but INTERRUPTIBLE by newly-queued data: sleeps toward the deadline in short chunks and returns
     // early the instant _txQueue becomes non-empty. At a low keepalive rate (10/s → 100ms interval) a blocking pace
-    // would make a ping's WG packet queued mid-sleep wait up to the full interval before the loop drains it — that
+    // would make a ping's WG packet queued mid-sleep wait up to the full interval before the loop drains it; that
     // wait is pure added latency. Breaking out on new data lets the loop drain it immediately instead.
     private void PaceToOrData(Stopwatch sw, ref double nextSend, double interval)
     {
@@ -1026,7 +1125,7 @@ internal sealed class IcmpTransport : IDisposable
 
     public void Dispose()
     {
-        // ORDER MATTERS — this used to deadlock the process into an unkillable zombie. NpcapCapture.Dispose calls
+        // ORDER MATTERS: this used to deadlock the process into an unkillable zombie. NpcapCapture.Dispose calls
         // StopCapture(), which blocks until the capture thread exits; that thread runs OnInboundIcmp, which does
         // a synchronous SendTo under _sendLock. If the send loop still holds _sendLock, StopCapture never returns.
         // So: signal stop, JOIN THE SEND LOOP FIRST (it releases _sendLock on exit), then tear down capture.

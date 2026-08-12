@@ -30,7 +30,7 @@ class MessageHandler {
 
         // Task 5: Check message rate limit per socket
         if (!this.checkMessageRateLimit(socket)) {
-            console.warn(`[RateLimit] Socket from ${socket.remoteAddress}:${socket.remotePort} closed — exceeded message rate limit (${this.messageRateLimit.maxMessages} messages per ${this.messageRateLimit.timeWindowSeconds}s)`);
+            console.warn(`[RateLimit] Socket from ${socket.remoteAddress}:${socket.remotePort} closed: exceeded message rate limit (${this.messageRateLimit.maxMessages} messages per ${this.messageRateLimit.timeWindowSeconds}s)`);
             socket.destroy();
             // Clean up the rate limit tracking for this socket
             this.messageTimestamps.delete(socket);
@@ -144,8 +144,8 @@ class MessageHandler {
                 );
                 if (staleIndex !== -1) {
                     const stale = this.connectionManager.sockets[staleIndex];
-                    console.log(`[MessageHandler] Removing stale socket for clientID ${message.ClientID} (${stale.ip}:${stale.tcpPort}) — peer reconnected`);
-                    // Don't destroy() the stale socket — the peer may still be using it
+                    console.log(`[MessageHandler] Removing stale socket for clientID ${message.ClientID} (${stale.ip}:${stale.tcpPort}): peer reconnected`);
+                    // Don't destroy() the stale socket: the peer may still be using it
                     // during the reconnect transition. removeSocket cleans up tracking state;
                     // the socket will close naturally when the OS detects the dead connection.
                     this.connectionManager.removeSocket(stale.socket);
@@ -217,7 +217,7 @@ class MessageHandler {
         }
 
         // Advertise the server's own public v4/v6 addresses (auto-discovered via STUN) so the
-        // client can run the NAT test over the family it did NOT use to reach mediation — needed
+        // client can run the NAT test over the family it did NOT use to reach mediation; needed
         // when the peer connected via a bare IP literal (no A/AAAA record to resolve for the other
         // family). Omitted when a family hasn't been discovered yet; the client then falls back to
         // DNS resolution of its configured hostname, if it has one.
@@ -229,7 +229,7 @@ class MessageHandler {
             ServerPublicIPv6: selfAddress.publicIPv6 || undefined,
             // All public IPv4s this server has, for the two-IP RFC 5780 mapping test. [0] is the
             // primary (== ServerPublicIPv4); [1], if present, is the SECOND IP a v2 client probes to
-            // detect address-dependent NAT mapping. Additive — v1 clients ignore it.
+            // detect address-dependent NAT mapping. Additive: v1 clients ignore it.
             ServerPublicIPv4List: (selfAddress.publicIPv4List && selfAddress.publicIPv4List.length > 1)
                 ? selfAddress.publicIPv4List : undefined
         })));
@@ -240,7 +240,7 @@ class MessageHandler {
         setTimeout(() => {
             if (socketInfo && !socketInfo.natTestResponded) {
                 socketInfo.natTestResponded = true;
-                console.warn(`[MessageHandler] NAT test timeout for ${socketInfo.clientID} — responding with Unknown`);
+                console.warn(`[MessageHandler] NAT test timeout for ${socketInfo.clientID}: responding with Unknown`);
                 try {
                     socket.write(Buffer.from(JSON.stringify({
                         ID: MessageTypes.NATTypeResponse,
@@ -300,7 +300,7 @@ class MessageHandler {
         }
 
         // Pre-flight peer-protocol overlap check. Skip brokering if the two peers advertise
-        // ranges that don't intersect — saves a full hole-punch/handshake round trip only for
+        // ranges that don't intersect: saves a full hole-punch/handshake round trip only for
         // the pair to refuse each other afterward. Clients still enforce this on receive.
         if (clientPeer && targetPeer &&
             clientPeer.peerMinVersion && clientPeer.peerMaxVersion &&
@@ -347,7 +347,7 @@ class MessageHandler {
             );
         }
 
-        // A v6-only peer has no v4 UDP info. Tolerate that as long as it has a v6 endpoint —
+        // A v6-only peer has no v4 UDP info. Tolerate that as long as it has a v6 endpoint;
         // the pairing logic below connects the two peers over whichever family both share.
         const clientPeerV6 = (clientPeer && clientPeer.endpointV6) || null;
         if (!clientUDPInfo && !clientPeerV6) {
@@ -355,7 +355,7 @@ class MessageHandler {
             return;
         }
 
-        // Use external port (info.port) for the endpoint — this is what the remote peer sees.
+        // Use external port (info.port) for the endpoint: this is what the remote peer sees.
         // Null when the peer is v6-only (no v4 UDP observation).
         const clientEndpoint = clientUDPInfo ? formatEndpoint(clientUDPInfo.ip, clientUDPInfo.port) : null;
 
@@ -408,14 +408,14 @@ class MessageHandler {
                 );
             }
 
-            // A v6-only target has no v4 UDP info — tolerate it when it has a v6 endpoint.
+            // A v6-only target has no v4 UDP info; tolerate it when it has a v6 endpoint.
             const targetV6 = (targetPeer && targetPeer.endpointV6) || null;
             if (!targetUDPInfo && !targetV6) {
                 this.sendServerNotAvailable(socket);
                 return;
             }
 
-            // Use external port (info.port) for the endpoint — null when the target is v6-only.
+            // Use external port (info.port) for the endpoint; null when the target is v6-only.
             const targetEndpoint = targetUDPInfo ? formatEndpoint(targetUDPInfo.ip, targetUDPInfo.port) : null;
 
             // Prefer IPv6 when BOTH peers advertised a usable v6 endpoint: no NAT to traverse,
@@ -430,12 +430,12 @@ class MessageHandler {
             if (useV6) {
                 endpointForClient = targetV6;
                 endpointForTarget = clientV6;
-                console.log(`[MessageHandler] Both peers have IPv6 — using v6 endpoints: ${clientV6} <-> ${targetV6}`);
+                console.log(`[MessageHandler] Both peers have IPv6: using v6 endpoints: ${clientV6} <-> ${targetV6}`);
             } else {
                 // Detect same-NAT peers: if both share the same public IP, use LAN endpoints
                 // so they connect directly over the local network (NAT hairpinning is unreliable).
                 // Only substitute the LAN endpoint for a peer when the *other* peer is also on the
-                // same NAT — an external peer must never receive a LAN endpoint it can't reach.
+                // same NAT; an external peer must never receive a LAN endpoint it can't reach.
                 // Requires v4 UDP info on both sides (a v6-only peer has none).
                 const sameNAT = clientUDPInfo && targetUDPInfo &&
                     normalizeIP(clientUDPInfo.ip) === normalizeIP(targetUDPInfo.ip);
@@ -454,12 +454,12 @@ class MessageHandler {
                 endpointForTarget = clientLANEndpoint || clientEndpoint;
             }
 
-            // The two chosen endpoints must be the same address family — a v4 peer can't reach a
+            // The two chosen endpoints must be the same address family: a v4 peer can't reach a
             // v6 endpoint or vice versa. Catches a v4-only peer paired with a v6-only peer, and a
             // mismatch where each has an endpoint but of different families. Relay can't bridge
             // families, so there's nothing to do.
             if (!sameFamily(endpointForClient, endpointForTarget)) {
-                console.log(`[MessageHandler] Cannot connect ${clientSocketInfo.clientID} <-> ${message.PeerID} — no shared address family (v4/v6 mismatch)`);
+                console.log(`[MessageHandler] Cannot connect ${clientSocketInfo.clientID} <-> ${message.PeerID}: no shared address family (v4/v6 mismatch)`);
                 this.sendServerNotAvailable(socket);
                 return;
             }
@@ -486,7 +486,7 @@ class MessageHandler {
                 // Always carry the OTHER peer's v6 endpoint, independent of which family THIS
                 // connection uses. A v4-connected receiver (e.g. a v4-only introducer bridging two
                 // dual-stack peers) must still learn the peers' v6 endpoints so it can later
-                // introduce/repair them over v6 — otherwise it only knows v4 and can't bridge a
+                // introduce/repair them over v6; otherwise it only knows v4 and can't bridge a
                 // pair that needs v6.
                 EndpointV6String: targetV6 || undefined,
                 NATType: targetNatType,
@@ -644,11 +644,11 @@ class MessageHandler {
         try {
             storedHashes = JSON.parse(fs.readFileSync(SECRETS_FILE, 'utf8'));
         } catch (e) {
-            // File missing or corrupt — start fresh
+            // File missing or corrupt: start fresh
         }
 
         if (storedHashes[NetworkID]) {
-            // Network exists — validate the token
+            // Network exists: validate the token
             if (AuthToken !== storedHashes[NetworkID]) {
                 const response = {
                     ID: MessageTypes.MeshJoinResponse,
@@ -660,7 +660,7 @@ class MessageHandler {
                 return;
             }
         } else {
-            // First peer for this network — store the hash
+            // First peer for this network: store the hash
             storedHashes[NetworkID] = AuthToken;
             try {
                 fs.writeFileSync(SECRETS_FILE, JSON.stringify(storedHashes, null, 2));
@@ -728,7 +728,7 @@ class MessageHandler {
         // Build the peer's IPv4 endpoint from its v4 UDP NAT-test info. udpInfo presence is the
         // "peer is v4-reachable" signal: the v6 NAT test uses a separate path that never calls
         // addUDPInfo, so a v6-only peer has no udpInfo here. In that case the v4 endpoint is left
-        // null — the peer is reachable only via socketInfo.endpointV6, and coordinators pair peers
+        // null; the peer is reachable only via socketInfo.endpointV6, and coordinators pair peers
         // on whichever family both share.
         let udpInfo = null;
         if (socketInfo.localPort) {
@@ -773,7 +773,7 @@ class MessageHandler {
             const meshMembers = this.networkRegistry.getMeshMembers(NetworkID, PeerID);
 
             if (otherPeers.length === 0 && meshMembers.length === 0) {
-                // Truly first peer in the network — no introducer needed
+                // Truly first peer in the network: no introducer needed
                 const response = {
                     ID: MessageTypes.MeshJoinResponse,
                     NetworkID: NetworkID,
@@ -797,7 +797,7 @@ class MessageHandler {
                 if (!sockInfo) return false;
                 // Introducer must share a peer-protocol range with the joiner. Without overlap,
                 // they can never form a WireGuard tunnel to the joiner, so they can't relay
-                // MeshConnectionBegin — picking them just churns the introducer role.
+                // MeshConnectionBegin: picking them just churns the introducer role.
                 if (p.peerMinVersion && p.peerMaxVersion && peerMinVersion && peerMaxVersion) {
                     const lo = Math.max(p.peerMinVersion, peerMinVersion);
                     const hi = Math.min(p.peerMaxVersion, peerMaxVersion);
@@ -805,7 +805,7 @@ class MessageHandler {
                 }
                 // FAMILY-AWARE introducer eligibility. The introducer must form a DIRECT WireGuard
                 // tunnel to the joiner (to deliver MeshConnectionBegin), which requires a shared
-                // address family where NEITHER side is symmetric — two symmetric NATs can't punch.
+                // address family where NEITHER side is symmetric; two symmetric NATs can't punch.
                 // The old check only tested the candidate's v4 natType, so a v6-primary candidate that
                 // was symmetric-on-v6 but non-symmetric-on-v4 was wrongly elected, then could never
                 // tunnel to a joiner over v6 → the joiner looped forever retrying the introducer link.
@@ -814,12 +814,12 @@ class MessageHandler {
                 // non-symmetric on a family it shares with the joiner. The JOINER's own NAT type does NOT
                 // disqualify: a symmetric joiner ↔ non-symmetric introducer is a normal, punchable pair
                 // (sym↔non-sym). An earlier version wrongly also required the JOINER to be non-symmetric,
-                // which left every symmetric joiner with NO introducer (IntroducerPeerID=null) — degrading
+                // which left every symmetric joiner with NO introducer (IntroducerPeerID=null): degrading
                 // it into introducer-less mode (no relay coordination / repair) even though a perfectly
                 // good non-symmetric introducer existed.
                 //
                 // v4 vs v6 asymmetry on Unknown: v4 is the primary classification path so p.natType is
-                // effectively always known — treating Unknown-v4 as non-symmetric is safe/permissive and
+                // effectively always known; treating Unknown-v4 as non-symmetric is safe/permissive and
                 // keeps pure-v4 flows unchanged. v6 is different: a v1 candidate can't report its v6 type
                 // and a v2 candidate may have lost its v6 probe, so Unknown-v6 could actually be symmetric.
                 // Electing such a candidate as a v6-ONLY introducer would fail the introducer link. So for
@@ -856,12 +856,12 @@ class MessageHandler {
                 return true;
             };
 
-            // Reuse the sticky introducer when still eligible — fresh `find()` per join causes split-brain.
+            // Reuse the sticky introducer when still eligible: fresh `find()` per join causes split-brain.
             let introducer = null;
             const stickyID = this.networkRegistry.getIntroducer(NetworkID);
             if (stickyID === PeerID) {
                 // The JOINING peer IS the current sticky introducer (it's rejoining). Its NAT type
-                // may have CHANGED since it was elected — e.g. DirectMapping last time, Symmetric
+                // may have CHANGED since it was elected, e.g. DirectMapping last time, Symmetric
                 // now (a v6-primary peer's per-family detection can surface this). If it's no longer
                 // eligible, CLEAR the stale sticky so it isn't silently retained; downstream
                 // election (find → self-election) then picks a valid introducer or none. Without
@@ -873,7 +873,7 @@ class MessageHandler {
                 const rejoinV4Ok = !!endpoint && NATType !== NATTypes.Symmetric;
                 const rejoinV6Ok = !!socketInfo.endpointV6 && NATTypeV6 !== NATTypes.Symmetric;
                 if (!rejoinV4Ok && !rejoinV6Ok) {
-                    console.log(`[MessageHandler] Sticky introducer ${stickyID} (self-rejoin) symmetric on all families (v4=${NATType}/v6=${NATTypeV6}) — clearing stale sticky for ${NetworkID}`);
+                    console.log(`[MessageHandler] Sticky introducer ${stickyID} (self-rejoin) symmetric on all families (v4=${NATType}/v6=${NATTypeV6}): clearing stale sticky for ${NetworkID}`);
                     this.networkRegistry.clearIntroducer(NetworkID);
                 }
                 // If still eligible on some family, leave the sticky as-is; self-election re-confirms it.
@@ -895,12 +895,12 @@ class MessageHandler {
             // non-symmetric peer. We know its NATType and TCP socket is alive (it just
             // sent us this join).
             //
-            // FAMILY-AWARE self-election: refuse if the peer is symmetric on EVERY family it has —
+            // FAMILY-AWARE self-election: refuse if the peer is symmetric on EVERY family it has;
             // such a peer can never form a direct introducer tunnel to any future joiner and would
             // strand them in the introducer-retry loop. A peer non-symmetric on at least one family
             // it possesses can still introduce peers reachable over that family. (The old check tested
             // only the v4 NATType, so a v6-primary peer symmetric-on-v6 but non-sym-on-v4 self-elected
-            // and then couldn't tunnel to v6 joiners — the root cause of the introducer-link loop.)
+            // and then couldn't tunnel to v6 joiners, the root cause of the introducer-link loop.)
             const selfHasV4 = !!endpoint;
             const selfHasV6 = !!socketInfo.endpointV6;
             const selfV4Ok = selfHasV4 && NATType !== NATTypes.Symmetric;
@@ -991,7 +991,7 @@ class MessageHandler {
                         PeerMaxVersion: peerMaxVersion,
                         IdentityPublicKey: identityPublicKey,
                         EndpointV6String: socketInfo.endpointV6,  // New peer's observed IPv6 endpoint (or undefined)
-                        NATTypeV6,                         // v6 verdict — OtherPeers entries carry theirs, so the
+                        NATTypeV6,                         // v6 verdict: OtherPeers entries carry theirs, so the
                                                            // introducer needs the joiner's to judge a pair family-aware
                         IcmpCapable,                       // ICMP-tier capability, for the both-symmetric ICMP upgrade
                         OtherPeers: peersToIntroduce  // Peers to forward the introduction to (may be empty)
@@ -1020,7 +1020,7 @@ class MessageHandler {
                         createdAt: Date.now()
                     });
                 } else {
-                    console.log(`[MessageHandler] Introducer ${introducer.peerID} socket not available — skipping MeshIntroduceRequest`);
+                    console.log(`[MessageHandler] Introducer ${introducer.peerID} socket not available: skipping MeshIntroduceRequest`);
                 }
             }
 
@@ -1030,7 +1030,7 @@ class MessageHandler {
     }
 
     /**
-     * Handles MeshIntroduceAck — introducer confirms it has sent all introduction messages over WireGuard
+     * Handles MeshIntroduceAck: introducer confirms it has sent all introduction messages over WireGuard
      */
     handleMeshIntroduceAck(message) {
         const { PeerID } = message;
@@ -1046,7 +1046,7 @@ class MessageHandler {
      * (missed heartbeats over the mesh tunnel). Drops the peer from meshMembers
      * immediately so it stops appearing in future MeshJoinResponse rosters.
      *
-     * Only the current introducer is authorized — a non-introducer claiming a peer is
+     * Only the current introducer is authorized; a non-introducer claiming a peer is
      * dead could be used to evict honest peers from the network.
      */
     /**
@@ -1119,7 +1119,7 @@ class MessageHandler {
         }
         if (!targetPeerID) return;
 
-        console.log(`[MessageHandler] Introducer ${sender.peerID} declared peer ${targetPeerID} (${deadMeshIP || 'unknown IP'}) dead — removing from mesh members`);
+        console.log(`[MessageHandler] Introducer ${sender.peerID} declared peer ${targetPeerID} (${deadMeshIP || 'unknown IP'}) dead: removing from mesh members`);
         this.networkRegistry.removeMeshMember(targetPeerID);
     }
 
@@ -1127,7 +1127,7 @@ class MessageHandler {
      * Retries a pending introduction using a different introducer.
      * Called when an introducer disconnects before sending its MeshIntroduceAck.
      *
-     * Searches ALL peers in the network for a replacement introducer — not just
+     * Searches ALL peers in the network for a replacement introducer; not just
      * the peersToIntroduce list, which only contains peers the old introducer was
      * supposed to relay to (and may all be disconnected from mediation).
      */
@@ -1136,7 +1136,7 @@ class MessageHandler {
         for (const [newPeerID, pending] of this.pendingIntroductions.entries()) {
             if (pending.introducerPeerID !== disconnectedPeerID) continue;
 
-            console.log(`[MessageHandler] Introducer ${disconnectedPeerID} disconnected — retrying introduction for ${newPeerID}`);
+            console.log(`[MessageHandler] Introducer ${disconnectedPeerID} disconnected: retrying introduction for ${newPeerID}`);
 
             // Search all peers in the network for a replacement introducer.
             // A valid introducer must be:
@@ -1155,7 +1155,7 @@ class MessageHandler {
             };
 
             // Family-aware replacement eligibility: the replacement introducer must share a family with
-            // the NEW peer on which the CANDIDATE is non-symmetric (same rule as initial election —
+            // the NEW peer on which the CANDIDATE is non-symmetric (same rule as initial election:
             // the candidate must punch to the new peer; the new peer's own symmetry doesn't disqualify,
             // sym-joiner↔non-sym-introducer is punchable). newPeerInfo carries the new peer's endpoints.
             const npInfo = pending.newPeerInfo || {};
@@ -1164,7 +1164,7 @@ class MessageHandler {
             const canIntroduceNewPeer = (cand) => {
                 const candNatV6 = (cand.natTypeV6 !== undefined && cand.natTypeV6 !== null) ? cand.natTypeV6 : NATTypes.Unknown;
                 const v4Ok = npHasV4 && !!cand.endpoint && cand.natType !== NATTypes.Symmetric;
-                // v6 requires a KNOWN non-symmetric candidate type (see isEligible rationale) — don't
+                // v6 requires a KNOWN non-symmetric candidate type (see isEligible rationale); don't
                 // gamble a v6-only replacement introducer on an Unknown-v6 candidate.
                 const v6Ok = npHasV6 && !!cand.endpointV6 && candNatV6 !== NATTypes.Symmetric && candNatV6 !== NATTypes.Unknown;
                 return v4Ok || v6Ok;
@@ -1242,7 +1242,7 @@ class MessageHandler {
                 IdentityPublicKey: pending.newPeerInfo.identityPublicKey,
                 EndpointV6String: pending.newPeerInfo.endpointV6,
                 NATTypeV6: pending.newPeerInfo.natTypeV6,     // keep the retry path's message identical in shape to
-                IcmpCapable: pending.newPeerInfo.icmpCapable, // the primary one — a retry must not downgrade the pair
+                IcmpCapable: pending.newPeerInfo.icmpCapable, // the primary one; a retry must not downgrade the pair
                 OtherPeers: remainingPeers
             };
 

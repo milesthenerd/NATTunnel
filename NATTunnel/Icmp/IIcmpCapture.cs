@@ -26,6 +26,12 @@ internal interface IIcmpCapture : IDisposable
     bool IsAvailable { get; }
 
     /// <summary>
+    /// The active WinDivert backend if this capture is (or wraps) one, else null. WinDivert can INJECT as well
+    /// as capture, which is the only send path for an unprivileged Windows host: raw sockets are admin-only.
+    /// </summary>
+    WinDivertCapture ActiveWinDivert() => null;
+
+    /// <summary>
     /// Begin capturing inbound ICMP from <paramref name="peer"/> destined to this host. The capture layer
     /// binds/opens whatever it needs (raw socket, driver handle) and, on each matching inbound ICMP packet,
     /// invokes <paramref name="onIcmp"/> with the parsed fields.

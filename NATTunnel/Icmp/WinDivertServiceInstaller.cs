@@ -11,7 +11,7 @@ namespace NATTunnel.Icmp;
 /// can later open capture handles (<c>WinDivertOpen</c>) at runtime.
 ///
 /// WHY THIS EXISTS: WinDivert's default on-demand load needs Administrator EVERY time it must start the driver,
-/// and it self-deregisters when the last handle closes — so a plain unprivileged app on a machine where nothing
+/// and it self-deregisters when the last handle closes, so a plain unprivileged app on a machine where nothing
 /// installed the driver cannot use ICMP capture. Registering WinDivert as a standing service ONCE (elevated, at
 /// install time) keeps the driver loaded: afterward the host opens handles via
 /// <c>WinDivertOpen(..., WINDIVERT_FLAG_NO_INSTALL)</c> against the already-running service.
@@ -22,7 +22,7 @@ namespace NATTunnel.Icmp;
 ///
 /// THE GRANT DOES NOT PERSIST. WinDivert recreates its device with an explicit admin-only descriptor on every
 /// load and ignores the service's registry `Security` value, so a reboot undoes it. Something elevated has to
-/// re-apply it — <see cref="IcmpCapture.AnyCaptureAvailable"/> does so on any elevated run, which repairs the
+/// re-apply it: <see cref="IcmpCapture.AnyCaptureAvailable"/> does so on any elevated run, which repairs the
 /// machine for unprivileged hosts that start later. A machine that only ever runs unprivileged embedded hosts
 /// needs `/install` re-run after each boot.
 ///
@@ -211,7 +211,7 @@ public static class WinDivertServiceInstaller
 
     /// <summary>
     /// Widen the DACL on \\.\WinDivert so non-elevated processes in Users can open it. Without this the service
-    /// being installed is not enough — the driver stays loaded but a non-elevated WinDivertOpen still fails with
+    /// being installed is not enough: the driver stays loaded but a non-elevated WinDivertOpen still fails with
     /// ERROR_ACCESS_DENIED. Requires admin (already checked by the callers).
     ///
     /// Applies to the LIVE device (immediate effect) and writes the same descriptor to the service's registry
@@ -231,7 +231,7 @@ public static class WinDivertServiceInstaller
             }
 
             // NOTE: there is no way to make this persist. Writing the descriptor to the service's registry
-            // `Security` value does NOT work — WinDivert creates its device with an explicit descriptor, which
+            // `Security` value does NOT work: WinDivert creates its device with an explicit descriptor, which
             // overrides it (verified: value present in the registry, device still admin-only after a reboot).
             // The DACL must therefore be re-applied by something elevated after every driver load.
 
@@ -239,7 +239,7 @@ public static class WinDivertServiceInstaller
             device = CreateFileW(DevicePath, WRITE_DAC | READ_CONTROL, 0, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
             if (device == IntPtr.Zero || device == new IntPtr(-1))
             {
-                Log($"[ICMP][windivert] could not open {DevicePath} to set its DACL (error {Marshal.GetLastWin32Error()}) — " +
+                Log($"[ICMP][windivert] could not open {DevicePath} to set its DACL (error {Marshal.GetLastWin32Error()}), " +
                     "the driver may not be running yet");
                 return false;
             }
@@ -252,7 +252,7 @@ public static class WinDivertServiceInstaller
                 return false;
             }
 
-            Log($"[ICMP][windivert] granted the Users group access to {DevicePath} — non-elevated processes on " +
+            Log($"[ICMP][windivert] granted the Users group access to {DevicePath}: non-elevated processes on " +
                 "this machine can now capture and inject packets via WinDivert");
             return true;
         }
@@ -286,7 +286,7 @@ public static class WinDivertServiceInstaller
             var buf = new byte[needed];
             if (!GetKernelObjectSecurity(device, DACL_SECURITY_INFORMATION, buf, needed, out _)) return false;
 
-            // Round-trip to SDDL rather than walking the ACL by hand — we only need to know whether the
+            // Round-trip to SDDL rather than walking the ACL by hand; we only need to know whether the
             // built-in Users group (BU) appears in an allow ACE.
             if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(buf, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, out IntPtr sddlPtr, out _))
                 return false;
@@ -307,7 +307,7 @@ public static class WinDivertServiceInstaller
 
     /// <summary>
     /// Register the keeper as an auto-start LocalSystem service running <paramref name="exePath"/> with the
-    /// given argument. Needed because the Users DACL is lost on every driver load — see the type doc.
+    /// given argument. Needed because the Users DACL is lost on every driver load; see the type doc.
     /// </summary>
     public static Result InstallKeeperService(string exePath, string serviceArg = "run-keeper")
     {
@@ -318,7 +318,7 @@ public static class WinDivertServiceInstaller
         if (scm == IntPtr.Zero) return Result.Failed;
         try
         {
-            // Quote the path — CreateService takes a full command line, so an unquoted Program Files path
+            // Quote the path: CreateService takes a full command line, so an unquoted Program Files path
             // would be parsed as multiple arguments.
             string binPath = $"\"{exePath}\" {serviceArg}";
             IntPtr svc = CreateServiceW(
@@ -414,7 +414,7 @@ public static class WinDivertServiceInstaller
         finally { CloseServiceHandle(scm); }
     }
 
-    /// <summary>Locate WinDivert64.sys — explicit dir, else next to this assembly (where the .csproj copies it).</summary>
+    /// <summary>Locate WinDivert64.sys: explicit dir, else next to this assembly (where the .csproj copies it).</summary>
     private static string? ResolveDriverPath(string? driverDir)
     {
         if (!string.IsNullOrEmpty(driverDir))

@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- nattunnel-icmp-service.exe — the standalone WinDivert persistent-service registrator an embedded
+  <!-- nattunnel-icmp-service.exe: the standalone WinDivert persistent-service registrator an embedded
        integrator runs ONCE (elevated) from their installer, so the unprivileged host game can use the ICMP
        transport at runtime. Bundled with the NuGet under tools/. Links the installer logic from the library. -->
   <PropertyGroup>
@@ -13,14 +13,14 @@
 
     <!-- Ships inside a NuGet package next to a consumer's app, so it must not depend on a matching .NET runtime
          being installed, and it should be ONE file rather than scattering DLLs into their output directory.
-         WinDivert.dll/.sys stay loose beside it deliberately — WinDivert resolves the driver by path at load
+         WinDivert.dll/.sys stay loose beside it deliberately: WinDivert resolves the driver by path at load
          time, so they cannot be embedded. -->
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
     <!-- Trimmed: this ships inside a NuGet package, so size matters. The tool only touches SCM P/Invoke,
-         ServiceBase and Console — no reflection-driven paths for the trimmer to miss. -->
+         ServiceBase and Console; no reflection-driven paths for the trimmer to miss. -->
     <PublishTrimmed>true</PublishTrimmed>
     <TrimMode>partial</TrimMode>
   </PropertyGroup>

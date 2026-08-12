@@ -10,10 +10,10 @@ namespace NATTunnel.Embedded;
 
 /// <summary>
 /// Per-peer loopback proxy with Noise_XX_25519_ChaChaPoly_SHA256 handshake and explicit-nonce
-/// ChaCha20-Poly1305 transport (see <see cref="NoiseUdpTransport"/> for the reason — Noise.NET's
+/// ChaCha20-Poly1305 transport (see <see cref="NoiseUdpTransport"/> for the reason: Noise.NET's
 /// built-in Transport assumes a reliable channel and breaks on UDP loss/reorder).
 ///
-/// The host game treats <see cref="LoopbackEndpoint"/> as a normal remote UDP endpoint — sends
+/// The host game treats <see cref="LoopbackEndpoint"/> as a normal remote UDP endpoint: sends
 /// datagrams to it, receives replies from it. The proxy:
 ///   1. Runs a Noise XX handshake over the underlying <see cref="Tunnel"/> the moment the
 ///      tunnel reports `connected`.
@@ -32,8 +32,8 @@ internal sealed class MeshPeerProxy : IDisposable
     public const byte EnvelopeNoiseHandshake = 0x10;
     /// <summary>
     /// Cipher-negotiation hello: [0x11] [1-byte capability bitmask]. Sent IN THE CLEAR before the
-    /// Noise handshake so both peers can agree on an AEAD (ChaCha if both support it, else AES-GCM
-    /// — the BCL ChaCha is unavailable on some older Windows). One is exchanged each way; the
+    /// Noise handshake so both peers can agree on an AEAD (ChaCha if both support it, else AES-GCM,
+    /// since the BCL ChaCha is unavailable on some older Windows). One is exchanged each way; the
     /// agreed cipher is used for both the Noise handshake and the data transport, and both caps are
     /// bound into the Noise prologue so tampering breaks the handshake. See <see cref="CipherCapabilities"/>.
     /// </summary>
@@ -71,7 +71,7 @@ internal sealed class MeshPeerProxy : IDisposable
     /// <summary>
     /// Application reliable-ack envelope: [0x33] [counter ‖ ChaCha20-Poly1305(seq(4))].
     /// Receiver sends back when a 0x32 message arrives, regardless of whether the application
-    /// handler ran successfully — ack semantics are "I received this," not "I processed this."
+    /// handler ran successfully: ack semantics are "I received this," not "I processed this."
     /// </summary>
     public const byte EnvelopeAppReliableAck = 0x33;
 
@@ -145,7 +145,7 @@ internal sealed class MeshPeerProxy : IDisposable
     // latest frame byte-for-byte on UDP loss; feeding that duplicate back into the forward-only
     // Noise handshakeState throws AND can poison the state, so a single stale duplicate arriving
     // before the real next message permanently wedges the handshake (responder spams "read failed"
-    // and never completes — the introducer-drop root cause). Dedup exact duplicates before the read.
+    // and never completes, the introducer-drop root cause). Dedup exact duplicates before the read.
     private byte[] lastReadHandshakeFrame;
 
     // Fragmentation/reassembly state. See MeshConfig.AutoFragment for why; see
@@ -220,7 +220,7 @@ internal sealed class MeshPeerProxy : IDisposable
     private int consecutiveHandshakeFailures;
     private const int HandshakeFailureThreshold = 15;
 
-    // Handshake message counters — used to decide when we include the peer-version payload
+    // Handshake message counters, used to decide when we include the peer-version payload
     // in Noise messages. Only msg 1 (initiator) and msg 2 (responder) carry a version.
     private int handshakeMessagesSent;
     private int handshakeMessagesReceived;
@@ -259,7 +259,7 @@ internal sealed class MeshPeerProxy : IDisposable
     /// <param name="autoFragment">
     /// If true, plaintexts from the loopback socket larger than the per-packet payload budget
     /// derived from <paramref name="PathMTU"/> are split into multiple 0x40 fragment packets,
-    /// reassembled on the receiving side. Off by default — only useful for transports that
+    /// reassembled on the receiving side. Off by default, only useful for transports that
     /// don't do their own MTU-aware fragmentation.
     /// </param>
     /// <param name="PathMTU">
@@ -334,7 +334,10 @@ internal sealed class MeshPeerProxy : IDisposable
         // timer covers loss either way.
         if (isInitiator || remoteCapsReceived)
         {
-            try { SendThroughTunnel(cipherHelloFrame); }
+            try
+            {
+                SendThroughTunnel(cipherHelloFrame);
+            }
             catch (Exception ex) { Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] CipherHello send failed: {ex.Message}"); }
         }
 
@@ -345,14 +348,18 @@ internal sealed class MeshPeerProxy : IDisposable
 
     private void RetransmitCipherHello()
     {
-        if (cipherNegotiated || cipherHelloFrame == null) return;
+        // Deliberately NOT gated on cipherNegotiated: that flag means the PEER's CipherHello reached us, which
+        // tells us nothing about whether ours reached them. Gating on it let a responder negotiate and go silent
+        // while the initiator retried its CipherHello forever. Stop only once the handshake is done or a real
+        // Noise frame exists to retransmit in its place (see RetransmitHandshake).
+        if (handshakeDone || cipherHelloFrame == null || lastSentHandshakeFrame != null) return;
         try { SendThroughTunnel(cipherHelloFrame); }
         catch { /* tunnel may be gone */ }
     }
 
     /// <summary>
     /// Handle an inbound cleartext CipherHello (the peer's capability byte). Records the caps,
-    /// and — for the responder — replies with our own CipherHello. Once we know both sides' caps
+    /// and, for the responder, replies with our own CipherHello. Once we know both sides' caps
     /// we can build the Noise handshake with the agreed cipher.
     /// </summary>
     private void HandleCipherHello(ReadOnlySpan<byte> body)
@@ -380,7 +387,7 @@ internal sealed class MeshPeerProxy : IDisposable
     /// <summary>
     /// Both capability bytes are known: pick the agreed cipher, build the Noise handshake with it
     /// and a prologue binding both caps (downgrade protection), then drive the first Noise message.
-    /// Idempotent — guarded by cipherNegotiated so duplicate CipherHellos don't rebuild state.
+    /// Idempotent, guarded by cipherNegotiated so duplicate CipherHellos don't rebuild state.
     /// </summary>
     private void NegotiateAndBeginNoise()
     {
@@ -403,8 +410,12 @@ internal sealed class MeshPeerProxy : IDisposable
             Program.Log(LogLevel.Debug, $"[Noise/{peerLabel}] cipher negotiated: {negotiatedCipher} (local caps=0x{localCipherCaps:X2}, remote caps=0x{remoteCipherCaps:X2})");
 
             // Now that we can process Noise, retransmit the last Noise frame (not the CipherHello).
-            cipherHelloRetransmitTimer?.Dispose();
-            cipherHelloRetransmitTimer = null;
+            //
+            // Do NOT stop the CipherHello retransmit yet. Negotiating only means WE received the peer's
+            // CipherHello; it says nothing about whether OURS arrived. On a lossy channel (ICMP) the responder
+            // would otherwise negotiate, fall silent with no Noise frame to retransmit yet, and leave the
+            // initiator retrying a CipherHello forever: a deadlock where both ends believe they are waiting on
+            // the other. RetransmitHandshake takes over once there is an actual Noise frame to repeat.
             handshakeRetransmitTimer = new Timer(_ => RetransmitHandshake(), null, 1000, 1000);
 
             // Drain Noise packets that arrived before negotiation finished.
@@ -423,6 +434,15 @@ internal sealed class MeshPeerProxy : IDisposable
     private void RetransmitHandshake()
     {
         if (handshakeDone || lastSentHandshakeFrame == null) return;
+        // A real Noise frame now exists, so it supersedes the CipherHello: the peer cannot have moved on to
+        // Noise without having received our CipherHello. Retiring the timer here (rather than at negotiation)
+        // is what keeps a responder from going silent before its own CipherHello has demonstrably landed.
+        var hello = cipherHelloRetransmitTimer;
+        if (hello != null)
+        {
+            cipherHelloRetransmitTimer = null;
+            try { hello.Dispose(); } catch { }
+        }
         try { SendThroughTunnel(lastSentHandshakeFrame); }
         catch { /* tunnel may be gone */ }
     }
@@ -489,7 +509,7 @@ internal sealed class MeshPeerProxy : IDisposable
     }
 
     /// <summary>
-    /// Deliver an inner packet (just the envelope-stripped bytes — already starts with 0x01
+    /// Deliver an inner packet (just the envelope-stripped bytes, already starting with 0x01
     /// or 0x10) to this proxy as if it had arrived directly on its tunnel. Called by
     /// EmbeddedMeshHost.ForwardRelayEnvelope on the destination node when a relay-forwarded
     /// envelope arrives.
@@ -557,7 +577,7 @@ internal sealed class MeshPeerProxy : IDisposable
         {
             // Silently drop. When multiple proxies share a tunnel (direct + relayed-via-this-peer),
             // each one tries to decrypt every 0x20 packet that arrives. Only the proxy whose Noise
-            // keys match the source peer succeeds; the others fail. That's the design — failed
+            // keys match the source peer succeeds; the others fail. That's the design, since failed
             // decrypts here are expected noise, not errors.
             return;
         }
@@ -571,7 +591,7 @@ internal sealed class MeshPeerProxy : IDisposable
     /// Encrypt the given mesh-control JSON bytes via this peer's Noise transport and send
     /// them through the underlying tunnel with the 0x20 envelope. If the handshake hasn't
     /// completed yet, the packet is queued and sent automatically when the handshake finishes.
-    /// Returns true unconditionally — the caller (MeshProtocolEngine) doesn't have retry logic and would
+    /// Returns true unconditionally, since the caller (MeshProtocolEngine) doesn't have retry logic and would
     /// otherwise lose mesh-control packets during the ~1s tunnel-connected-but-noise-not-done
     /// window. (That window is exactly when MeshProtocolEngine is most eager to send MeshConnectionBegin
     /// and MeshRelayAssignment to a freshly-connected peer.)
@@ -580,7 +600,7 @@ internal sealed class MeshPeerProxy : IDisposable
     {
         if (!handshakeDone || transport == null)
         {
-            // Queue a defensive copy — caller may reuse its buffer.
+            // Queue a defensive copy, since the caller may reuse its buffer.
             var copy = new byte[length];
             Buffer.BlockCopy(plaintext, 0, copy, 0, length);
             pendingMeshControl.Enqueue(copy);
@@ -657,7 +677,7 @@ internal sealed class MeshPeerProxy : IDisposable
         var payload = new byte[plaintext.Length - 4];
         Buffer.BlockCopy(plaintext, 4, payload, 0, payload.Length);
 
-        // Always ack the receive, even if the application handler throws — ack semantics
+        // Always ack the receive, even if the application handler throws, since ack semantics
         // are "I received this," not "I processed this successfully."
         var ackPayload = new byte[4];
         ackPayload[0] = (byte)(seq >> 24);
@@ -718,7 +738,7 @@ internal sealed class MeshPeerProxy : IDisposable
     {
         // Post-completion: our handshakeState is gone, but a peer that missed our final frame
         // keeps retransmitting its last message. Re-answer with our completing frame (bounded) so
-        // it can advance — otherwise it wedges: tunnel up but Noise never finishes on its side, so
+        // it can advance, otherwise it wedges: tunnel up but Noise never finishes on its side, so
         // no mesh-control flows and it looks dead. (This is the introducer-drop symptom.)
         if (handshakeDone)
         {
@@ -735,7 +755,7 @@ internal sealed class MeshPeerProxy : IDisposable
         // resends its latest frame verbatim on UDP loss; Noise's handshakeState is forward-only,
         // so replaying it throws and can poison the state. Noise never sends an OLDER frame (a
         // peer only ever retransmits its most recent one), so "same bytes as last read" is the
-        // only stale case — ignore it and let the retransmit timers deliver the next real message.
+        // only stale case, so ignore it and let the retransmit timers deliver the next real message.
         if (lastReadHandshakeFrame != null && body.SequenceEqual(lastReadHandshakeFrame))
             return;
 
@@ -754,7 +774,7 @@ internal sealed class MeshPeerProxy : IDisposable
             {
                 if (bytesRead < 8)
                 {
-                    Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake msg missing peer version payload — tearing down proxy");
+                    Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake msg missing peer version payload, tearing down proxy");
                     try { Dispose(); } catch { }
                     try { HandshakeBroken?.Invoke(); } catch { }
                     return;
@@ -765,7 +785,7 @@ internal sealed class MeshPeerProxy : IDisposable
                 int lowerBound = Math.Max(MediationProtocol.PeerMinVersion, remoteMin);
                 if (selected < lowerBound)
                 {
-                    Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] peer supports v{remoteMin}-v{remoteMax}, we support v{MediationProtocol.PeerMinVersion}-v{MediationProtocol.PeerMaxVersion} — no overlap, refusing pair");
+                    Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] peer supports v{remoteMin}-v{remoteMax}, we support v{MediationProtocol.PeerMinVersion}-v{MediationProtocol.PeerMaxVersion}: no overlap, refusing pair");
                     try { VersionRefused?.Invoke(remoteMin, remoteMax); } catch { }
                     try { Dispose(); } catch { }
                     try { HandshakeBroken?.Invoke(); } catch { }
@@ -779,7 +799,7 @@ internal sealed class MeshPeerProxy : IDisposable
                 CompleteHandshake(t);
                 return;
             }
-            // Handshake not yet finished — send our next message.
+            // Handshake not yet finished, so send our next message.
             SendNoiseMessage();
         }
         catch (Exception ex)
@@ -788,7 +808,7 @@ internal sealed class MeshPeerProxy : IDisposable
             Program.Log(LogLevel.Error, $"[Noise/{peerLabel}] handshake read failed ({fails}/{HandshakeFailureThreshold}, role={(isInitiator ? "initiator" : "responder")}, recv={handshakeMessagesReceived}, sent={handshakeMessagesSent}): {ex.Message}");
             if (fails >= HandshakeFailureThreshold)
             {
-                Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake wedged after {fails} consecutive failures — tearing down proxy");
+                Program.Log(LogLevel.Warning, $"[Noise/{peerLabel}] handshake wedged after {fails} consecutive failures, tearing down proxy");
                 try { Dispose(); } catch { }
                 try { HandshakeBroken?.Invoke(); } catch { }
                 return;
@@ -797,7 +817,7 @@ internal sealed class MeshPeerProxy : IDisposable
             // A read failure here is almost always a duplicate/reordered handshake frame from a
             // peer that hasn't advanced past an earlier step (UDP retransmit landed after we'd
             // already consumed that message). That means the peer is still waiting on OUR last
-            // frame — nudge it immediately instead of waiting up to 1s for the retransmit timer,
+            // frame, so nudge it immediately instead of waiting up to 1s for the retransmit timer,
             // which is what lets one side complete while the other stays wedged. Harmless if the
             // peer wasn't actually stuck: it's an idempotent duplicate they'll ignore.
             RetransmitHandshake();
@@ -831,15 +851,15 @@ internal sealed class MeshPeerProxy : IDisposable
 
         // Send our application identity blob (may be empty if the caller didn't configure one).
         // MeshNode gates PeerConnected on the IdentityReceived event for the peer's blob, so
-        // both sides exchange this once at startup. Failures here aren't fatal — the peer just
+        // both sides exchange this once at startup. Failures here aren't fatal, the peer just
         // won't see our identity, and MeshNode will treat that as the empty case after a timeout.
         TryEncryptAndSend(EnvelopeIdentity, localIdentity, "identity");
 
-        // Noise completing end-to-end means the peer is reachable bidirectionally — no longer
+        // Noise completing end-to-end means the peer is reachable bidirectionally, no longer
         // need the per-second SymmetricHolePunchAttempt timer that was kept running post-hole-punch
         // to ensure the non-symmetric side got at least one of our probes' packets. Stop it now
         // so we're not spamming the peer with hole-punches forever.
-        // (Skip on relayed-mode proxies — they don't own the gateway's tunnel and shouldn't
+        // (Skip on relayed-mode proxies, which don't own the gateway's tunnel and shouldn't
         // disable hole-punching for an unrelated direct connection.)
         if (relayDstMeshIPBytes == null)
         {
@@ -857,7 +877,7 @@ internal sealed class MeshPeerProxy : IDisposable
         int read = transport.Decrypt(body, plaintextBuf);
         if (read < 0)
         {
-            // Replay, too-old, or auth failure. Silent drop is correct here — these can
+            // Replay, too-old, or auth failure. Silent drop is correct here, since these can
             // happen normally on UDP (duplicate retransmits, reordered late packets) and
             // logging would spam. Real auth failures are rare and indicate either a bug
             // or active tampering; both warrant a separate alert pathway, not this hot path.
@@ -873,7 +893,7 @@ internal sealed class MeshPeerProxy : IDisposable
     /// fragments have arrived, concatenate + deliver to the host's loopback. Incomplete
     /// messages are GC'd by <see cref="ReapStaleFragmentAssemblies"/> after the configured
     /// timeout. Receive-side reassembly works whether or not this side has AutoFragment
-    /// enabled — the wire format only depends on the sender's setting.
+    /// enabled, since the wire format only depends on the sender's setting.
     /// </summary>
     private void HandleDataFragmentMessage(ReadOnlySpan<byte> body)
     {
@@ -926,7 +946,7 @@ internal sealed class MeshPeerProxy : IDisposable
 
     /// <summary>
     /// Walk the reassembly table and drop entries older than the configured timeout. Called
-    /// opportunistically from the fragment receive path — no dedicated timer needed because
+    /// opportunistically from the fragment receive path, so no dedicated timer needed because
     /// fragments only accumulate when fragments are arriving.
     /// </summary>
     private void ReapStaleFragmentAssemblies()

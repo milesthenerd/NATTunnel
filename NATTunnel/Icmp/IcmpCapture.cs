@@ -6,14 +6,14 @@ namespace NATTunnel.Icmp;
 /// Selects the right <see cref="IIcmpCapture"/> backend for the current platform, in preference order.
 ///
 ///   • Windows:
-///       1. <see cref="WinDivertCapture"/> — bundled WFP driver. Works when the process is ELEVATED (the
+///       1. <see cref="WinDivertCapture"/>: bundled WFP driver. Works when the process is ELEVATED (the
 ///          daemon self-elevates for WireGuard; the GUI is requireAdministrator). No user action, free to ship.
 ///          WinDivert's device is admin-only at the driver level, so this path needs elevation.
-///       2. <see cref="NpcapCapture"/> — used only IF the user has Npcap installed (non-restricted). This is
+///       2. <see cref="NpcapCapture"/>: used only IF the user has Npcap installed (non-restricted). This is
 ///          the UNPRIVILEGED path for an embedded/non-elevated host. We don't bundle Npcap (its OEM redist
 ///          license is costly); the user provides it, which keeps us license-clean.
-///       3. <see cref="RawSocketCapture"/> — SIO_RCVALL last resort (needs admin; mostly redundant with #1).
-///   • Linux / other — <see cref="RawSocketCapture"/>: a raw ICMP socket with CAP_NET_RAW receives type-8
+///       3. <see cref="RawSocketCapture"/>: SIO_RCVALL last resort (needs admin; mostly redundant with #1).
+///   • Linux / other: <see cref="RawSocketCapture"/>: a raw ICMP socket with CAP_NET_RAW receives type-8
 ///     directly, no driver.
 ///
 /// Each returned backend reports <see cref="IIcmpCapture.IsAvailable"/> after <c>Start</c>; the transport
@@ -22,7 +22,7 @@ namespace NATTunnel.Icmp;
 internal static class IcmpCapture
 {
     /// <summary>
-    /// Create the preferred capture backend for this platform. Does not open anything yet — the transport
+    /// Create the preferred capture backend for this platform. Does not open anything yet; the transport
     /// calls <see cref="IIcmpCapture.Start"/>.
     /// </summary>
     public static IIcmpCapture CreateDefault()
@@ -30,12 +30,12 @@ internal static class IcmpCapture
         if (OperatingSystem.IsWindows())
             return new WindowsCaptureChain();
 
-        // Linux, macOS (best-effort), etc. — raw socket path.
+        // Linux, macOS (best-effort), etc.: raw socket path.
         return new RawSocketCapture();
     }
 
     /// <summary>
-    /// True if SOME ICMP-capture backend is available on this machine right now — used for capability
+    /// True if SOME ICMP-capture backend is available on this machine right now: used for capability
     /// advertisement (the IcmpCapable flag) without committing to a specific peer. Cheap; may probe.
     /// </summary>
     public static bool AnyCaptureAvailable()
@@ -67,13 +67,18 @@ internal static class IcmpCapture
             WinDivertServiceInstaller.ApplyPermissiveDeviceDacl();
         }
 
-        // In order of what actually grants capture:
-        //  - elevated            → WinDivert loads on demand
-        //  - Npcap installed     → unprivileged sniff path
-        //  - WinDivert SERVICE   → unprivileged too, IF the device DACL is currently open to Users
-        return elevated
-            || NpcapCapture.IsNpcapPresent()
-            || (WinDivertServiceInstaller.IsInstalled() && WinDivertServiceInstaller.IsDeviceUserAccessible());
+        // Capability needs BOTH directions, and they have different requirements.
+        //
+        // SEND: raw ICMP sockets are admin-only on Windows. Unprivileged, the socket opens and binds fine and
+        // every SendTo then fails with WSAEACCES, which is why capture alone once produced a tier that punched,
+        // heard the peer, and delivered nothing. WinDivert can INJECT, so it is the one unprivileged send path.
+        //
+        // RECEIVE: Npcap or WinDivert (or elevation, for the raw/RCVALL paths).
+        //
+        // So: elevated works outright; otherwise we specifically need WinDivert, installed AND with the device
+        // open to Users. Npcap alone can receive but cannot transmit.
+        if (elevated) return true;
+        return WinDivertServiceInstaller.IsInstalled() && WinDivertServiceInstaller.IsDeviceUserAccessible();
     }
 
     /// <summary>
@@ -91,6 +96,9 @@ internal static class IcmpCapture
 
         public bool IsAvailable => _active?.IsAvailable ?? false;
 
+        // Delegate: the chain is a wrapper, so the injector is whatever backend actually came up.
+        public WinDivertCapture ActiveWinDivert() => _active?.ActiveWinDivert();
+
         public void Start(System.Net.IPAddress peer, System.Net.IPAddress localSource, IcmpReceiveHandler onIcmp)
         {
 #pragma warning disable CS0162
@@ -101,15 +109,31 @@ internal static class IcmpCapture
                 if (wdFirst.IsAvailable)
                 {
                     _active = wdFirst;
-                    NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] active capture = WinDivertCapture (PreferWinDivertForTesting is ON — not the shipping order)");
+                    NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] active capture = WinDivertCapture (PreferWinDivertForTesting is ON, not the shipping order)");
                     return;
                 }
                 wdFirst.Dispose();
-                NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] WinDivert did not come up (PreferWinDivertForTesting) — falling through to the normal chain");
+                NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] WinDivert did not come up (PreferWinDivertForTesting): falling through to the normal chain");
             }
 #pragma warning restore CS0162
 
-            // 1) Npcap — most robust when installed: captures at the NDIS filter layer, so it reliably delivers
+            // Unprivileged: WinDivert FIRST, because it is the only backend that can also INJECT. Npcap would
+            // capture fine and then leave us unable to transmit (raw sockets are admin-only), which presents as a
+            // connected tunnel that moves no data.
+            if (!WinDivertServiceInstaller.IsElevated())
+            {
+                var wdOnly = new WinDivertCapture();
+                wdOnly.Start(peer, localSource, onIcmp);
+                if (wdOnly.IsAvailable)
+                {
+                    _active = wdOnly;
+                    NATTunnel.Program.Log(NATTunnel.LogLevel.Debug, "[ICMP] active capture = WinDivertCapture (unprivileged; also the send path)");
+                    return;
+                }
+                wdOnly.Dispose();
+            }
+
+            // 1) Npcap: most robust when installed: captures at the NDIS filter layer, so it reliably delivers
             //    the peer's real inbound ICMP (unlike RCVALL, which is egress-only on some multi-adapter stacks).
             bool npcapPresent = NpcapCapture.IsNpcapPresent();
             if (npcapPresent)
@@ -123,14 +147,14 @@ internal static class IcmpCapture
                     np.Dispose();
                     if (attempt < 2) System.Threading.Thread.Sleep(300);
                 }
-                // Npcap installed but wouldn't start — fall through to RCVALL, but warn: RCVALL can be
+                // Npcap installed but wouldn't start; fall through to RCVALL, but warn: RCVALL can be
                 // egress-only on some stacks, which silently half-breaks the tunnel.
                 NATTunnel.Program.Log(NATTunnel.LogLevel.Warning, "[ICMP] Npcap is INSTALLED but failed to start capture " +
-                    "after retries — falling back to SIO_RCVALL. If the tunnel connects one-way only, the Npcap service " +
-                    "likely isn't running (start it / restart) — RCVALL is egress-only on some stacks.");
+                    "after retries, falling back to SIO_RCVALL. If the tunnel connects one-way only, the Npcap service " +
+                    "likely isn't running (start it / restart); RCVALL is egress-only on some stacks.");
             }
 
-            // 2) WinDivert — bundled driver, no user install, deterministic (unlike RCVALL's egress-only quirk),
+            // 2) WinDivert: bundled driver, no user install, deterministic (unlike RCVALL's egress-only quirk),
             //    and the only unprivileged option when the service is installed but Npcap isn't. Skipped when
             //    neither elevated nor service-installed, since the open would just fail.
             if (WinDivertServiceInstaller.IsElevated() || WinDivertServiceInstaller.IsInstalled())
@@ -141,7 +165,7 @@ internal static class IcmpCapture
                 wd2.Dispose();
             }
 
-            // 3) Raw socket + SIO_RCVALL — no-install fallback (needs admin). Works on clean single-NIC boxes;
+            // 3) Raw socket + SIO_RCVALL: no-install fallback (needs admin). Works on clean single-NIC boxes;
             //    may capture egress-only on quirky stacks (install Npcap there).
             var raw = new RawSocketCapture();
             raw.Start(peer, localSource, onIcmp);
@@ -149,7 +173,7 @@ internal static class IcmpCapture
             {
                 _active = raw;
                 NATTunnel.Program.Log(npcapPresent ? NATTunnel.LogLevel.Warning : NATTunnel.LogLevel.Debug,
-                    $"[ICMP] active capture = RawSocketCapture (RCVALL){(npcapPresent ? " — Npcap present but unused, see warning above" : "")}");
+                    $"[ICMP] active capture = RawSocketCapture (RCVALL){(npcapPresent ? ", Npcap present but unused, see warning above" : "")}");
                 return;
             }
             raw.Dispose();

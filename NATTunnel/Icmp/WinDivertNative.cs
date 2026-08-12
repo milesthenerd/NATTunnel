@@ -79,6 +79,14 @@ internal static class WinDivertNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool WinDivertSetParam(IntPtr handle, int param, ulong value);
 
+    /// <summary>
+    /// Fills in IP and ICMP checksums for a packet we built by hand. Needed because injecting via
+    /// WinDivertSend bypasses the stack, which is what would normally compute them.
+    /// </summary>
+    [DllImport(DLL, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool WinDivertHelperCalcChecksums(byte[] pPacket, uint packetLen, IntPtr addr, ulong flags);
+
     [DllImport(DLL, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool WinDivertClose(IntPtr handle);

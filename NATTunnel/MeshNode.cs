@@ -59,7 +59,7 @@ public class MeshNode : IDisposable
     public Guid OwnPeerID => peerID;
 
     /// <summary>
-    /// Snapshot of the currently-connected peers. Safe to enumerate from any thread — returns
+    /// Snapshot of the currently-connected peers. Safe to enumerate from any thread: returns
     /// a stable array taken at call time. Mutations (peer joins/leaves) won't reflect in a
     /// previously-obtained snapshot.
     /// </summary>
@@ -67,7 +67,7 @@ public class MeshNode : IDisposable
     {
         get
         {
-            // Snapshot via .Values.ToArray() is atomic-enough — ConcurrentDictionary's Values
+            // Snapshot via .Values.ToArray() is atomic-enough: ConcurrentDictionary's Values
             // accessor synchronizes internally. The returned array is a stable view.
             return connectedPeers.Values.ToArray();
         }
@@ -85,7 +85,7 @@ public class MeshNode : IDisposable
     }
 
     /// <summary>
-    /// Look up a connected peer by its <see cref="MeshPeer.LoopbackEndpoint"/> — useful when the
+    /// Look up a connected peer by its <see cref="MeshPeer.LoopbackEndpoint"/>, useful when the
     /// host transport surfaces a packet's apparent source endpoint
     /// and the host needs to map it back to a <see cref="MeshPeer"/>. O(n) over current peers.
     /// </summary>
@@ -102,7 +102,7 @@ public class MeshNode : IDisposable
 
     /// <summary>
     /// Look up a connected peer by the IP portion of its <see cref="MeshPeer.LoopbackEndpoint"/>.
-    /// Only meaningful when <see cref="MeshConfig.UseDistinctLoopbackIPs"/> is true — otherwise
+    /// Only meaningful when <see cref="MeshConfig.UseDistinctLoopbackIPs"/> is true; otherwise
     /// every peer shares 127.0.0.1 and this is ambiguous. Returns false if zero or more than one
     /// peer matches. O(n).
     /// </summary>
@@ -139,7 +139,7 @@ public class MeshNode : IDisposable
 
     /// <summary>
     /// Raised once a peer's Noise handshake completes AND its application identity blob has been
-    /// received — the loopback endpoint is safe to send to and <see cref="MeshPeer.Identity"/>
+    /// received: the loopback endpoint is safe to send to and <see cref="MeshPeer.Identity"/>
     /// reflects the remote peer's <see cref="MeshConfig.LocalIdentity"/>.
     /// </summary>
     public event Action<MeshPeer> PeerConnected;
@@ -147,7 +147,7 @@ public class MeshNode : IDisposable
     /// <summary>
     /// Raised when a peer is declared dead (heartbeat misses) or leaves the mesh gracefully.
     /// The <see cref="MeshPeer.LoopbackEndpoint"/> stops working after this event; sends to it
-    /// are silently dropped. Host should not retain references to the MeshPeer after disconnect —
+    /// are silently dropped. Host should not retain references to the MeshPeer after disconnect;
     /// the same peer reconnecting gets a fresh MeshPeer + new loopback endpoint.
     /// </summary>
     public event Action<MeshPeer> PeerDisconnected;
@@ -155,7 +155,7 @@ public class MeshNode : IDisposable
     /// <summary>
     /// Raised when an application message arrives from a peer (sent via
     /// <see cref="SendMessageAsync"/> or <see cref="BroadcastAsync"/> on the remote side).
-    /// Fires for both reliable and unreliable sends — receivers can't distinguish, since the
+    /// Fires for both reliable and unreliable sends: receivers can't distinguish, since the
     /// reliability is a sender-side concern. The payload buffer is owned by the callback;
     /// don't retain references past the handler return.
     /// </summary>
@@ -183,7 +183,7 @@ public class MeshNode : IDisposable
     }
 
     /// <summary>
-    /// Add a peer fingerprint to the block list. Takes effect immediately — no reconnect required.
+    /// Add a peer fingerprint to the block list. Takes effect immediately: no reconnect required.
     /// Fires <see cref="BlockListChanged"/> after the update.
     /// </summary>
     public void BlockPeer(string fingerprint)
@@ -225,7 +225,7 @@ public class MeshNode : IDisposable
     /// directly instead of relaying. Windows needs either an elevated process, Npcap, or the one-time setup
     /// described on <see cref="TryInstallIcmpSupport"/>; Linux needs CAP_NET_RAW.
     ///
-    /// False is not an error — those pairs fall back to relaying, which is slower but works.
+    /// False is not an error: those pairs fall back to relaying, which is slower but works.
     /// </summary>
     public static bool IsIcmpTransportAvailable() => Icmp.IcmpCapture.AnyCaptureAvailable();
 
@@ -236,7 +236,7 @@ public class MeshNode : IDisposable
     /// Running it requires elevation and will trigger a UAC prompt: it installs a kernel-driver service and a
     /// small boot service, and grants the local Users group access to WinDivert's capture device. That last part
     /// means ANY local user can capture and inject network packets while it is installed. Surface this as an
-    /// explicit, optional user choice — never install it silently. `uninstall` reverses it.
+    /// explicit, optional user choice; never install it silently. `uninstall` reverses it.
     ///
     /// Not needed if your app already runs elevated, or if the machine has Npcap.
     /// </summary>
@@ -251,7 +251,7 @@ public class MeshNode : IDisposable
     /// Launch the bundled ICMP-support installer with elevation, showing the user a UAC prompt. Returns false
     /// if the helper isn't bundled, the user declined the prompt, or the install failed.
     ///
-    /// Read <see cref="GetIcmpSupportInstallerPath"/> before calling — this widens the machine's attack surface
+    /// Read <see cref="GetIcmpSupportInstallerPath"/> before calling: this widens the machine's attack surface
     /// and should only ever run when the user has explicitly asked for it.
     /// </summary>
     /// <param name="uninstall">Remove the services instead of installing them.</param>
@@ -290,7 +290,7 @@ public class MeshNode : IDisposable
         config.Validate();
         this.config = config;
 
-        // Split "host[:port]" into its components — mediation handshake DNS-resolves and connects.
+        // Split "host[:port]" into its components: mediation handshake DNS-resolves and connects.
         // A bare "host" (no ':port') defaults to 6510 (the conventional mediation port).
         // IPv6 literals use brackets to carry a port: "[2001:db8::1]:6510".
         if (!EndpointUtils.TrySplitHostPortWithDefault(config.MediationEndpoint, 6510, out this.mediationHost, out this.mediationPort))
@@ -424,11 +424,12 @@ public class MeshNode : IDisposable
         if (string.IsNullOrEmpty(remotePeerID))
         {
             // Reconnect-side tunnels without a known peer ID can't initiate Noise (no way to
-            // decide initiator/responder). Skip — the protocol will eventually deliver a
+            // decide initiator/responder). Skip: the protocol will eventually deliver a
             // proper tunnel with the peer ID once it learns it.
+            NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
+                $"[Embedded] Tunnel arrived with no peer ID (meshIP={remoteMeshIP ?? "null"}): no proxy built, no Noise handshake");
             return;
         }
-
         // Subscribe the tunnel's relay envelope event to the host so 0x02 packets received
         // on this tunnel get peeled + forwarded. This is what makes us act as a relay.
         tunnel.RelayEnvelopeReceived += host.ForwardRelayEnvelope;
@@ -473,7 +474,7 @@ public class MeshNode : IDisposable
         // `connected`. The responder side is unaffected (msg-1 is buffered until Start runs
         // via MeshPeerProxy.earlyHandshakePackets) but we may as well defer both for cleanliness.
         // If the tunnel is somehow already connected by the time we subscribe (race), the
-        // event won't fire again — start the handshake immediately in that case.
+        // event won't fire again; start the handshake immediately in that case.
         if (tunnel.connected)
         {
             proxy.Start();
@@ -500,7 +501,7 @@ public class MeshNode : IDisposable
 
         // The gateway's MeshPeerProxy already exists (direct hole-punched connection); we
         // borrow its tunnel as the carrier. If for some reason the gateway proxy isn't found,
-        // bail — the relay route is incomplete.
+        // bail: the relay route is incomplete.
         var gatewayProxy = host.GetProxyByMeshIP(gatewayMeshIP);
         if (gatewayProxy == null)
         {
@@ -554,7 +555,7 @@ public class MeshNode : IDisposable
         };
 
         // The gateway's tunnel is already connected (otherwise we wouldn't be relaying through it).
-        // Start the Noise handshake immediately — it'll flow end-to-end through the gateway.
+        // Start the Noise handshake immediately: it'll flow end-to-end through the gateway.
         proxy.Start();
     }
 
@@ -566,7 +567,7 @@ public class MeshNode : IDisposable
     private void WirePeerEvents(MeshPeer connected, MeshPeerProxy proxy, string remotePeerID, bool isRelayed, string gatewayLabel)
     {
         // Identity-and-handshake gating: PeerConnected fires once both have arrived. Order is
-        // not guaranteed — handshake-complete schedules the identity send, but identity packet
+        // not guaranteed: handshake-complete schedules the identity send, but identity packet
         // delivery is async and the handshake event may fire first on this side.
         int readinessFlags = 0; // bit 0 = handshake done, bit 1 = identity received
         void TryFire()
@@ -583,9 +584,9 @@ public class MeshNode : IDisposable
         }
 
         // Interlocked.Or returns the PRE-OR value. We only want to fire on the transition that
-        // sets the second bit — i.e. when the post-OR value is 0b11 but the pre-OR value wasn't.
+        // sets the second bit, i.e. when the post-OR value is 0b11 but the pre-OR value wasn't.
         // Interlocked.Or returns the PRE-OR value. We only want to fire on the transition that
-        // sets the second bit — i.e. when the post-OR value is 0b11 but the pre-OR value wasn't.
+        // sets the second bit, i.e. when the post-OR value is 0b11 but the pre-OR value wasn't.
         proxy.HandshakeComplete += () =>
         {
             int prev = Interlocked.Or(ref readinessFlags, 0b01);
@@ -593,7 +594,7 @@ public class MeshNode : IDisposable
         };
         proxy.HandshakeBroken += () =>
         {
-            // Proxy gave up after too many undecryptable handshake packets — usually means the
+            // Proxy gave up after too many undecryptable handshake packets: usually means the
             // remote reconnected with a fresh Noise key and our stale proxy was intercepting.
             // Drop the peer from our dictionary so MeshProtocolEngine's next reconnect attempt
             // builds a clean proxy.
@@ -643,7 +644,7 @@ public class MeshNode : IDisposable
     /// </summary>
     private void OnPeerRemoved(IPAddress meshIP, MeshPeerProxy removedProxy)
     {
-        // connectedPeers is keyed by peer GUID, not mesh IP — scan for the entry whose proxy
+        // connectedPeers is keyed by peer GUID, not mesh IP; scan for the entry whose proxy
         // matches the removed reference. N is small (single-digit peer counts typical).
         string foundKey = null;
         foreach (var kv in connectedPeers)
@@ -681,7 +682,7 @@ public class MeshNode : IDisposable
         if (!EndpointUtils.TrySplitHostPortWithDefault(mediationEndpoint, 6510, out string host, out int port))
             throw new ArgumentException("mediationEndpoint is not a valid host, host:port, or [ipv6]:port string.", nameof(mediationEndpoint));
 
-        // Same v4-preferring resolve as Start() — v6-only hosts fall back to their AAAA record.
+        // Same v4-preferring resolve as Start(): v6-only hosts fall back to their AAAA record.
         IPAddress mediationIP;
         try
         {
@@ -704,7 +705,7 @@ public class MeshNode : IDisposable
         try
         {
             tcp = new TcpClient(mediationIP.AddressFamily);
-            // 5s TCP connect budget — mediation should respond promptly; longer waits suggest a routing problem.
+            // 5s TCP connect budget: mediation should respond promptly; longer waits suggest a routing problem.
             using (var connectCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
             {
                 connectCts.CancelAfter(TimeSpan.FromSeconds(5));
@@ -771,7 +772,7 @@ public class MeshNode : IDisposable
                             mediationV6 = (await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false))
                                 .FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetworkV6);
                         }
-                        catch { /* no AAAA — skip v6 probe */ }
+                        catch { /* no AAAA, skip v6 probe */ }
                     }
                     if (mediationV6 != null)
                     {
@@ -792,7 +793,7 @@ public class MeshNode : IDisposable
             while (!haveV4 || (expectV6 && v6Type == null))
             {
                 // Once we have the (required) v4 verdict, only briefly wait for the optional v6 one
-                // — if v6 is blocked despite our probe, don't make the user wait the full budget.
+                // if v6 is blocked despite our probe, don't make the user wait the full budget.
                 if (haveV4) tls.ReadTimeout = 1500;
 
                 MediationMessage r;
@@ -847,7 +848,7 @@ public class MeshNode : IDisposable
         }
     }
 
-    // Minimal JSON splitter mirroring MeshProtocolEngine.ExtractFirstJson — kept local so the
+    // Minimal JSON splitter mirroring MeshProtocolEngine.ExtractFirstJson: kept local so the
     // probe is self-contained and doesn't depend on the engine's internal helpers.
     private static (MediationMessage msg, string remainder) TryExtractJson(string data)
     {
@@ -875,7 +876,7 @@ public class MeshNode : IDisposable
     /// Construct a <see cref="MeshPeerProxy"/> by walking the configured loopback port range
     /// until the bind succeeds. The proxy ctor binds the loopback socket eagerly, so a port
     /// conflict (another MeshNode in the same process, or another process on the machine using
-    /// the same port) throws SocketException — we catch and try the next port.
+    /// the same port) throws SocketException; we catch and try the next port.
     /// </summary>
     /// <returns>The constructed proxy, or null if no port in the range was free.</returns>
     private MeshPeerProxy TryBuildProxyWithFreePort(Func<IPAddress, int, MeshPeerProxy> factory)
@@ -898,7 +899,7 @@ public class MeshNode : IDisposable
             }
             catch (SocketException)
             {
-                // Port (or ip:port) in use — try the next one.
+                // Port (or ip:port) in use: try the next one.
             }
         }
         return null;
@@ -936,7 +937,7 @@ public class MeshNode : IDisposable
 
     /// <summary>
     /// Send an application message to a single peer. With <paramref name="reliable"/> false
-    /// the bytes go out via 0x31 — best-effort UDP, no ack, no retransmit, returns true as
+    /// the bytes go out via 0x31: best-effort UDP, no ack, no retransmit, returns true as
     /// soon as the encryption succeeds. With reliable true the bytes go out via 0x32 with a
     /// sequence number, and the returned Task completes when the matching 0x33 ack arrives or
     /// throws <see cref="TimeoutException"/> after <see cref="MeshConfig.ReliableMessageTimeout"/>.
@@ -958,7 +959,7 @@ public class MeshNode : IDisposable
 
     /// <summary>
     /// Broadcast an application message to every currently-connected peer. Snapshot at call
-    /// time — late-joining peers don't receive this message. Returns when every per-peer send
+    /// time; late-joining peers don't receive this message. Returns when every per-peer send
     /// has resolved (or the overall token cancels).
     /// </summary>
     public Task BroadcastAsync(byte[] payload, bool reliable, CancellationToken cancellationToken = default)
@@ -1021,15 +1022,15 @@ public class MeshNode : IDisposable
         try { engineExited = runTask?.Wait(TimeSpan.FromSeconds(5)) ?? true; } catch { }
         if (!engineExited)
         {
-            // Engine didn't finish in 5s — log it instead of silently moving on, so a stuck
+            // Engine didn't finish in 5s: log it instead of silently moving on, so a stuck
             // shutdown is visible.
-            try { context?.Log(LogLevel.Warning, "[Embedded] Engine task did not exit within 5s of Dispose — background work may continue briefly."); }
+            try { context?.Log(LogLevel.Warning, "[Embedded] Engine task did not exit within 5s of Dispose; background work may continue briefly."); }
             catch { }
         }
 
         // Snapshot+clear connectedPeers before disposing proxies so any late event delivery
         // sees an empty dictionary and bails. The disposed flag also gates OnTunnelCreated
-        // and OnRelayedPeerAdded — that's the belt to this suspender.
+        // and OnRelayedPeerAdded: that's the belt to this suspender.
         var peersSnapshot = connectedPeers.Values.ToArray();
         connectedPeers.Clear();
         foreach (var entry in peersSnapshot)
@@ -1055,7 +1056,7 @@ public class MeshNode : IDisposable
     }
 
     /// <summary>
-    /// Public view of a connected peer. Stable for the lifetime of the connection — if the
+    /// Public view of a connected peer. Stable for the lifetime of the connection; if the
     /// peer drops and reconnects, the host gets a fresh <see cref="MeshPeer"/> via a new
     /// <see cref="PeerConnected"/> event.
     ///
@@ -1086,9 +1087,9 @@ public class MeshNode : IDisposable
         public byte[] Identity { get; internal set; } = Array.Empty<byte>();
 
         /// <summary>
-        /// The peer's blockable fingerprint — SHA-256(their Curve25519 identity pubkey) truncated
+        /// The peer's blockable fingerprint: SHA-256(their Curve25519 identity pubkey) truncated
         /// to 8 bytes, hex-encoded, 16 characters. Pass to <see cref="MeshNode.BlockPeer"/> to
-        /// block them. Null if we haven't received the peer's identity yet (rare — usually
+        /// block them. Null if we haven't received the peer's identity yet (rare, usually
         /// populated by the time <see cref="MeshNode.PeerConnected"/> fires, but the identity
         /// travels one-shot on UDP so it can arrive slightly later on lossy paths).
         /// </summary>
@@ -1101,7 +1102,7 @@ public class MeshNode : IDisposable
         /// The remote peer's public (NAT-translated) IP and port.
         ///
         /// For relayed peers, this is the remote peer's public endpoint as reported by the
-        /// introducer via mesh-control — not an endpoint we directly observed. May be null if
+        /// introducer via mesh-control, not an endpoint we directly observed. May be null if
         /// the introducer didn't supply one.
         /// </summary>
         public IPEndPoint PublicEndpoint => IsRelayed ? relayedPublicEndpoint : Tunnel?.RemoteEndpoint;
@@ -1114,7 +1115,7 @@ public class MeshNode : IDisposable
         /// both sides are symmetric NAT and direct hole-punching failed).
         public bool IsRelayed { get; }
 
-        // Internal handles. Not part of the public API — used by MeshNode for its own bookkeeping.
+        // Internal handles. Not part of the public API; used by MeshNode for its own bookkeeping.
         internal Tunnel Tunnel { get; }
         internal MeshPeerProxy Proxy { get; }
 

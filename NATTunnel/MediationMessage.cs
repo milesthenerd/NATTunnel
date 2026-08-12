@@ -30,7 +30,7 @@ internal class MediationMessage
     public NATType NATType { get; set; }
     /// <summary>
     /// NAT type of the client over IPv6, delivered in a separate NATTypeResponse once the v6 NAT
-    /// test settles. Nullable — absent when the peer has no v6 (or on older servers). Lets the GUI
+    /// test settles. Nullable, absent when the peer has no v6 (or on older servers). Lets the GUI
     /// show v4 and v6 capabilities independently, since they can differ.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -46,7 +46,7 @@ internal class MediationMessage
     public bool? IcmpCapable { get; set; }
     /// <summary>
     /// RFC 5780 MAPPING behavior (IPv4), delivered on NATTypeResponse by a v2+ mediation server that
-    /// ran the two-IP test. Nullable/additive — absent from a v1 server or before the second-IP probe
+    /// ran the two-IP test. Nullable/additive: absent from a v1 server or before the second-IP probe
     /// settles. AddressDependent-or-worse ⇒ the server-observed endpoint won't work peer-to-peer ⇒
     /// the pair must relay (same handling as Symmetric). See <see cref="MappingBehavior"/>.
     /// </summary>
@@ -71,10 +71,10 @@ internal class MediationMessage
     public string ExternalEndpointString { get; set; }
     /// <summary>
     /// The peer's publicly-observed IPv6 endpoint ("[addr]:port"), as seen by the mediation
-    /// server during the IPv6 NAT test. Additive field — omitted when the peer has no v6 route,
+    /// server during the IPv6 NAT test. Additive field, omitted when the peer has no v6 route,
     /// and ignored by older builds. Lets the server/introducer hand a v6 endpoint to a peer
     /// whose primary (v4) family can't reach the other side. The port reflects whatever a v6
-    /// firewall/NAT actually assigned — never assumed equal to the local port.
+    /// firewall/NAT actually assigned; never assumed equal to the local port.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string EndpointV6String { get; set; }
@@ -91,14 +91,14 @@ internal class MediationMessage
     /// <summary>
     /// The mediation server's own public IPv4 address, advertised in NATTestBegin. Lets a peer that
     /// reached mediation over IPv6 send its NAT test over v4 (to observe its v4 endpoint) without
-    /// needing a DNS A record — required when the peer's mediation config is a bare v6 literal.
+    /// needing a DNS A record: required when the peer's mediation config is a bare v6 literal.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string ServerPublicIPv4 { get; set; }
     /// <summary>
     /// All public IPv4 addresses the mediation server has, advertised in NATTestBegin by a v2+ server.
     /// [0] is the primary (== ServerPublicIPv4); [1], when present, is the SECOND IP the client also
-    /// probes so the server can detect ADDRESS-dependent NAT mapping. Additive — null on a v1 server
+    /// probes so the server can detect ADDRESS-dependent NAT mapping. Additive, null on a v1 server
     /// or a single-IP host; the client simply skips the second-IP probe then.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -120,7 +120,7 @@ internal class MediationMessage
     /// <summary>
     /// Marks a NATTest packet as the SECOND-IP mapping probe (sent to ServerPublicIPv4List[1] to detect
     /// address-dependent mapping), as opposed to a primary/normal NAT test. Lets the server distinguish
-    /// the two even when a peer's PRIMARY mediation IP happens to equal the second IP — without this,
+    /// the two even when a peer's PRIMARY mediation IP happens to equal the second IP; without this,
     /// such a peer's primary v4 test landed on the IP_B socket and was mis-handled as a mapping probe,
     /// leaving its v4 NAT type Unknown. Additive; absent (false) on primary tests and on v1 clients.
     /// </summary>
@@ -187,12 +187,12 @@ internal class MediationMessage
     /// <summary>
     /// When true in MeshConnectionBegin, tells a both-symmetric pair (both IcmpCapable) to attempt a direct
     /// ICMP hole-punch and upgrade off the relay it was just assigned. Relay stays up during the attempt, so
-    /// failure only costs a timeout; success tears down the relay route. Additive — an older peer ignores it.
+    /// failure only costs a timeout; success tears down the relay route. Additive: an older peer ignores it.
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool IcmpUpgrade { get; set; }
     /// <summary>
-    ///Introducer's mesh IP — set in relay MeshConnectionBegin so the receiving peer knows
+    ///Introducer's mesh IP, set in relay MeshConnectionBegin so the receiving peer knows
     ///which WireGuard peer to add the relay route through
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -346,7 +346,7 @@ internal class MediationMessage
 }
 /// <summary>
 ///Different message types sent from the mediation server
-/// NOTE: Do not renumber existing values — the mediation server JS uses matching numbers.
+/// NOTE: Do not renumber existing values: the mediation server JS uses matching numbers.
 /// </summary>
 internal enum MediationMessageType
 {
@@ -391,7 +391,7 @@ internal enum MediationMessageType
     /// </summary>
     HolePunchAttempt,   // 9
     /// <summary>
-    ///(Legacy) Packet sent for NATTunnel data — no longer used
+    ///(Legacy) Packet sent for NATTunnel data, no longer used
     /// </summary>
     NATTunnelData,      // 10
     /// <summary>
@@ -403,7 +403,7 @@ internal enum MediationMessageType
     /// </summary>
     ConnectionComplete, // 12
     /// <summary>
-    ///(Legacy) Packet sent indicating received from peer — no longer used
+    ///(Legacy) Packet sent indicating received from peer, no longer used
     /// </summary>
     ReceivedPeer,       // 13
     /// <summary>
@@ -411,23 +411,23 @@ internal enum MediationMessageType
     /// </summary>
     ConnectionTimeout,  // 14
     /// <summary>
-    ///(Legacy) Public key request — no longer used
+    ///(Legacy) Public key request, no longer used
     /// </summary>
     PublicKeyRequest,   // 15
     /// <summary>
-    ///(Legacy) Public key response — no longer used
+    ///(Legacy) Public key response, no longer used
     /// </summary>
     PublicKeyResponse,  // 16
     /// <summary>
-    ///(Legacy) Symmetric key request — no longer used
+    ///(Legacy) Symmetric key request, no longer used
     /// </summary>
     SymmetricKeyRequest, // 17
     /// <summary>
-    ///(Legacy) Symmetric key response — no longer used
+    ///(Legacy) Symmetric key response, no longer used
     /// </summary>
     SymmetricKeyResponse, // 18
     /// <summary>
-    ///(Legacy) Symmetric key confirm — no longer used
+    ///(Legacy) Symmetric key confirm, no longer used
     /// </summary>
     SymmetricKeyConfirm, // 19
     /// <summary>
@@ -439,7 +439,7 @@ internal enum MediationMessageType
     /// </summary>
     WireGuardPublicKeyHash, // 21
     /// <summary>
-    ///(Legacy) Server registration — no longer used
+    ///(Legacy) Server registration, no longer used
     /// </summary>
     ServerRegister,     // 22
     /// <summary>
@@ -479,7 +479,7 @@ internal enum MediationMessageType
     /// </summary>
     MeshHeartbeat,      // 31
     /// <summary>
-    ///Response to MeshHeartbeat — contains active WireGuard tunnel list
+    ///Response to MeshHeartbeat: contains active WireGuard tunnel list
     /// </summary>
     MeshHeartbeatAck,   // 32
     /// <summary>
@@ -553,26 +553,26 @@ public enum NATType
 }
 
 /// <summary>
-/// RFC 5780 MAPPING behavior — does the NAT's external (ip:port) allocation change per destination?
+/// RFC 5780 MAPPING behavior: does the NAT's external (ip:port) allocation change per destination?
 /// Detected via the two-IP NAT test. Values mirror the mediation server's MappingBehaviors enum.
 /// AddressDependent-or-worse means the server-observed endpoint is wrong for other peers → relay.
 /// </summary>
 public enum MappingBehavior
 {
-    EndpointIndependent = 0,  // same external port to any destination — advertised endpoint works P2P
-    AddressDependent = 1,     // consistent across ports of an IP but differs across IPs — needs relay
-    AddressPortDependent = 2, // differs per (ip,port) = classic symmetric — needs relay
+    EndpointIndependent = 0,  // same external port to any destination, advertised endpoint works P2P
+    AddressDependent = 1,     // consistent across ports of an IP but differs across IPs, needs relay
+    AddressPortDependent = 2, // differs per (ip,port) = classic symmetric, needs relay
     Unknown = -1
 }
 
 /// <summary>
-/// RFC 5780 FILTERING behavior — does the NAT accept inbound from an address/port it hasn't sent to?
+/// RFC 5780 FILTERING behavior: does the NAT accept inbound from an address/port it hasn't sent to?
 /// Values mirror the mediation server's FilteringBehaviors enum.
 /// </summary>
 public enum FilteringBehavior
 {
     EndpointIndependent = 0,  // full cone
     AddressDependent = 1,     // accepts from an IP it has sent to (any port)
-    AddressPortDependent = 2, // port-restricted — only the exact ip:port contacted
+    AddressPortDependent = 2, // port-restricted, only the exact ip:port contacted
     Unknown = -1
 }

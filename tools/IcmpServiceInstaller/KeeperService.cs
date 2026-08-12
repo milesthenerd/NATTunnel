@@ -16,8 +16,8 @@ namespace NATTunnel.IcmpServiceInstaller;
 ///      (with our DACL) never goes away. Demand-start would otherwise unload it when the last handle closes.
 ///   2. Applies the Users DACL once the driver is up.
 ///
-/// SECURITY: while this runs, any local user can capture and inject packets via WinDivert. That is the point —
-/// it is what unprivileged embedded hosts need — but it is a real, permanent widening of the machine's attack
+/// SECURITY: while this runs, any local user can capture and inject packets via WinDivert. That is the point:
+/// it is what unprivileged embedded hosts need, but it is a real, permanent widening of the machine's attack
 /// surface. Uninstall it when unprivileged ICMP is no longer wanted.
 /// </summary>
 [SupportedOSPlatform("windows")]
