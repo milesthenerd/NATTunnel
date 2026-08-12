@@ -23,8 +23,8 @@ mkdir -p "$STAGE"
 dotnet publish "$REPO_ROOT/NATTunnelCLI" -p:PublishProfile=$RID
 dotnet publish "$REPO_ROOT/NATTunnelGUI" -p:PublishProfile=$RID
 
-cp "$REPO_ROOT/NATTunnelCLI/bin/Publish/$RID/"* "$STAGE/"
-cp "$REPO_ROOT/NATTunnelGUI/bin/Publish/$RID/"* "$STAGE/"
+find "$REPO_ROOT/NATTunnelCLI/bin/Publish/$RID/" -maxdepth 1 -type f -exec cp {} "$STAGE/" \;
+find "$REPO_ROOT/NATTunnelGUI/bin/Publish/$RID/" -maxdepth 1 -type f -exec cp {} "$STAGE/" \;
 
 cp "$SCRIPT_DIR/nattunnel.service" "$STAGE/"
 cp "$SCRIPT_DIR/nattunnel.desktop" "$STAGE/"
