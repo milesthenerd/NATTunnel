@@ -11,7 +11,7 @@ namespace NATTunnel;
 /// <summary>
 /// UDP proxy that intercepts WireGuard traffic and routes it through the NAT hole-punched socket
 /// Now supports multiple peers with unique localhost ports
-/// Inbound: Tunnel socket receives WireGuard packets → forwards to localhost:51820
+/// Inbound: Tunnel socket receives WireGuard packets → forwards to localhost on the WireGuard listen port
 /// Outbound: Listens on multiple localhost ports (one per peer) → routes via tunnel socket
 /// </summary>
 internal class WireGuardUdpProxy : IDisposable
@@ -24,6 +24,7 @@ internal class WireGuardUdpProxy : IDisposable
     private bool disposed;
     private readonly object proxyLock = new object();
     private readonly object tunnelSocketLock = new object();
+    private readonly int wireGuardPort;
 
     // Callback to notify when a peer is active
     public Action<IPAddress> OnPeerActivity { get; set; }
@@ -45,9 +46,10 @@ internal class WireGuardUdpProxy : IDisposable
     private readonly object pendingLock = new object();
     private const int MaxPendingPerEndpoint = 16;
 
-    public WireGuardUdpProxy(UdpClient holePunchedSocket)
+    public WireGuardUdpProxy(UdpClient holePunchedSocket, int wireGuardPort = 51820)
     {
         this.tunnelSocket = holePunchedSocket;
+        this.wireGuardPort = wireGuardPort;
         this.peerListeners = new Dictionary<int, PeerProxyListener>();
         this.peerEndpointToPort = new Dictionary<IPEndPoint, int>();
         this.tunnelIpToPeerEndpoint = new Dictionary<IPAddress, IPEndPoint>();
@@ -66,7 +68,7 @@ internal class WireGuardUdpProxy : IDisposable
                 $"Cannot bind WireGuard proxy port 51821/UDP, another instance may already be running. ({ex.Message})", ex);
         }
         wireguardListener.Client.ReceiveBufferSize = 128000;
-        // Same poisoning risk as the per-peer listeners: this socket also sends to 51820, so a
+        // Same poisoning risk as the per-peer listeners: this socket also sends to the WireGuard listen port, so a
         // port-unreachable would otherwise fault its next receive. (inboundForwarder aliases this
         // socket, so it's covered too.) See SocketUtils.DisableUdpConnReset.
         SocketUtils.DisableUdpConnReset(wireguardListener);
@@ -114,7 +116,7 @@ internal class WireGuardUdpProxy : IDisposable
             // Create dedicated listener for this peer if it doesn't exist
             if (!peerListeners.ContainsKey(proxyPort))
             {
-                var listener = new PeerProxyListener(proxyPort, peerEndpoint, socketToUse, tunnelSocketLock, icmpSend);
+                var listener = new PeerProxyListener(proxyPort, peerEndpoint, socketToUse, tunnelSocketLock, icmpSend, wireGuardPort);
                 peerListeners[proxyPort] = listener;
             }
             else
@@ -321,7 +323,7 @@ internal class WireGuardUdpProxy : IDisposable
             {
                 if (inboundForwarder != null)
                 {
-                    inboundForwarder.Send(packet, packet.Length, new IPEndPoint(IPAddress.Loopback, 51820));
+                    inboundForwarder.Send(packet, packet.Length, new IPEndPoint(IPAddress.Loopback, wireGuardPort));
                 }
             }
         }
@@ -393,6 +395,7 @@ internal class PeerProxyListener : IDisposable
     // (icmpSend) instead of the UDP tunnelSocket. Null = the normal UDP path. This is what makes ICMP a
     // true WireGuard ENCAPSULATOR in daemon mode: WG runs over ICMP exactly as it runs over UDP.
     private readonly Action<byte[]> icmpSend;
+    private readonly int wireGuardPort;
 
     /// <summary>
     /// Lifetime count of datagrams WireGuard-NT has handed to a peer proxy listener (i.e. WG's OUTBOUND
@@ -402,9 +405,10 @@ internal class PeerProxyListener : IDisposable
     /// </summary>
     internal static long WgToProxyPackets;
 
-    public PeerProxyListener(int proxyPort, IPEndPoint peerEndpoint, UdpClient tunnelSocket, object tunnelSocketLock, Action<byte[]> icmpSend = null)
+    public PeerProxyListener(int proxyPort, IPEndPoint peerEndpoint, UdpClient tunnelSocket, object tunnelSocketLock, Action<byte[]> icmpSend = null, int wireGuardPort = 51820)
     {
         this.proxyPort = proxyPort;
+        this.wireGuardPort = wireGuardPort;
         this.peerEndpoint = peerEndpoint;
         this.tunnelSocket = tunnelSocket;
         this.tunnelSocketLock = tunnelSocketLock;
@@ -414,7 +418,7 @@ internal class PeerProxyListener : IDisposable
         // Create listener for this specific port
         listener = new UdpClient(new IPEndPoint(IPAddress.Loopback, proxyPort));
         listener.Client.ReceiveBufferSize = 128000;
-        // Without this, a single ICMP port-unreachable (e.g. WireGuard-NT not yet listening on 51820)
+        // Without this, a single ICMP port-unreachable (e.g. WireGuard-NT not yet listening on the WireGuard listen port)
         // permanently kills this listener's receive loop. See SocketUtils.DisableUdpConnReset.
         SocketUtils.DisableUdpConnReset(listener);
 
@@ -447,7 +451,7 @@ internal class PeerProxyListener : IDisposable
     {
         try
         {
-            listener.Send(packet, packet.Length, new IPEndPoint(IPAddress.Loopback, 51820));
+            listener.Send(packet, packet.Length, new IPEndPoint(IPAddress.Loopback, wireGuardPort));
         }
         catch (Exception ex)
         {
@@ -463,7 +467,7 @@ internal class PeerProxyListener : IDisposable
             {
                 // A receive fault must NOT kill this loop. This await used to sit outside any handler, so one
                 // transient socket error (e.g. a UDP ConnectionReset from an ICMP port-unreachable when nothing
-                // was listening on 51820 yet) exited the loop permanently and the peer's proxy went silently
+                // was listening on the WireGuard listen port yet) exited the loop permanently and the peer's proxy went silently
                 // deaf. Log and keep serving.
                 UdpReceiveResult result;
                 try

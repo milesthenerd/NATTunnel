@@ -193,6 +193,24 @@ public static class Program
                             var rawUrl = context.Request.RawUrl;
                             var method = context.Request.HttpMethod;
 
+                            // BROWSER GUARD. This endpoint is loopback-only and unauthenticated, so any local
+                            // process can drive it. That includes a web page: a site the user visits can issue
+                            // cross-origin requests to http://localhost:51889/ from JavaScript, which would let
+                            // it read NetworkSecret from GET /config or fire POST /disconnect.
+                            //
+                            // Browsers always attach Origin to such requests; our own GUI client never does. So
+                            // rejecting any request that carries Origin closes the drive-by web vector without
+                            // touching legitimate clients. It does NOT authenticate other local processes: that
+                            // needs a real shared-token scheme, which is still open.
+                            string origin = context.Request.Headers["Origin"];
+                            if (!string.IsNullOrEmpty(origin))
+                            {
+                                Log($"[Mesh] Rejected control request from browser origin '{origin}' ({method} {rawUrl})");
+                                context.Response.StatusCode = 403;
+                                context.Response.Close();
+                                continue;
+                            }
+
                             if (method == "GET" && rawUrl == "/status")
                             {
                                 var meshState = meshStateProvider();
@@ -563,8 +581,11 @@ public static class Program
             wireguardTunnel.SetClientIPAndRestart(meshIP, 16);
             Log($"[Mesh] WireGuard tunnel initialized with IP {meshIP}/16");
 
-            // Initialize UDP proxy for mesh mode
-            udpProxy = new WireGuardUdpProxy(udpClient);
+            // Initialize UDP proxy for mesh mode. It MUST forward to the same port the tunnel wrote into the
+            // config: WireGuardTunnel picks that port (usually 51820, next free one if taken), and a mismatch
+            // means the proxy sends where the driver is not listening, i.e. a tunnel that connects and moves
+            // no data.
+            udpProxy = new WireGuardUdpProxy(udpClient, wireguardTunnel.WireGuardListenPort);
             wireguardTunnel.SetUdpProxy(udpProxy);
 
             // Connect to mediation, perform NAT detection, and join mesh network.

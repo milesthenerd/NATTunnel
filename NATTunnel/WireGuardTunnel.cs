@@ -161,6 +161,11 @@ namespace NATTunnel
 
                 Program.Log(LogLevel.Debug, "Generating/updating WireGuard config...");
 
+                // MUST happen before the config is written: the port we pick here is the one that goes into
+                // ListenPort, and the same value has to reach the UDP proxy. One source of truth, or the proxy
+                // forwards to a port the driver is not listening on and the tunnel goes silently dead.
+                WireGuardListenPort = SelectWireGuardPort();
+
                 // Use placeholder IP until mesh mode assigns the real mesh IP
                 string interfaceAddress = "10.5.0.254/24";
 
@@ -170,15 +175,16 @@ namespace NATTunnel
                     privateKeyBase64,
                     interfaceName,
                     configFilePath,
-                    interfaceAddress);
+                    interfaceAddress,
+                    WireGuardListenPort);
 
                 Program.Log(LogLevel.Debug, $"WireGuard config: {configFilePath}");
-                Program.Log(LogLevel.Debug, $"WireGuard will listen on port: 51820 (localhost only)");
+                Program.Log(LogLevel.Debug, $"WireGuard will listen on port: {WireGuardListenPort} (localhost only)");
 
                 // Initialize peer manager
                 Program.Log(LogLevel.Debug, "Initializing peer manager...");
                 var baseAddress = IPAddress.Parse("10.5.0.0");
-                peerManager = new WireGuardPeerManager(configFilePath, baseAddress, 51820);
+                peerManager = new WireGuardPeerManager(configFilePath, baseAddress);
 
                 // Initialize the tunnel (skip in debug mode or if already running as service)
                 if (!debugMode && !isRunningAsService)
@@ -337,7 +343,7 @@ namespace NATTunnel
 
                     // Start UDP proxy to forward WireGuard traffic bidirectionally
                     Program.Log(LogLevel.Debug, "Starting WireGuard UDP proxy...");
-                    udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
+                    udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient(), WireGuardListenPort);
                 }
                 else
                 {
@@ -426,7 +432,7 @@ namespace NATTunnel
                 tunnelStarted = true;
                 Program.Log(LogLevel.Debug, "   WireGuard-NT tunnel initialized successfully");
                 Program.Log(LogLevel.Debug, "   All WireGuard crypto is handled by the kernel driver");
-                Program.Log(LogLevel.Debug, "   UDP proxy bridges WireGuard (localhost:51820) with NAT-traversed peers");
+                Program.Log(LogLevel.Debug, $"   UDP proxy bridges WireGuard (localhost:{WireGuardListenPort}) with NAT-traversed peers");
             }
             catch (Exception ex)
             {
@@ -434,6 +440,99 @@ namespace NATTunnel
                 Program.Log(LogLevel.Debug, $"Stack trace: {ex.StackTrace}");
                 throw;
             }
+        }
+
+        /// <summary>The UDP port WireGuard-NT listens on, chosen at startup. Loopback-only, so it can float.</summary>
+        public int WireGuardListenPort { get; private set; } = DefaultWireGuardPort;
+
+        internal const int DefaultWireGuardPort = 51820;
+
+        /// <summary>
+        /// Describe whatever already holds <paramref name="port"/>, or null if it looks free.
+        ///
+        /// We never bind this port ourselves: it goes into the config and the DRIVER binds it. So a conflict
+        /// produces no exception on our side, just a tunnel that hands off packets and never handshakes. That
+        /// is why this check exists at all.
+        ///
+        /// Two checks, because neither alone is sufficient (both verified experimentally):
+        ///   1. The OS listener table. This is the reliable one: it lists every UDP binding whatever address it
+        ///      used. A bind probe alone MISSES a holder bound to a specific interface, since Windows lets
+        ///      0.0.0.0 bind alongside it, and Tailscale (the software that caused this bug in practice) binds
+        ///      its own interface address.
+        ///   2. A bind probe on 0.0.0.0, as a backstop for anything the table doesn't surface. Loopback would be
+        ///      the wrong address to probe despite the port being "localhost only": a 0.0.0.0 holder does not
+        ///      block a later loopback bind, so that check would pass while the port is genuinely taken.
+        ///
+        /// Advisory only: a race between this check and the driver's bind is possible. The conflicts that happen
+        /// in practice are steady-state (Tailscale, another WireGuard, a stuck previous instance), not races.
+        /// </summary>
+        private static string DescribePortConflict(int port)
+        {
+            try
+            {
+                foreach (var ep in System.Net.NetworkInformation.IPGlobalProperties
+                             .GetIPGlobalProperties().GetActiveUdpListeners())
+                {
+                    if (ep.Port == port) return $"an existing UDP listener on {ep}";
+                }
+            }
+            catch (Exception ex)
+            {
+                Program.Log(LogLevel.Debug, $"Could not enumerate UDP listeners: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            try
+            {
+                using var probe = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Any, port));
+            }
+            catch (System.Net.Sockets.SocketException ex) { return $"bind refused ({ex.SocketErrorCode})"; }
+            catch (Exception ex)
+            {
+                // Never let a diagnostic probe break startup.
+                Program.Log(LogLevel.Debug, $"Could not probe UDP port {port}: {ex.GetType().Name}: {ex.Message}");
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Pick the UDP port for WireGuard-NT: the well-known 51820 when it is free, otherwise the next free
+        /// port above it. Keeping the default when possible means logs, netstat output, and docs stay accurate
+        /// for the normal case; we only deviate when something genuinely holds the port.
+        ///
+        /// Safe to move because the port is loopback-only: the UDP proxy forwards to 127.0.0.1 on it and nothing
+        /// external ever contacts it. The chosen value MUST be the one written into the config AND the one the
+        /// proxy sends to; if those diverge the tunnel goes silently dead, which is the exact failure this whole
+        /// change is meant to prevent.
+        /// </summary>
+        private static int SelectWireGuardPort()
+        {
+            const int maxAttempts = 32;
+            for (int port = DefaultWireGuardPort; port < DefaultWireGuardPort + maxAttempts; port++)
+            {
+                // 51821 and 51822+ belong to the UDP proxy (inbound forwarder + per-peer listeners); never
+                // hand WireGuard a port the proxy is going to want.
+                if (port == 51821 || port == 51822) continue;
+
+                string conflict = DescribePortConflict(port);
+                if (conflict == null)
+                {
+                    if (port != DefaultWireGuardPort)
+                        Program.Log(LogLevel.Info,
+                            $"UDP port {DefaultWireGuardPort} is in use, so WireGuard will listen on {port} instead.");
+                    return port;
+                }
+
+                Program.Log(LogLevel.Debug, $"UDP port {port} unavailable for WireGuard ({conflict}).");
+            }
+
+            // Nothing free in the scan range. Fall back to the default and warn: the driver will fail to bind and
+            // the tunnel will connect but never handshake, so name the symptom now rather than leave it silent.
+            Program.Log(LogLevel.Error,
+                $"No free UDP port found in {DefaultWireGuardPort}-{DefaultWireGuardPort + maxAttempts - 1} for " +
+                "WireGuard. Falling back to the default, but the tunnel will likely report connected and never " +
+                $"complete a handshake. Confirm with `netstat -ano -p UDP | findstr {DefaultWireGuardPort}`, or " +
+                "check `wg show dump` for rx-bytes=0 with tx-bytes climbing.");
+            return DefaultWireGuardPort;
         }
 
         private bool IsElevated()
@@ -549,7 +648,7 @@ namespace NATTunnel
                 // [Interface] section
                 config.AppendLine("[Interface]");
                 config.AppendLine($"PrivateKey = {Convert.ToBase64String(privateKey)}");
-                config.AppendLine("ListenPort = 51820");
+                config.AppendLine($"ListenPort = {WireGuardListenPort}");
 
                 // Use assigned IP if available (for clients), otherwise use role-based default
                 string assignedIp;
@@ -1022,7 +1121,7 @@ namespace NATTunnel
             // Update UDP proxy to use new tunnel's UDP client
             if (udpProxy != null)
             {
-                udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient());
+                udpProxy = new WireGuardUdpProxy(tunnel.GetUdpClient(), WireGuardListenPort);
             }
 
             Program.Log(LogLevel.Debug, "[WireGuardTunnel] Tunnel instance recreated successfully");

@@ -1173,6 +1173,12 @@ internal class MeshProtocolEngine
                 // SslStream doesn't support DataAvailable, so we use timeout-based polling instead.
                 stream.ReadTimeout = 100;
 
+                // NOTE: these are cleared, not disposed. An ICMP-backed tunnel here would leak its capture handle
+                // and threads, the same way the disconnect path did before it was fixed. Not fixed here because
+                // this runs on every mediation reconnect and background tasks may still hold these Tunnel
+                // objects (see "preserves closure references" below); disposing them mid-flight is a behaviour
+                // change that needs its own testing, unlike the disconnect path where teardown is the intent.
+                //
                 // Clear per-connect tracking state (preserves closure references for background tasks)
                 activePeerTunnels.Clear();
                 pendingConnectionRequests.Clear();
@@ -2587,11 +2593,26 @@ internal class MeshProtocolEngine
                     // Remove all WireGuard peers (keeps adapter alive)
                     host.RemoveAllPeers();
 
+                    // Dispose the tunnels BEFORE dropping the references, or an ICMP-backed one leaks: unlike a
+                    // UDP tunnel (whose shared socket is owned elsewhere and which goes inert once its WireGuard
+                    // peer is removed), an ICMP tunnel owns a capture handle plus a send thread and a capture
+                    // thread. Clearing the dictionary alone leaves those running: the daemon keeps injecting
+                    // ICMP at the peer and holds the WinDivert handle open after the user pressed Disconnect.
+                    // Tunnel.Dispose unsubscribes and disposes the transport for us.
+                    foreach (var staleTunnel in activePeerTunnels.Values.Distinct().ToList())
+                    {
+                        try { staleTunnel?.Dispose(); } catch { }
+                    }
+
                     // Clear all tracking state (use Clear() to preserve closure references)
                     activePeerTunnels.Clear();
                     pendingConnectionRequests.Clear();
                     lastStaleWarningAt.Clear();
                     activeConnectionTunnels.Clear();
+                    // An ICMP punch in flight (up to 25s) has no tunnel yet, so the disposal loop above cannot
+                    // see it. Clearing the set lets the peer be re-punched after a reconnect; leaving it would
+                    // make this peer permanently ineligible for the ICMP tier for the life of the process.
+                    pendingIcmpAttempts.Clear();
                     connectionIDToPeerID.Clear();
                     peerMeshIPs.Clear();
                     completedTunnelMeshIPs.Clear();
@@ -3698,9 +3719,12 @@ internal class MeshProtocolEngine
                     // only ever does UDP punches and cannot work for a both-symmetric pair. The pending v6 was
                     // worth waiting for (it could have become punchable); it is not worth discarding a known v4
                     // verdict over.
+                    // Per-FAMILY, unlike the introducer's two call sites: a verdict that is conclusive on v4 must
+                    // not be discarded because v6 is still pending (that is the case that produced the doomed
+                    // fall-through this branch exists to prevent).
                     bool knownBothSymmetric =
-                        (v4BothKnown && ourV4 == NATType.Symmetric && peerV4 == NATType.Symmetric) ||
-                        (v6BothKnown && ourV6 == NATType.Symmetric && peerV6 == NATType.Symmetric);
+                        (v4BothKnown && IsBothSymmetric(ourV4, peerV4)) ||
+                        (v6BothKnown && IsBothSymmetric(ourV6, peerV6));
                     if (knownBothSymmetric)
                     {
                         context.Log(LogLevel.Debug, $"[Mesh] Defer budget spent for {targetPeerID} and every KNOWN shared family is both-symmetric " +
@@ -3781,6 +3805,35 @@ internal class MeshProtocolEngine
     /// applies, so ICMP is purely additive and never strands a pair that would otherwise relay.
     /// </summary>
     /// <summary>
+    /// The both-symmetric rule: neither peer can be punched to directly, so the pair needs the ICMP tier or a
+    /// relay. Three call sites decide this independently (a peer choosing its own outbound path, the introducer
+    /// brokering a new pair, and the introducer repairing a dead one) and their surrounding control flow is
+    /// genuinely different, but the RULE itself must not drift between them.
+    ///
+    /// Unknown is deliberately not Symmetric. A pair whose types are still being classified must be deferred,
+    /// not treated as punchable: reading Unknown as not-both-symmetric once sent such pairs into a 256-probe UDP
+    /// punch that cannot work and was never re-promoted to relay.
+    /// </summary>
+    private static bool IsBothSymmetric(NATType a, NATType b) =>
+        a == NATType.Symmetric && b == NATType.Symmetric;
+
+    /// <summary>
+    /// Same-LAN exception to <see cref="IsBothSymmetric"/>: two peers behind ONE NAT share a public IP and can
+    /// reach each other over the LAN directly, so they must not be relayed however symmetric the NAT is.
+    ///
+    /// Requires LAN info for both sides, not just matching public IPs: without a local address for each there is
+    /// nothing to connect to on the LAN, and carrier-grade NAT can make unrelated peers share a public IP. The
+    /// callers source that info differently (introduce reads LocalIP off the message, repair looks it up in
+    /// peerLanByMeshIP), so they pass the result of their own lookup rather than the data.
+    /// </summary>
+    private static bool IsSameLanPair(string endpointA, string endpointB, bool haveLanA, bool haveLanB)
+    {
+        string publicA = EndpointUtils.GetHost(endpointA);
+        string publicB = EndpointUtils.GetHost(endpointB);
+        return !string.IsNullOrEmpty(publicA) && publicA == publicB && haveLanA && haveLanB;
+    }
+
+    /// <summary>
     /// Whether the mesh has NO introducer, i.e. direct peer-to-peer connection is the sanctioned path.
     /// The server is authoritative: IntroducerPeerID=null means no introducer is POSSIBLE (all-symmetric mesh),
     /// not merely "none yet"; do not re-derive this from peer NAT types.
@@ -3848,7 +3901,11 @@ internal class MeshProtocolEngine
 
         System.Threading.Tasks.Task.Run(async () =>
         {
-            var transport = new Icmp.IcmpTransport(remoteEp, rxLabelP, punchTimeout: TimeSpan.FromSeconds(25));
+            // Per-pair session id. ICMP has no ports, so the capture can only filter on source IP: two peers
+            // behind ONE public IP would otherwise share a capture, cross-harvest slots, and deliver each
+            // other's frames upward. Both ends derive this identically from the peer-ID pair.
+            uint icmpSession = Icmp.IcmpTransport.DeriveSession(peerID.ToString(), remotePeerID);
+            var transport = new Icmp.IcmpTransport(remoteEp, rxLabelP, icmpSession, punchTimeout: TimeSpan.FromSeconds(25));
             bool punched = false;
             try
             {
@@ -3865,6 +3922,17 @@ internal class MeshProtocolEngine
                     context.Log(LogLevel.Debug, $"[Mesh][ICMP] Capture unavailable locally: ICMP tier unusable; relay will handle {remotePeerID}");
                 else
                     context.Log(LogLevel.Debug, $"[Mesh][ICMP] Punch to {remotePeerID} timed out, falling back to relay");
+                transport.Dispose();
+                lock (meshLock) { pendingIcmpAttempts.Remove(remotePeerID); }
+                return;
+            }
+
+            // The punch takes up to 25s, so the user may have hit Disconnect while it ran. Building the tunnel
+            // now would resurrect a peer into freshly cleared state and leave its capture threads running past
+            // the disconnect.
+            if (context.DisconnectRequested || context.ShutdownRequested)
+            {
+                context.Log(LogLevel.Debug, $"[Mesh][ICMP] Punch to {remotePeerID} landed after disconnect, discarding");
                 transport.Dispose();
                 lock (meshLock) { pendingIcmpAttempts.Remove(remotePeerID); }
                 return;
@@ -3918,6 +3986,10 @@ internal class MeshProtocolEngine
 
             // Punch landed: drop the relay and let the direct tunnel take over. Remove the relay route before
             // releasing the relay so WireGuard stops steering through the gateway first.
+            //
+            // DELIBERATELY LOCAL: the introducer is NOT told, so the pair stays in its relayedPairs and its
+            // repair loop re-asserts the relay if this ICMP tunnel later dies. That is the ONLY fallback path;
+            // notifying the introducer to drop the pair here would silently remove it.
             if (upgradeFromRelay && !string.IsNullOrEmpty(remoteMeshIP))
             {
                 try
@@ -4962,15 +5034,12 @@ internal class MeshProtocolEngine
                 // bothHaveV6, which left symmetric-over-v6 pairs looping in re-introduce forever.)
                 bool bothHaveV6 = !string.IsNullOrEmpty(msg.EndpointV6String) &&
                                   !string.IsNullOrEmpty(existingPeerEndpointV6);
-                bool bothSymmetric = msg.NATType == NATType.Symmetric && (NATType)existingPeerNatType == NATType.Symmetric;
+                bool bothSymmetric = IsBothSymmetric(msg.NATType, (NATType)existingPeerNatType);
 
-                // Same-LAN short-circuit for symmetric pairs.
-                string msgPublicIP = EndpointUtils.GetHost(msg.EndpointString);
-                string exPublicIP = EndpointUtils.GetHost(existingPeerEndpoint);
-                bool sameLan = !string.IsNullOrEmpty(msgPublicIP) &&
-                               msgPublicIP == exPublicIP &&
-                               !string.IsNullOrEmpty(msg.LocalIP) &&
-                               !string.IsNullOrEmpty(existingPeerLocalIP);
+                // Same-LAN short-circuit for symmetric pairs. LAN info comes off the introduce message here.
+                bool sameLan = IsSameLanPair(msg.EndpointString, existingPeerEndpoint,
+                                             !string.IsNullOrEmpty(msg.LocalIP),
+                                             !string.IsNullOrEmpty(existingPeerLocalIP));
 
                 // Don't emit ANY ConnectionBegin for a non-same-LAN pair while EITHER side's NAT type is
                 // still Unknown. bothSymmetric (the relay gate) is evaluated once here from a snapshot of
@@ -6519,7 +6588,9 @@ internal class MeshProtocolEngine
                         continue;
                     }
 
-                    // For relayed pairs, re-assert the existing relay assignment.
+                    // For relayed pairs, re-assert the existing relay assignment. This also covers pairs that
+                    // upgraded to a direct ICMP tunnel: the upgrade is peer-local so they stay in relayedPairs,
+                    // and this is what returns them to relay when that tunnel dies.
                     if (relayedPairs.Contains(pairKey))
                     {
                         if (!completedTunnelMeshIPs.Contains(ipA) || !completedTunnelMeshIPs.Contains(ipB))
@@ -6674,16 +6745,14 @@ internal class MeshProtocolEngine
                     bool repairBothHaveV6 = !string.IsNullOrEmpty(infoA.endpointV6) &&
                                             !string.IsNullOrEmpty(infoB.endpointV6);
 
-                    bool bothSymmetric =
-                        infoA.natType == NATType.Symmetric && infoB.natType == NATType.Symmetric;
-                    // Same-LAN exception: skip relay if both endpoints share a public IP and
-                    // we have LAN info for both. Direct LAN connection should work even when
-                    // both are symmetric.
-                    string aPublicIP = EndpointUtils.GetHost(infoA.endpoint);
-                    string bPublicIP = EndpointUtils.GetHost(infoB.endpoint);
+                    bool bothSymmetric = IsBothSymmetric(infoA.natType, infoB.natType);
+                    // Same-LAN exception: a direct LAN connection works even when both are symmetric. LAN info
+                    // comes from the cached map here; the peers are off mediation by repair time. Kept as a
+                    // named value because the re-introduce path below also uses it to substitute LAN endpoints.
                     bool sameLanPair = bothSymmetric &&
-                        !string.IsNullOrEmpty(aPublicIP) && aPublicIP == bPublicIP &&
-                        peerLanByMeshIP.ContainsKey(ipA) && peerLanByMeshIP.ContainsKey(ipB);
+                        IsSameLanPair(infoA.endpoint, infoB.endpoint,
+                                      peerLanByMeshIP.ContainsKey(ipA),
+                                      peerLanByMeshIP.ContainsKey(ipB));
                     if (sameLanPair) bothSymmetric = false;
 
                     // No mediation-escalation branch. In steady state the target peers are

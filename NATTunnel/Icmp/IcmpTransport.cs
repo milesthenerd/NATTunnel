@@ -44,7 +44,12 @@ internal sealed class IcmpTransport : IDisposable
     private const byte ICMP_ECHO_REQUEST = 8;
     private const byte ICMP_ECHO_REPLY = 0;   // reverse-ACK is a type-0 reply, matching icmp-channel.py
     private const ushort PING_ID = 0x4a01;    // fixed id the pinger uses post-punch (like a real ping's identifier)
-    private const int DATA_HEADER = 3 + 4; // MAGIC(3) + uint32 frame id
+    private const int DATA_HEADER = 3 + 4 + 4; // MAGIC(3) + uint32 session + uint32 frame id
+    private const int SESSION_OFFSET = 3;      // where the session id sits inside a data payload
+    private const int FRAME_OFFSET = 3 + 4;    // where the frame id sits inside a data payload
+    // Length of a punch tag plus its trailing session id. Punch tags carry the session too: without it, two
+    // peers behind ONE public IP punch into each other's session (see _session).
+    private const int TAG_LEN = 7 + 4;
     // Hearing the peer this many times (any tagged packet) is enough to declare the hole open, even with no
     // explicit ACK; the two sides' punch windows don't always overlap cleanly.
     private const int HEARD_TO_PUNCH = 8;
@@ -62,6 +67,19 @@ internal sealed class IcmpTransport : IDisposable
     // roles drain data as matched type-0 replies, the only shape this channel reliably delivers. A wrong role is
     // merely suboptimal, not fatal.
     private readonly bool _isPinger;
+    /// <summary>
+    /// Per-pair discriminator carried in every frame and punch tag.
+    ///
+    /// ICMP has no port field, so the capture can only filter on source IP. Two peers behind ONE public IP
+    /// therefore produce two transports whose capture filters are identical: each sees the other's traffic,
+    /// harvests the other's slots, and (because frame ids are independent counters both starting at 0) delivers
+    /// the other's frames upward, where they fail to decrypt. Both connections die.
+    ///
+    /// Both sides derive the same value from the peer-ID pair (see DeriveSession), so no negotiation is needed;
+    /// frames tagged for another session are dropped at the receive path. Zero means "unset", accepted from any
+    /// session, which keeps a transport constructed without one working for tests.
+    /// </summary>
+    private readonly uint _session;
     private bool _isClient => _isPinger;
     private readonly int _lockIds;          // number of reusable holes to lock onto for the data channel
     private readonly int _rate;             // packets/sec cap (keeps holes warm; scales throughput)
@@ -110,9 +128,28 @@ internal sealed class IcmpTransport : IDisposable
     /// <summary>The peer this transport connects to.</summary>
     public IPEndPoint PeerEndpoint => _peerEndpoint;
 
+    /// <summary>
+    /// Derive the per-pair session id from the two peer IDs. Order-independent (the lexically smaller ID is
+    /// hashed first) so both ends compute the same value with no exchange. Never returns 0, which is reserved
+    /// for "unset".
+    /// </summary>
+    public static uint DeriveSession(string peerIdA, string peerIdB)
+    {
+        bool aFirst = string.CompareOrdinal(peerIdA, peerIdB) <= 0;
+        string first = aFirst ? peerIdA : peerIdB;
+        string second = aFirst ? peerIdB : peerIdA;
+        unchecked
+        {
+            uint h = 2166136261;
+            foreach (char c in first + "|" + second) { h = (h ^ c) * 16777619; }
+            return h == 0 ? 1u : h;
+        }
+    }
+
     public IcmpTransport(
         IPEndPoint peerEndpoint,
         bool isPinger,
+        uint session = 0,
         IIcmpCapture capture = null,
         int lockIds = 16,
         int rate = 1500,
@@ -121,6 +158,7 @@ internal sealed class IcmpTransport : IDisposable
     {
         _peerEndpoint = peerEndpoint ?? throw new ArgumentNullException(nameof(peerEndpoint));
         _peer = peerEndpoint.Address;
+        _session = session;
         _isPinger = isPinger;
         _lockIds = Math.Max(1, lockIds);
         _rate = Math.Max(0, rate);
@@ -556,6 +594,7 @@ internal sealed class IcmpTransport : IDisposable
     private long _wirePkts, _lastWirePkts;                  // raw EmitIcmp calls (actual wire packets, post-fanout)
     private long _txFailures;                               // total EmitIcmp send failures (rate-limits the log)
     private long _rxIcmpError, _lastRxIcmpError;            // inbound ICMP error types (3/11): path rejecting us
+    private long _rxDropForeignSession, _lastRxDropForeignSession; // traffic from another pair sharing our peer's public IP
     private long _lastWgOutPackets;                         // previous PeerProxyListener.WgToProxyPackets (per-window delta)
     // Head-drops forced by TX_QUEUE_MAX. Nonzero under load is EXPECTED and healthy; it is the backpressure
     // signal doing its job. A flat zero while ping inflates means the bound is too high to be biting.
@@ -625,6 +664,16 @@ internal sealed class IcmpTransport : IDisposable
         // carry id=0/seq=0 plus a quoted copy of the offending packet, so feeding them to the slot tracking below
         // poisons the ring with (0,0) and the drain then aims data at a slot that cannot exist. Seen live: a burst
         // of type-3 from the path pinned the fanout to slot=(0,0) and stalled the handshake.
+        // Punch traffic belonging to ANOTHER session behind the same public IP. Rejected before the slot
+        // tracking below, not just at delivery: harvesting the other pair's (id,seq) would aim our replies at
+        // holes their NAT owns, and counting their tags toward HEARD_TO_PUNCH would declare our hole open
+        // against the wrong peer.
+        if (IsForeignSessionTag(payload, REQTAG) || IsForeignSessionTag(payload, ACKTAG))
+        {
+            Interlocked.Increment(ref _rxDropForeignSession);
+            return;
+        }
+
         if (type != ICMP_ECHO_REQUEST && type != ICMP_ECHO_REPLY)
         {
             Interlocked.Increment(ref _rxIcmpError);
@@ -753,7 +802,19 @@ internal sealed class IcmpTransport : IDisposable
         // show magic=True arriving. Frame ids are per-sender, so a true reflection carries the id WE assigned.
         if (payload.Length >= DATA_HEADER && StartsWith(payload, MAGIC))
         {
-            uint frame = (uint)((payload[3] << 24) | (payload[4] << 16) | (payload[5] << 8) | payload[6]);
+            // SESSION GATE. The capture filters on source IP only (ICMP has no ports), so a second peer behind
+            // the SAME public IP lands in this handler too. Its frame ids are an independent counter, so without
+            // this check its frames pass dedup, get delivered upward, and fail to decrypt: both tunnels die.
+            uint session = (uint)((payload[SESSION_OFFSET] << 24) | (payload[SESSION_OFFSET + 1] << 16) |
+                                  (payload[SESSION_OFFSET + 2] << 8) | payload[SESSION_OFFSET + 3]);
+            if (_session != 0 && session != 0 && session != _session)
+            {
+                Interlocked.Increment(ref _rxDropForeignSession);
+                return;
+            }
+
+            uint frame = (uint)((payload[FRAME_OFFSET] << 24) | (payload[FRAME_OFFSET + 1] << 16) |
+                                (payload[FRAME_OFFSET + 2] << 8) | payload[FRAME_OFFSET + 3]);
             int bodyLen = payload.Length - DATA_HEADER;
             if (bodyLen > 0)
             {
@@ -869,6 +930,7 @@ internal sealed class IcmpTransport : IDisposable
         long nonMagic = Interlocked.Read(ref _rxNonMagic); long dNonMagic = nonMagic - _lastRxNonMagic; _lastRxNonMagic = nonMagic;
         long tooShort = Interlocked.Read(ref _rxTooShort); long dTooShort = tooShort - _lastRxTooShort; _lastRxTooShort = tooShort;
         long icmpErr = Interlocked.Read(ref _rxIcmpError); long dIcmpErr = icmpErr - _lastRxIcmpError; _lastRxIcmpError = icmpErr;
+        long foreign = Interlocked.Read(ref _rxDropForeignSession); long dForeign = foreign - _lastRxDropForeignSession; _lastRxDropForeignSession = foreign;
 
         NATTunnel.Program.Log(NATTunnel.LogLevel.Debug,
             $"[ICMP][rx-stats] last5s: type8={d8} type0={d0} req={drq}  total type0={t0}  " +
@@ -876,7 +938,7 @@ internal sealed class IcmpTransport : IDisposable
             $" | slots={_heardReqCount} slotAge={slotAgeMs:F0}ms activeSlot={(useReqSlot ? "req" : "any")}/{activeAgeMs:F0}ms txFrames={dtx} qDepth={_txQueue.Count} qOvfDrop={dQOvf}" +
             $" | drainFull={dFullIters}/{dLoopIters} attempted/s={attemptedPerSec:F0} deliveredType0/s={deliveredType0PerSec:F0} wirePkts/s={wirePktsPerSec:F0}" +
             $" | lockWait={lockWaitUs:F0}us syscall={syscallUs:F0}us per send" +
-            $" | rxDrop refl={dRefl} dup={dDup} nonMagic={dNonMagic} short={dTooShort} icmpErr={dIcmpErr}" +
+            $" | rxDrop refl={dRefl} dup={dDup} nonMagic={dNonMagic} short={dTooShort} icmpErr={dIcmpErr} foreignSession={dForeign}" +
             $" | wgOut/s={wgOutPerSec:F0} punched={_punched}");
     }
 
@@ -944,11 +1006,32 @@ internal sealed class IcmpTransport : IDisposable
     // ---- ICMP packet construction + send ----
 
     /// <summary>Send a tag-only control packet (REQ / ACK): ICMP payload = just the tag bytes.</summary>
+    /// <summary>
+    /// Send a punch tag with the session id appended. The session MUST ride the punch too, not just data
+    /// frames: two peers behind one public IP otherwise punch into each other's session, harvest each other's
+    /// slots, and declare the hole open against the wrong peer before a single data frame is sent.
+    /// </summary>
     private void SendTag(byte type, ushort id, ushort seq, byte[] tag)
     {
-        Span<byte> payload = stackalloc byte[tag.Length];
+        Span<byte> payload = stackalloc byte[tag.Length + 4];
         tag.CopyTo(payload);
+        payload[tag.Length] = (byte)(_session >> 24); payload[tag.Length + 1] = (byte)(_session >> 16);
+        payload[tag.Length + 2] = (byte)(_session >> 8); payload[tag.Length + 3] = (byte)_session;
         EmitIcmp(type, id, seq, payload);
+    }
+
+    /// <summary>
+    /// True if a tagged punch packet belongs to another session. Tags without a trailing session id (an older
+    /// peer, or a transport constructed without one) are accepted, so this cannot break a mixed pair.
+    /// </summary>
+    private bool IsForeignSessionTag(ReadOnlySpan<byte> payload, byte[] tag)
+    {
+        if (_session == 0) return false;
+        int idx = IndexOfTag(payload, tag);
+        if (idx < 0 || idx + tag.Length + 4 > payload.Length) return false;
+        int o = idx + tag.Length;
+        uint session = (uint)((payload[o] << 24) | (payload[o + 1] << 16) | (payload[o + 2] << 8) | payload[o + 3]);
+        return session != 0 && session != _session;
     }
 
     /// <summary>Send a caller data frame of the given ICMP type/id/seq: payload = MAGIC(3)+uint32 frame+bytes.
@@ -958,8 +1041,10 @@ internal sealed class IcmpTransport : IDisposable
     {
         var payload = new byte[DATA_HEADER + data.Length];
         payload[0] = MAGIC[0]; payload[1] = MAGIC[1]; payload[2] = MAGIC[2];
-        payload[3] = (byte)(frame >> 24); payload[4] = (byte)(frame >> 16);
-        payload[5] = (byte)(frame >> 8); payload[6] = (byte)frame;
+        payload[SESSION_OFFSET] = (byte)(_session >> 24); payload[SESSION_OFFSET + 1] = (byte)(_session >> 16);
+        payload[SESSION_OFFSET + 2] = (byte)(_session >> 8); payload[SESSION_OFFSET + 3] = (byte)_session;
+        payload[FRAME_OFFSET] = (byte)(frame >> 24); payload[FRAME_OFFSET + 1] = (byte)(frame >> 16);
+        payload[FRAME_OFFSET + 2] = (byte)(frame >> 8); payload[FRAME_OFFSET + 3] = (byte)frame;
         data.CopyTo(new Span<byte>(payload, DATA_HEADER, data.Length));
         _lastDataTxUtc = DateTime.UtcNow; // we're actively moving data → hold the fast ping rate for ActiveWindow
         EmitIcmp(type, id, seq, payload);
@@ -1111,16 +1196,19 @@ internal sealed class IcmpTransport : IDisposable
         return true;
     }
 
-    private static bool ContainsTag(ReadOnlySpan<byte> buf, byte[] tag)
+    private static bool ContainsTag(ReadOnlySpan<byte> buf, byte[] tag) => IndexOfTag(buf, tag) >= 0;
+
+    /// <summary>Offset of <paramref name="tag"/> within <paramref name="buf"/>, or -1.</summary>
+    private static int IndexOfTag(ReadOnlySpan<byte> buf, byte[] tag)
     {
         int end = buf.Length - tag.Length;
         for (int i = 0; i <= end; i++)
         {
             bool m = true;
             for (int j = 0; j < tag.Length; j++) if (buf[i + j] != tag[j]) { m = false; break; }
-            if (m) return true;
+            if (m) return i;
         }
-        return false;
+        return -1;
     }
 
     public void Dispose()

@@ -59,16 +59,20 @@ internal static class WireGuardConfig
     }
 
     /// <summary>
-    /// Generates WireGuard configuration with ONLY the [Interface] section, no peers
+    /// Generates WireGuard configuration with ONLY the [Interface] section, no peers.
+    ///
+    /// <paramref name="listenPort"/> is chosen by WireGuardTunnel.SelectWireGuardPort and MUST match the port
+    /// the UDP proxy forwards to; if they diverge the driver listens somewhere the proxy never sends, and the
+    /// tunnel reports connected while no data flows.
     /// </summary>
-    public static bool GenerateInterfaceOnlyConfig(string privateKey, string interfaceName, string configPath, string interfaceAddress)
+    public static bool GenerateInterfaceOnlyConfig(string privateKey, string interfaceName, string configPath, string interfaceAddress, int listenPort = 51820)
     {
         try
         {
             var config = new StringBuilder();
             config.AppendLine("[Interface]");
             config.AppendLine($"PrivateKey = {privateKey}");
-            config.AppendLine("ListenPort = 51820");
+            config.AppendLine($"ListenPort = {listenPort}");
             config.AppendLine($"Address = {interfaceAddress}");
             config.AppendLine($"Name = {interfaceName}");
             config.AppendLine();
