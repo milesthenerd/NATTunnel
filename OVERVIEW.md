@@ -34,9 +34,9 @@ The mediation server tells both peers each other's external UDP endpoint, then b
 
 **One symmetric peer**: The symmetric peer opens 256 probe sockets on different local ports and sends from all of them simultaneously. The non-symmetric peer's NAT accepts packets from any source port, so one of the 256 probes will get through. The non-symmetric peer also sprays packets to 100 random destination ports per second to find the symmetric peer's allocated port. This leverages the birthday paradox to drastically reduce connection time.
 
-**Both symmetric**: Direct hole-punching is infeasible across different NATs. In mesh mode, traffic is relayed through another peer's WireGuard tunnel (see "Distributed Relay" below). The exception is same-LAN symmetric pairs — peers behind the same NAT can reach each other on the same LAN without relaying.
+**Both symmetric**: Direct UDP hole-punching is infeasible across multiple symmetric NATs. Such a pair is relayed through another peer's WireGuard tunnel (see "Distributed Relay" below), and then, when both peers can capture raw ICMP, upgraded to a *direct* connection over the ICMP transport (see "ICMP transport" below).
 
-**Same-NAT peers**: If both peers share the same public IP (they're behind the same router), the server detects this and substitutes their LAN IP addresses instead — but only when the *receiving* peer is also on that NAT. External peers continue to receive the external endpoint, so a LAN endpoint is never sent to a peer that cannot reach it. This LAN substitution also applies to symmetric-to-symmetric pairs behind the same NAT, bypassing the relay path.
+**Same-NAT peers**: If both peers share the same public IP (they're behind the same router), the server detects this and substitutes their LAN IP addresses instead. External peers continue to receive the external endpoint, so a LAN endpoint is never sent to a peer that cannot reach it.
 
 ## UDP Proxy
 
@@ -135,6 +135,19 @@ When two symmetric NAT peers can't hole-punch to each other (and they're not sam
 **Health-driven reselection**: Each endpoint of a relayed pair monitors the relay's downstream. If WireGuard goes silent from the remote for `relayHealthTimeout` seconds (default 45s), the endpoint sends a `MeshRelayHealthReport` to the introducer. The introducer scores remaining candidates and switches the assignment if a new candidate is at least `relayReselectMinImprovement` (default 30%) better, subject to a per-pair `relayReselectCooldown` (default 30s). The old relay receives a `MeshRelayAssignment` with `Release=true` and tears down its forwarding state.
 
 **Opt-out**: Operators can toggle `allowRelayThrough` off via Settings. The peer immediately drops its hosted relay routes, advertises `RelayCapable=false` in its next heartbeat, and the introducer reassigns affected pairs to other candidates.
+
+### ICMP transport (direct connection for symmetric↔symmetric)
+
+When both peers can capture raw ICMP, they can establish a **direct** connection that carries WireGuard over ICMP echo packets.
+
+**Why it works**: a symmetric NAT drops unsolicited inbound echo *requests*, but forwards echo *replies* that look like answers to a request the peer recently sent (RFC 5508). So all data travels as type-0 replies addressed onto `(id, seq)` pairs harvested from the peer's inbound requests. Each such pair is a one-time "slot". Both peers continuously send tiny keepalive requests purely to supply the *other* side with slots to reply onto.
+
+**Capability**: the peer advertises `IcmpCapable` at join, true only when a capture backend is available: elevated WinDivert (bundled, no user install), a user-installed Npcap, or `CAP_NET_RAW` on Linux. The tier is offered only when *both* peers are capable.
+
+**Situations where it works**:
+
+- **No introducer possible** (every peer in the mesh is symmetric, so the server returns `IntroducerPeerID=null`): peers attempt a direct ICMP punch straight from discovery. Nobody can broker them, so this is the only path that connects.
+- **An introducer exists**: the pair is relayed *first* so connectivity is immediate, then the introducer sends both peers a `MeshConnectionBegin` with `IcmpUpgrade=true`. On a successful punch each peer tears down its relay route and switches to the direct tunnel and drops the relay. A failed punch costs only a timeout, since the relay keeps carrying traffic otherwise.
 
 ## Embedded Mode
 

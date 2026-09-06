@@ -7,6 +7,8 @@
     <!-- Managed libpcap/Npcap wrapper for the optional NpcapCapture backend (user-installed Npcap = the
          unprivileged Windows ICMP-capture path; SharpPcap itself is a wrapper, no driver bundled). -->
     <PackageReference Include="SharpPcap" Version="6.3.1" />
+    <PackageReference Include="System.Net.Http" Version="4.3.4" />
+    <PackageReference Include="System.Text.RegularExpressions" Version="4.3.1" />
   </ItemGroup>
 
   <!-- Always copied to this library's output.-->
@@ -18,8 +20,7 @@
   </ItemGroup>
 
   <!-- WinDivert (LGPLv3, unmodified official v2.2.2 binaries): the ICMP-transport capture driver on Windows.
-       Loaded at runtime via P/Invoke (dynamic link keeps us LGPLv3-compliant; do NOT static-link or modify).
-       See THIRD-PARTY-NOTICES.md for attribution + source pointer. -->
+       Loaded at runtime via P/Invoke. -->
   <ItemGroup>
     <Content Include="..\lib\win-x64\WinDivert.dll"
              Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\WinDivert.dll"
@@ -47,7 +48,7 @@
   <!-- NuGet packaging metadata. Run `dotnet pack -c Release` to produce a .nupkg.        -->
   <PropertyGroup>
     <PackageId>NATTunnel</PackageId>
-    <Version>0.10.0-test18</Version>
+    <Version>0.10.0</Version>
     <Authors>NATTunnel contributors</Authors>
     <Description>Embeddable peer-to-peer mesh networking library with NAT hole-punching, Noise XX end-to-end encryption, and userspace relay forwarding. Designed for games and other apps that need direct UDP peer connectivity without each peer running a server.</Description>
     <PackageTags>mesh;networking;nat-traversal;hole-punching;p2p;udp;noise;game-networking</PackageTags>
@@ -67,19 +68,15 @@
 
   <!-- Unprivileged ICMP support for embedded consumers.
        Unlike a `tools/` folder (which NuGet never copies to the consumer's bin/), contentFiles with
-       PackageCopyToOutput lands these NEXT TO THE CONSUMING APP, so the host can find and launch the installer
-       itself instead of downloading one. Running it still requires elevation and is the integrator's choice:
+       PackageCopyToOutput lands these next to the consuming app, so the host can find and launch the installer
+       itself instead of downloading one. Running it still requires elevation and is the integrator's choice as
        it installs a kernel-driver service and opens packet capture to all local users. -->
-  <!-- Uses the PUBLISH output: that's the single-file, self-contained, trimmed build (~11 MB). The plain build
-       output is framework-dependent and scatters DLLs, which would land in the consumer's bin/.
-       Build it with: dotnet publish tools/IcmpServiceInstaller -c Release   (before `dotnet pack`) -->
+  <!-- Uses the PUBLISH output. Build it with: dotnet publish tools/IcmpServiceInstaller -c Release   (before `dotnet pack`) -->
   <ItemGroup Condition="Exists('..\tools\IcmpServiceInstaller\bin\Release\net9.0\win-x64\publish\nattunnel-icmp-service.exe')">
     <Content Include="..\tools\IcmpServiceInstaller\bin\Release\net9.0\win-x64\publish\nattunnel-icmp-service.exe"
              Pack="true" PackagePath="contentFiles\any\any\nattunnel-icmp\"
              PackageCopyToOutput="true" CopyToOutputDirectory="PreserveNewest"
              Link="nattunnel-icmp\nattunnel-icmp-service.exe" />
-    <!-- WinDivert.dll/.sys are packed by the Content items further up; they carry both the build-output copy
-         and the contentFiles PackagePath, since MSBuild would drop a duplicate Include here. -->
   </ItemGroup>
 
 </Project>
