@@ -5,6 +5,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
 using Avalonia.Threading;
+using NATTunnel;
 using NATTunnelGUI.Updater;
 
 namespace NATTunnelGUI;
@@ -126,7 +127,7 @@ public partial class UpdateWindow : Window
         using var client = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(5) };
         try
         {
-            var resp = await client.PostAsync("http://localhost:51889/update", null);
+            var resp = await client.PostAsync($"{ControlPort.BaseUrl}/update", null);
             if (resp.StatusCode != System.Net.HttpStatusCode.Accepted)
             {
                 ApplyHint.Text = $"Daemon refused the update ({(int)resp.StatusCode}).";
@@ -208,7 +209,7 @@ public partial class UpdateWindow : Window
     {
         try
         {
-            string json = await client.GetStringAsync("http://localhost:51889/status");
+            string json = await client.GetStringAsync($"{ControlPort.BaseUrl}/status");
             using var doc = System.Text.Json.JsonDocument.Parse(json);
             return doc.RootElement.TryGetProperty("daemonVersion", out var v) ? v.GetString() : null;
         }

@@ -16,8 +16,8 @@ namespace NATTunnelGUI;
 public partial class FirewallWindow : Window
 {
     private const int PollIntervalMs = 1000;
-    private const string StatusUrl = "http://localhost:51889/status";
-    private const string BlocksUrl = "http://localhost:51889/blocks";
+    private static string StatusUrl => $"{ControlPort.BaseUrl}/status";
+    private static string BlocksUrl => $"{ControlPort.BaseUrl}/blocks";
 
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(2) };
     private readonly DispatcherTimer pollTimer;

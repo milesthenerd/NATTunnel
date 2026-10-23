@@ -80,13 +80,11 @@ public partial class App : Application
         try
         {
             using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(500) };
-            using var resp = http.GetAsync("http://localhost:51889/status").GetAwaiter().GetResult();
+            using var resp = http.GetAsync($"{ControlPort.BaseUrl}/status").GetAwaiter().GetResult();
             if (!resp.IsSuccessStatusCode) return false;
 
-            // A 200 is NOT enough. Port 51889 is hardcoded, so any unrelated local service answering there
-            // used to be mistaken for our own engine: we'd skip starting the engine entirely and then poll
-            // that stranger forever, presenting an empty log panel and "engine isn't responding". Require the
-            // service marker from MeshState so we only ever adopt a real NATTunnel endpoint.
+            // A 200 is not enough: an unrelated service on the port would be adopted as our engine. Require
+            // the MeshState service marker.
             string body = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
             using var doc = System.Text.Json.JsonDocument.Parse(body);
             return doc.RootElement.TryGetProperty("service", out var svc) &&

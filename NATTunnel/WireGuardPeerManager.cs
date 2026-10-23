@@ -15,7 +15,7 @@ internal class WireGuardPeerManager
     private readonly int basePort;
     private readonly IPAddress baseAddress;
     private int nextPeerId = 2;  // Start at 2 since server is 10.5.0.1
-    private int nextProxyPort = 51822; // Start allocating unique ports from 51822 (51821 is reserved for inbound forwarder)
+    private int nextProxyPort = 51822; // Start allocating unique ports from 51822
     private readonly HashSet<int> allocatedPorts = new(); // Track allocated ports
     private readonly HashSet<int> allocatedPeerIds = new(); // Track allocated peer IDs for IP reuse
 
@@ -30,14 +30,9 @@ internal class WireGuardPeerManager
     {
         lock (configLock)
         {
-            // Skip port 51821 as it's reserved for the inbound forwarder
-            if (nextProxyPort == 51821)
-            {
-                nextProxyPort = 51822;
-            }
-
-            // Find next available port
-            while (allocatedPorts.Contains(nextProxyPort) || nextProxyPort == 51821)
+            // Find next available port. Skip the WireGuard listen port (it floats above 51820 when that is busy,
+            // landing in this range) and anything another app already holds
+            while (allocatedPorts.Contains(nextProxyPort) || nextProxyPort == basePort || !IsLoopbackUdpPortFree(nextProxyPort))
             {
                 nextProxyPort++;
             }
@@ -45,6 +40,20 @@ internal class WireGuardPeerManager
             allocatedPorts.Add(port);
             nextProxyPort++;
             return port;
+        }
+    }
+
+    /// <summary>Bind probe on the exact address the per-peer listener uses.</summary>
+    private static bool IsLoopbackUdpPortFree(int port)
+    {
+        try
+        {
+            using var probe = new System.Net.Sockets.UdpClient(new IPEndPoint(IPAddress.Loopback, port));
+            return true;
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return false;
         }
     }
 

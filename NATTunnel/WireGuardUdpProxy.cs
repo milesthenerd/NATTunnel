@@ -29,7 +29,7 @@ internal class WireGuardUdpProxy : IDisposable
     // Callback to notify when a peer is active
     public Action<IPAddress> OnPeerActivity { get; set; }
 
-    // Shared listener on 51821 for WireGuard outbound packets (used for all peers)
+    // Shared loopback socket (OS-assigned port) used as the inbound forwarder for non-WG traffic
     private readonly UdpClient wireguardListener;
     private readonly CancellationTokenSource cancellation;
     private readonly Task listenTask;
@@ -56,16 +56,16 @@ internal class WireGuardUdpProxy : IDisposable
         this.peerLastActivity = new Dictionary<IPAddress, DateTime>();
         this.cancellation = new CancellationTokenSource();
 
-        // Create inbound forwarder on port 51821 (for forwarding FROM tunnel TO WireGuard)
-        // Per-peer outbound listeners will be created on 51822, 51823, etc.
+        // Create inbound forwarder (for forwarding FROM tunnel TO WireGuard) on an OS-assigned loopback port.
+        // Per-peer outbound listeners are allocated by WireGuardPeerManager (51822 and up, skipping busy ports).
         try
         {
-            wireguardListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, 51821));
+            wireguardListener = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0));
         }
         catch (SocketException ex)
         {
             throw new InvalidOperationException(
-                $"Cannot bind WireGuard proxy port 51821/UDP, another instance may already be running. ({ex.Message})", ex);
+                $"Cannot bind WireGuard proxy inbound forwarder on loopback. ({ex.Message})", ex);
         }
         wireguardListener.Client.ReceiveBufferSize = 128000;
         // Same poisoning risk as the per-peer listeners: this socket also sends to the WireGuard listen port, so a
@@ -318,7 +318,7 @@ internal class WireGuardUdpProxy : IDisposable
                 return;
             }
 
-            // Non-WG traffic: unchanged best-effort path via the shared inbound forwarder on port 51821.
+            // Non-WG traffic: unchanged best-effort path via the shared inbound forwarder.
             lock (inboundForwarderLock)
             {
                 if (inboundForwarder != null)

@@ -113,15 +113,15 @@ public partial class MainWindow : Window
     {
         try
         {
-            string json = await httpClient.GetStringAsync("http://localhost:51889/status");
+            string json = await httpClient.GetStringAsync($"{ControlPort.BaseUrl}/status");
             var state = JsonSerializer.Deserialize<MeshState>(json);
             if (state == null) return;
 
-            // 51889 is hardcoded, so confirm this is actually our engine and not another local service that
-            // happens to answer with JSON. Throwing routes it through the same diagnostics as a dead engine.
+            // Confirm this is our engine, not another local service answering with JSON. Throwing routes it
+            // through the same diagnostics as a dead engine.
             if (state.Service != "nattunnel")
                 throw new InvalidOperationException(
-                    $"Port 51889 is served by something that is not NATTunnel (service=\"{state.Service ?? "<absent>"}\").");
+                    $"Port {ControlPort.Current} is served by something that is not NATTunnel (service=\"{state.Service ?? "<absent>"}\").");
 
             // Daemon has moved past its idle placeholder once it reports anything besides Disconnected.
             if (state.ConnectionState != "Disconnected") waitingForRealState = false;
@@ -152,7 +152,7 @@ public partial class MainWindow : Window
                         // overwrites until the daemon reports a real non-Disconnected state.
                         autoConnectTried = true;
                         waitingForRealState = true;
-                        _ = httpClient.PostAsync("http://localhost:51889/connect", null);
+                        _ = httpClient.PostAsync($"{ControlPort.BaseUrl}/connect", null);
                     }
                     if (waitingForRealState)
                     {
@@ -172,6 +172,15 @@ public partial class MainWindow : Window
                         isConnected = false;
                         isConnecting = false;
                     }
+                    break;
+                case "Stopped":
+                    // Engine exited; LastError below carries the reason.
+                    waitingForRealState = false;
+                    StatusDot.Fill = (IBrush)this.FindResource("StatusRedBrush")!;
+                    StatusText.Text = "Engine stopped";
+                    ConnectButton.IsEnabled = false;
+                    isConnected = false;
+                    isConnecting = false;
                     break;
                 case "Disconnecting":
                     StatusDot.Fill = (IBrush)this.FindResource("StatusYellowBrush")!;
@@ -266,6 +275,7 @@ public partial class MainWindow : Window
                 {
                     "VersionMismatch" => "NATTunnel Update Required",
                     "AuthFailure" => "Authentication Failed",
+                    "EngineStopped" => "NATTunnel Engine Stopped",
                     _ => "NATTunnel Error"
                 };
                 string body = state.LastError;
@@ -276,7 +286,7 @@ public partial class MainWindow : Window
                 _ = DialogHelpers.ShowInfoAsync(this, title, body);
             }
         }
-        // Capture WHY the poll failed — a bare catch made a dead engine, a port-51889 conflict, a blocked
+        // Capture WHY the poll failed: a bare catch made a dead engine, a control port conflict, a blocked
         // loopback and a non-JSON response from another process all produce the same useless dialog.
         catch (Exception pollEx)
         {
@@ -310,7 +320,7 @@ public partial class MainWindow : Window
                 {
                     // No "run as administrator" advice: the manifest is requireAdministrator, so if this is
                     // running it's already elevated.
-                    body = "The NATTunnel engine isn't running — nothing is listening on port 51889.\n\n" +
+                    body = $"The NATTunnel engine isn't running. Nothing is listening on port {ControlPort.Current}.\n\n" +
                            "It most likely stopped during startup. Check the log panel for the last message " +
                            "before it stopped, then:\n\n" +
                            "  • Make sure no other NATTunnel instance is still running (check Task Manager)\n" +
@@ -319,7 +329,7 @@ public partial class MainWindow : Window
                 }
                 else
                 {
-                    body = "The NATTunnel engine isn't responding on port 51889, but something is listening " +
+                    body = $"The NATTunnel engine isn't responding on port {ControlPort.Current}, but something is listening " +
                            "there — another application may be using the port, or security software may be " +
                            "blocking local connections.\n\n" +
                            "Try closing and reopening the app; if it persists, reinstall NATTunnel.";
@@ -339,7 +349,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            string json = await httpClient.GetStringAsync($"http://localhost:51889/logs?since={latestLogSeq}");
+            string json = await httpClient.GetStringAsync($"{ControlPort.BaseUrl}/logs?since={latestLogSeq}");
             using var doc = JsonDocument.Parse(json);
             long newLatest = doc.RootElement.GetProperty("latestSeq").GetInt64();
 
@@ -373,7 +383,7 @@ public partial class MainWindow : Window
         try
         {
             string endpoint = (isConnected || isConnecting) ? "/disconnect" : "/connect";
-            await httpClient.PostAsync($"http://localhost:51889{endpoint}", null);
+            await httpClient.PostAsync($"{ControlPort.BaseUrl}{endpoint}", null);
         }
         catch (Exception ex)
         {
@@ -398,13 +408,13 @@ public partial class MainWindow : Window
         StopRelayingButton.IsEnabled = false;
         try
         {
-            string getJson = await httpClient.GetStringAsync("http://localhost:51889/config");
+            string getJson = await httpClient.GetStringAsync($"{ControlPort.BaseUrl}/config");
             var snap = JsonSerializer.Deserialize<NATTunnel.ConfigSnapshot>(getJson);
             if (snap == null) return;
             snap.AllowRelayThrough = false;
             string payload = JsonSerializer.Serialize(snap);
             using var content = new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json");
-            await httpClient.PostAsync("http://localhost:51889/config", content);
+            await httpClient.PostAsync($"{ControlPort.BaseUrl}/config", content);
         }
         catch (Exception ex)
         {
@@ -426,7 +436,7 @@ public partial class MainWindow : Window
         // Linux: the daemon is a systemd service the GUI only attaches to — stop just DISCONNECTS from the
         // mesh (leaves systemd to keep the daemon alive) and closes the GUI; reopening reconnects.
         string endpoint = OperatingSystem.IsLinux() ? "/disconnect" : "/shutdown";
-        try { await httpClient.PostAsync($"http://localhost:51889{endpoint}", null); }
+        try { await httpClient.PostAsync($"{ControlPort.BaseUrl}{endpoint}", null); }
         catch { }
         Close();
     }
@@ -447,7 +457,7 @@ public partial class MainWindow : Window
         updateTimer.Stop();
         // Windows: GUI is the daemon, shut it down. Linux: systemd owns it, just disconnect.
         string endpoint = OperatingSystem.IsLinux() ? "/disconnect" : "/shutdown";
-        try { httpClient.PostAsync($"http://localhost:51889{endpoint}", null).Wait(500); } catch { }
+        try { httpClient.PostAsync($"{ControlPort.BaseUrl}{endpoint}", null).Wait(500); } catch { }
         httpClient.Dispose();
         updateChecker.Dispose();
         base.OnClosing(e);

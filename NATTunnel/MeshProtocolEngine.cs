@@ -32,6 +32,11 @@ internal class MeshProtocolEngine
 
     /// <summary>Mesh-control UDP socket. Lifetime: created once in Run(), reused across reconnects.</summary>
     private UdpClient meshControlClient;
+    /// <summary>
+    /// Control port each peer actually listens on, learned from the source port of its packets (we send from
+    /// our control socket, so source port = listen port)
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<IPAddress, int> peerControlPorts = new();
     private UdpClient udpClient;
     private TcpClient tcpClient;
     /// <summary>
@@ -999,18 +1004,28 @@ internal class MeshProtocolEngine
         int meshControlPort = context.Options.MeshControlPort;
         try
         {
-            meshControlClient = new UdpClient(meshControlPort);
+            try
+            {
+                meshControlClient = new UdpClient(meshControlPort);
+            }
+            catch (SocketException first)
+            {
+                // Peers learn our real port from our pings (see peerControlPorts). Peers on older versions
+                // always send to 51888, so they can reach us only by replying.
+                meshControlClient = new UdpClient(0);
+                int fallback = ((IPEndPoint)meshControlClient.Client.LocalEndPoint).Port;
+                context.Log(LogLevel.Warning,
+                    $"[Mesh] Mesh control port {meshControlPort}/UDP unavailable ({first.SocketErrorCode}); using {fallback}. " +
+                    "Peers on older NATTunnel versions may not reach this node.");
+                meshControlPort = fallback;
+            }
             context.Log(LogLevel.Info, $"[Mesh] Mesh control listening on UDP port {meshControlPort}");
         }
         catch (SocketException ex)
         {
-            // Port already held: almost always a PREVIOUS/zombie instance of this app still running (it also
-            // leaves the WireGuard service half-torn-down, hence the "service already deleted" cleanup line). Surface
-            // this through the NORMAL log + lastError so the GUI SHOWS it, instead of a silent stderr write + return
-            // that reads as a mystery "connected then immediately exited" (WG inits fine, then Run() bails here
-            // before any mesh activity). Set ConfigError so the GUI reflects a real, actionable state.
-            string msg = $"Mesh control port {meshControlPort}/UDP is already in use, another instance of this app " +
-                         $"is likely still running. Close it (or kill the leftover process) and reconnect. ({ex.SocketErrorCode})";
+            // Surface through the normal log + lastError so the GUI shows it, instead of a silent return
+            // that reads as "connected then immediately exited".
+            string msg = $"Could not bind a mesh control UDP port. ({ex.SocketErrorCode})";
             context.Log(LogLevel.Error, $"[Mesh] {msg}");
             lastError = msg;
             lastErrorKind = "PortInUse";
@@ -2837,6 +2852,7 @@ internal class MeshProtocolEngine
                 try
                 {
                     var result = await meshControlClient.ReceiveAsync();
+                    peerControlPorts[result.RemoteEndPoint.Address] = result.RemoteEndPoint.Port;
                     ProcessMeshControlPacket(result.Buffer, result.RemoteEndPoint);
                 }
                 catch (ObjectDisposedException) { break; }
@@ -6109,6 +6125,9 @@ internal class MeshProtocolEngine
         // daemon's WG-routed UDP send.
         if (host != null && host.SendMeshControl(ep.Address, data, length)) return;
 
+        if (ep.Port == MeshControlPort && peerControlPorts.TryGetValue(ep.Address, out int learned) && learned != ep.Port)
+            ep = new IPEndPoint(ep.Address, learned);
+
         lock (meshControlSendLock)
         {
             meshControlClient.Send(data, length, ep);
@@ -6131,6 +6150,7 @@ internal class MeshProtocolEngine
 
         // Remove from WireGuard
         var deadIPAddr = IPAddress.Parse(deadMeshIP);
+        peerControlPorts.TryRemove(deadIPAddr, out _);
         var wgPeer = host.GetPeer(deadIPAddr);
         if (wgPeer != null)
         {

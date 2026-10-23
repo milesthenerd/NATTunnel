@@ -145,26 +145,19 @@ public static class Program
         UdpClient udpClient = null;
         WireGuardTunnel wireguardTunnel = null;
         WireGuardUdpProxy udpProxy = null;
-        // FAIL FAST IF THE CONTROL PORT IS TAKEN — do not continue into driver setup.
-        //
-        // The listener below runs fire-and-forget, so a bind failure used to just log while startup carried on
-        // to create the WireGuard adapter and start Npcap capture. That turned one stuck instance into a
-        // cascade: a zombie holds 51889, the user relaunches, the new instance can't bind but still grabs the
-        // drivers, then wedges on ITS shutdown too — one more zombie per retry, all unkillable. Bind it here,
-        // synchronously, and refuse to start if we can't own it.
+        // Bind synchronously before driver setup. If another instance (possibly a zombie) is running, refuse:
+        // a second engine would grab the WireGuard adapter and capture driver again and wedge on shutdown.
+        // An unrelated app holding 51889 just moves us to another port (see ControlPort).
         HttpListener controlListener;
         try
         {
-            controlListener = new HttpListener();
-            controlListener.Prefixes.Add("http://localhost:51889/");
-            controlListener.Start();
+            controlListener = ControlPort.Bind();
         }
         catch (Exception ex)
         {
-            string msg = "Cannot bind control port 51889 — another NATTunnel instance is already running " +
-                         "(or a previous one is stuck holding the port). Not starting: continuing would claim " +
+            string msg = $"Cannot bind control port: {ex.Message} Not starting: continuing would claim " +
                          "the WireGuard adapter and capture driver a second time.";
-            Log($"[Mesh] {msg} ({ex.Message})");
+            Log($"[Mesh] {msg} ({ex.InnerException?.Message})");
             try
             {
                 System.IO.File.AppendAllText(
@@ -183,7 +176,7 @@ public static class Program
                 try
                 {
                     var httpListener = controlListener;
-                    Log("[Mesh] HTTP status endpoint listening on http://localhost:51889/status");
+                    Log($"[Mesh] HTTP status endpoint listening on {ControlPort.BaseUrl}/status");
 
                     while (true)
                     {
@@ -523,20 +516,15 @@ public static class Program
                 }
                 catch (Exception ex)
                 {
-                    // This message is CORRECT but was effectively invisible: Log() writes to the in-memory
-                    // buffer that is only readable over /logs — on the very port that just failed to bind. A
-                    // user hit exactly this (51889 already in use) and saw only the GUI's "engine isn't
-                    // responding" dialog with an empty log panel, so there was nothing to diagnose from.
-                    // Also persist to a file next to the executable, which is the one place they can retrieve.
-                    Log($"[Mesh] Failed to start HTTP status endpoint on port 51889 — another instance may already be running. ({ex.Message})");
+                    // The GUI loses /logs when this dies, so also persist next to the executable.
+                    Log($"[Mesh] Control endpoint stopped serving. ({ex.Message})");
                     try
                     {
                         System.IO.File.AppendAllText(
                             System.IO.Path.Combine(AppContext.BaseDirectory, "nattunnel-startup-error.log"),
-                            $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Failed to bind control/status endpoint on port 51889 " +
-                            $"(another instance, or another application, is already using it).{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
+                            $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Control endpoint stopped serving.{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
                     }
-                    catch { /* diagnostic only — never mask the original failure */ }
+                    catch { }
                 }
             });
 
@@ -608,7 +596,24 @@ public static class Program
         }
         catch (Exception ex)
         {
-            Log($"[Mesh] Error: {ex.Message}");
+            Log(LogLevel.Error, $"[Mesh] Error: {ex}");
+            try
+            {
+                System.IO.File.AppendAllText(
+                    System.IO.Path.Combine(AppContext.BaseDirectory, "nattunnel-startup-error.log"),
+                    $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] Engine stopped:{Environment.NewLine}{ex}{Environment.NewLine}{Environment.NewLine}");
+            }
+            catch { }
+            // Control listener outlives the engine, so report the failure through /status
+            // instead of the idle placeholder the GUI waits on forever.
+            string error = ex.Message;
+            meshStateProvider = () => new MeshState
+            {
+                ConnectionState = "Stopped",
+                NetworkID = TunnelOptions.NetworkID,
+                LastError = $"The NATTunnel engine stopped: {error}",
+                LastErrorKind = "EngineStopped",
+            };
         }
         finally
         {

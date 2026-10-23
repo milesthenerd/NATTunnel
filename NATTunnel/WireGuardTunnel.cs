@@ -184,7 +184,7 @@ namespace NATTunnel
                 // Initialize peer manager
                 Program.Log(LogLevel.Debug, "Initializing peer manager...");
                 var baseAddress = IPAddress.Parse("10.5.0.0");
-                peerManager = new WireGuardPeerManager(configFilePath, baseAddress);
+                peerManager = new WireGuardPeerManager(configFilePath, baseAddress, WireGuardListenPort);
 
                 // Initialize the tunnel (skip in debug mode or if already running as service)
                 if (!debugMode && !isRunningAsService)
@@ -509,9 +509,8 @@ namespace NATTunnel
             const int maxAttempts = 32;
             for (int port = DefaultWireGuardPort; port < DefaultWireGuardPort + maxAttempts; port++)
             {
-                // 51821 and 51822+ belong to the UDP proxy (inbound forwarder + per-peer listeners); never
-                // hand WireGuard a port the proxy is going to want.
-                if (port == 51821 || port == 51822) continue;
+                // 51822 is the first per-peer proxy port, so we skip it to avoid a conflict with the proxy
+                if (port == 51822) continue;
 
                 string conflict = DescribePortConflict(port);
                 if (conflict == null)
@@ -667,7 +666,7 @@ namespace NATTunnel
                 config.AppendLine();
 
                 // [Peer] sections
-                // Both server and client use localhost proxy endpoint (127.0.0.1:51821)
+                // Both server and client use per-peer localhost proxy endpoints (127.0.0.1:51822 and up)
                 // The proxy forwards to the real NAT-traversed endpoints
                 bool useProxy = true; // Always use proxy endpoint
                 foreach (var peer in peerManager.GetAllPeers())

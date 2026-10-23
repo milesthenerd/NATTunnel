@@ -53,7 +53,7 @@ internal class WireGuardPeer
         PrivateAddress = privateAddress;
         ConnectionId = connectionId;
         IsPersistent = isPersistent;
-        ProxyPort = proxyPort > 0 ? proxyPort : 51822; // Default to 51822 (51821 is reserved for inbound forwarder)
+        ProxyPort = proxyPort > 0 ? proxyPort : 51822; // Default to 51822, the first per-peer proxy port
         // Format allowed IPs based on private address
         AllowedIPs = $"{privateAddress}/32";
     }

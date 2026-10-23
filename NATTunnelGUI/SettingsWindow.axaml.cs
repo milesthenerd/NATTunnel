@@ -11,7 +11,7 @@ namespace NATTunnelGUI;
 
 public partial class SettingsWindow : Window
 {
-    private const string ConfigUrl = "http://localhost:51889/config";
+    private static string ConfigUrl => $"{ControlPort.BaseUrl}/config";
 
     private readonly HttpClient http = new() { Timeout = TimeSpan.FromSeconds(2) };
     private string? originalMediationEndpoint;
@@ -181,9 +181,9 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            await http.PostAsync("http://localhost:51889/disconnect", null);
+            await http.PostAsync($"{ControlPort.BaseUrl}/disconnect", null);
             await Task.Delay(500);
-            await http.PostAsync("http://localhost:51889/connect", null);
+            await http.PostAsync($"{ControlPort.BaseUrl}/connect", null);
         }
         catch
         {
